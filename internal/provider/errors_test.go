@@ -65,7 +65,7 @@ func TestKindDefaultRetryable(t *testing.T) {
 // classify as KindServerError and be retried against every provider in the
 // Phase 6 fallback chain, none of which can ever accept it.
 func TestNewHTTPErrorDoesNotRetryClientErrors(t *testing.T) {
-	err := NewHTTPError("groq", "llama-3.3-70b", 400, "messages: field required")
+	err := NewHTTPError("groq", "openai/gpt-oss-120b", 400, "messages: field required")
 
 	if err.Kind != KindInvalidRequest {
 		t.Errorf("Kind = %q, want %q", err.Kind, KindInvalidRequest)
@@ -147,7 +147,7 @@ func TestNewTransportError(t *testing.T) {
 // The resilience layers in Phases 6 and 7 recover the typed error through
 // however many layers of fmt.Errorf wrapping sit between them and the adapter.
 func TestErrorUnwrapping(t *testing.T) {
-	base := NewTransportError("groq", "llama-3.3-70b", context.DeadlineExceeded)
+	base := NewTransportError("groq", "openai/gpt-oss-120b", context.DeadlineExceeded)
 	wrapped := fmt.Errorf("resolving fallback chain: %w", fmt.Errorf("calling groq: %w", base))
 
 	var pe *Error

@@ -1,0 +1,98 @@
+# SwitchYard provider registry.
+#
+# `name` is the instance — free-form, and what appears in metrics labels,
+# response headers, and errors. `type` selects the Go adapter. Keeping them
+# separate is what lets a free stand-in occupy a slot during development and be
+# swapped for the real provider by editing this file alone.
+#
+# Prices are US dollars per 1,000,000 tokens. They are converted to integer
+# micro-dollars once at load; all accumulation downstream is integer arithmetic.
+#
+# VERIFY BEFORE RELYING ON THESE NUMBERS. Provider pricing changes without
+# notice, and Phase 4's cost accounting is only as accurate as this file.
+
+providers:
+  # --- OpenAI slot -----------------------------------------------------------
+  # Groq speaks OpenAI's dialect, so it reuses the same adapter unchanged.
+  # Swapping in real OpenAI means enabling the entry below, not writing code.
+  - name: groq
+    type: openai-compatible
+    enabled: true
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+    timeout: 30s
+    default_max_tokens: 1024
+    ping_model: openai/gpt-oss-20b
+    models:
+      - name: openai/gpt-oss-120b
+        input_per_1m_usd: 0.15
+        output_per_1m_usd: 0.60
+      - name: openai/gpt-oss-20b
+        input_per_1m_usd: 0.075
+        output_per_1m_usd: 0.30
+
+  - name: openai
+    type: openai-compatible
+    enabled: false # no paid key yet; Groq occupies this slot
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    timeout: 30s
+    default_max_tokens: 1024
+    ping_model: gpt-4o-mini
+    models:
+      - name: gpt-4o
+        input_per_1m_usd: 2.50
+        output_per_1m_usd: 10.00
+      - name: gpt-4o-mini
+        input_per_1m_usd: 0.15
+        output_per_1m_usd: 0.60
+
+  # --- Anthropic slot --------------------------------------------------------
+  # Gemini has its own adapter. It differs from the OpenAI dialect in the same
+  # places Anthropic does, which is the point of using it here.
+  - name: gemini
+    type: gemini
+    enabled: true
+    base_url: https://generativelanguage.googleapis.com/v1beta
+    api_key_env: GEMINI_API_KEY
+    timeout: 30s
+    default_max_tokens: 1024
+    ping_model: gemini-3.5-flash-lite
+    models:
+      - name: gemini-3.5-flash
+        input_per_1m_usd: 1.50
+        output_per_1m_usd: 9.00
+      - name: gemini-3.5-flash-lite
+        input_per_1m_usd: 0.30
+        output_per_1m_usd: 2.50
+
+  - name: anthropic
+    type: anthropic
+    enabled: false # no paid key yet; Gemini occupies this slot
+    base_url: https://api.anthropic.com/v1
+    api_key_env: ANTHROPIC_API_KEY
+    timeout: 30s
+    default_max_tokens: 1024
+    ping_model: claude-haiku-4-5
+    models:
+      - name: claude-sonnet-4-5
+        input_per_1m_usd: 3.00
+        output_per_1m_usd: 15.00
+      - name: claude-haiku-4-5
+        input_per_1m_usd: 1.00
+        output_per_1m_usd: 5.00
+
+  # --- Local fallback --------------------------------------------------------
+  # Runs on the machine, costs nothing, needs no credential. Last link in the
+  # Phase 6 fallback chain.
+  - name: ollama
+    type: ollama
+    enabled: true
+    base_url: http://localhost:11434
+    timeout: 120s # local models on CPU are slow; this is not a paid-API budget
+    default_max_tokens: 1024
+    ping_model: llama3.2:3b
+    models:
+      - name: llama3.2:3b
+        input_per_1m_usd: 0.0
+        output_per_1m_usd: 0.0

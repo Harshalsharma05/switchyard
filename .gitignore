@@ -1,0 +1,56 @@
+# --- Secrets -----------------------------------------------------------------
+# Provider credentials live in the environment, never in the repo. configs/
+# names the variables; this file keeps their values out.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Go build artefacts ------------------------------------------------------
+# The gateway binary, however it gets named.
+/gateway
+/gateway.exe
+/switchyard
+/switchyard.exe
+/bin/
+/dist/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test and profiling output
+*.test
+*.out
+coverage.*
+*.prof
+*.pprof
+__debug_bin*
+
+# Go workspace files are per-developer, not per-project.
+go.work
+go.work.sum
+
+# --- Local runtime state -----------------------------------------------------
+# Redis dumps and container volumes created by docker compose.
+/data/
+*.rdb
+*.aof
+
+# Load test output that is regenerated rather than reviewed. Committed results
+# belong in docs/, per the rule that every published number comes from a
+# rerunnable script.
+/scripts/results/
+k6-summary.json
+
+# --- Editors and OS ----------------------------------------------------------
+.vscode/
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini

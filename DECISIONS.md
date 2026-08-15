@@ -39,3 +39,27 @@ OpenAI/Anthropic slots backed by Groq/Gemini during dev due to cost; interface n
 Rejected using an OpenAI-compatible free service for *both* slots. Gemini differs from OpenAI in the same places Anthropic does — top-level system instruction, different usage and finish-reason vocabulary — so building it proves the adapters are genuinely decoupled rather than all secretly OpenAI-shaped.
 
 Consequence: `providers.yaml` separates instance `name` (`groq`, `openai`) from adapter `type` (`openai-compatible`). No provider name is hardcoded in Go.
+
+### YAML parser: `goccy/go-yaml`
+
+Chosen over `yaml.v3` (archived upstream, no further fixes) and `sigs.k8s.io/yaml` (pulls in `yaml.v2` transitively anyway). `goccy` reports errors with line, column, and a source excerpt, which is what makes "malformed config prevents startup with a clear message" actually true rather than a bare `yaml: line 6: ...`.
+
+### `enabled` flag on each provider entry
+
+Added to `providers.yaml`, not in the plan. Without it, a provider entry with no key set (OpenAI, Anthropic — no paid key yet) either hard-fails startup or has to be deleted, losing the documentation of intent. A disabled entry is still validated and its model names still reserved, so enabling it later can't introduce a collision that was invisible while it was off.
+
+### Cost stored as integer micro-dollars, converted once at load
+
+YAML holds readable decimals (`0.59`); `internal/config` converts to `int64` micro-dollars exactly once, at load. Phase 4 accumulates over thousands of requests, and repeated float addition drifts — the float exists for one multiplication and never again.
+
+### Upstream auth failure maps to 502, not 401
+
+A rejected upstream credential is reported to the caller as 502, not 401. A 401 says *their* key was rejected, which they can't act on and would waste time rotating a key that was never the problem. From the client's seat, a bad upstream credential is a broken gateway.
+
+### Per-provider timeout applied via context, not `http.Client.Timeout`
+
+Each adapter wraps the caller's `ctx` with `context.WithTimeout(ctx, cfg.Timeout)`, so whichever deadline is sooner wins automatically. `Client.Timeout` would silently override a shorter caller deadline, which Phase 6's "never retry past the caller's deadline" rule depends on.
+
+### Gateway overhead measurement: known limitation on Windows dev machine
+
+`X-Switchyard-Overhead-Ms` = handler time minus `provider.Response.Latency` (the adapter's own measured round trip), so adapter translation work correctly counts as overhead. Verified live against real Groq and Gemini calls. However, Go's monotonic clock on this Windows dev machine has ~529µs granularity — sub-millisecond overhead often reads as `0.000`. Not a code bug, but it means the sub-10ms number can't be credibly measured on Windows; Phase 11's load test must run inside Docker (Linux), where clock resolution is nanosecond-grade.

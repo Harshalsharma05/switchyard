@@ -16,6 +16,12 @@ type Config struct {
 	// adapter type must have different names.
 	Name string
 
+	// Type selects which adapter implementation serves this instance. Separating
+	// it from Name is what allows a stand-in to occupy a slot: "groq" and
+	// "openai" are different instances of the same Type, so swapping one for the
+	// other is a config edit rather than a code change.
+	Type string
+
 	// BaseURL is the API root, without a trailing slash requirement; adapters
 	// normalize it. Making this configurable is what lets Groq stand in for
 	// OpenAI with no code change.

@@ -18,7 +18,7 @@ func testConfig(baseURL string) Config {
 		BaseURL:          baseURL,
 		APIKey:           "test-key",
 		Timeout:          2 * time.Second,
-		Models:           []string{"llama-3.3-70b-versatile", "llama-3.1-8b-instant"},
+		Models:           []string{"openai/gpt-oss-120b", "openai/gpt-oss-20b"},
 		DefaultMaxTokens: 1024,
 	}
 }
@@ -50,7 +50,7 @@ func TestCompleteSuccess(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, `{
-			"model": "llama-3.3-70b-versatile",
+			"model": "openai/gpt-oss-120b",
 			"choices": [{"message": {"role": "assistant", "content": "hi there"}, "finish_reason": "stop"}],
 			"usage": {"prompt_tokens": 11, "completion_tokens": 3}
 		}`)
@@ -58,7 +58,7 @@ func TestCompleteSuccess(t *testing.T) {
 
 	temp := float32(0)
 	resp, err := p.Complete(context.Background(), Request{
-		Model:       "llama-3.3-70b-versatile",
+		Model:       "openai/gpt-oss-120b",
 		Messages:    []Message{{Role: RoleSystem, Content: "be terse"}, {Role: RoleUser, Content: "hello"}},
 		Temperature: &temp,
 	})
@@ -106,7 +106,7 @@ func TestCompleteSubstitutesDefaultMaxTokens(t *testing.T) {
 	})
 
 	if _, err := p.Complete(context.Background(), Request{
-		Model:    "llama-3.3-70b-versatile",
+		Model:    "openai/gpt-oss-120b",
 		Messages: []Message{{Role: RoleUser, Content: "hello"}},
 	}); err != nil {
 		t.Fatalf("Complete: %v", err)
@@ -185,7 +185,7 @@ func TestClassifyRefinesRetryableFromBody(t *testing.T) {
 			})
 
 			_, err := p.Complete(context.Background(), Request{
-				Model:    "llama-3.3-70b-versatile",
+				Model:    "openai/gpt-oss-120b",
 				Messages: []Message{{Role: RoleUser, Content: "hello"}},
 			})
 
@@ -227,7 +227,7 @@ func TestCompleteTimesOut(t *testing.T) {
 	}
 
 	_, err = p.Complete(context.Background(), Request{
-		Model:    "llama-3.3-70b-versatile",
+		Model:    "openai/gpt-oss-120b",
 		Messages: []Message{{Role: RoleUser, Content: "hello"}},
 	})
 
@@ -264,7 +264,7 @@ func TestCompleteHonoursCallerDeadline(t *testing.T) {
 
 	start := time.Now()
 	if _, err := p.Complete(ctx, Request{
-		Model:    "llama-3.3-70b-versatile",
+		Model:    "openai/gpt-oss-120b",
 		Messages: []Message{{Role: RoleUser, Content: "hello"}},
 	}); err == nil {
 		t.Fatal("Complete succeeded, want a deadline error")
@@ -288,7 +288,7 @@ func TestCompleteRejectsMalformedUpstreamBody(t *testing.T) {
 			})
 
 			_, err := p.Complete(context.Background(), Request{
-				Model:    "llama-3.3-70b-versatile",
+				Model:    "openai/gpt-oss-120b",
 				Messages: []Message{{Role: RoleUser, Content: "hello"}},
 			})
 
@@ -306,7 +306,7 @@ func TestCompleteRejectsMalformedUpstreamBody(t *testing.T) {
 func TestSupportsModel(t *testing.T) {
 	p := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {})
 
-	if !p.SupportsModel("llama-3.1-8b-instant") {
+	if !p.SupportsModel("openai/gpt-oss-20b") {
 		t.Error("configured model reported as unsupported")
 	}
 	if p.SupportsModel("gpt-4o") {
@@ -339,7 +339,7 @@ func TestNewOpenAICompatibleValidation(t *testing.T) {
 func TestStreamNotImplementedYet(t *testing.T) {
 	p := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {})
 
-	_, err := p.Stream(context.Background(), Request{Model: "llama-3.1-8b-instant"})
+	_, err := p.Stream(context.Background(), Request{Model: "openai/gpt-oss-20b"})
 	if !errors.Is(err, ErrStreamingNotImplemented) {
 		t.Errorf("err = %v, want ErrStreamingNotImplemented", err)
 	}
