@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Harshalsharma05/switchyard/internal/auth"
 	"github.com/Harshalsharma05/switchyard/internal/provider"
+	"github.com/Harshalsharma05/switchyard/internal/ratelimit"
 )
 
 // discardLogger keeps test output readable while still exercising every logging
@@ -35,18 +37,119 @@ func (s stubResolver) ForModel(string) (provider.Provider, error) {
 	return s.prov, nil
 }
 
+// DefaultMaxTokensFor is fixed rather than configurable per test: every test
+// that reaches reserveTokens only cares that some positive ceiling exists,
+// not its exact value — the exact value is what ratelimit's own tests cover.
+func (s stubResolver) DefaultMaxTokensFor(string) (int, bool) {
+	return 1024, true
+}
+
+// stubRateLimiter is the fake behind the consumer-defined RateLimiter
+// interface. Its zero value allows every call and returns a nil reservation —
+// which Reconcile treats as a safe no-op by design (see bucket.go) — so a
+// test that is not about rate limiting can ignore this entirely, the same
+// role stubAuthenticator's permissive default team plays for Auth.
+type stubRateLimiter struct {
+	consumeResult *ratelimit.Result
+	consumeErr    error
+	reserveResult *ratelimit.Result
+	reserveErr    error
+}
+
+func (s stubRateLimiter) Consume(context.Context, string, ratelimit.LimitType, int, int, time.Duration) (ratelimit.Result, error) {
+	if s.consumeErr != nil {
+		return ratelimit.Result{}, s.consumeErr
+	}
+	if s.consumeResult != nil {
+		return *s.consumeResult, nil
+	}
+	return ratelimit.Result{Allowed: true, Remaining: 999}, nil
+}
+
+func (s stubRateLimiter) Reserve(context.Context, string, ratelimit.LimitType, int, int, time.Duration) (*ratelimit.Reservation, ratelimit.Result, error) {
+	if s.reserveErr != nil {
+		return nil, ratelimit.Result{}, s.reserveErr
+	}
+	if s.reserveResult != nil {
+		// nil is always safe to return here regardless of Allowed: a denied
+		// reservation has nothing to reconcile, and ratelimit.Reservation's
+		// fields are unexported by design, so this package cannot fabricate a
+		// working one anyway. TestTPMReservationSettlesAgainstRealUsage below
+		// is what verifies real settle-up behavior, against a real Limiter.
+		return nil, *s.reserveResult, nil
+	}
+	return nil, ratelimit.Result{Allowed: true, Remaining: 999}, nil
+}
+
+// stubAuthenticator is the fake behind the consumer-defined Authenticator
+// interface, the same role stubResolver plays for Resolver.
+type stubAuthenticator struct {
+	team *auth.Team
+	err  error
+}
+
+func (s stubAuthenticator) Authenticate(string) (*auth.Team, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.team, nil
+}
+
+// testAPIKey is sent on every request the post() helper makes. Its value is
+// never checked by stubAuthenticator — only that some non-empty bearer token
+// was presented — so tests that are not about auth can ignore auth entirely.
+const testAPIKey = "sk-test-key"
+
+// defaultTestTeam is allowed every model any pre-Phase-3 test resolves
+// against, including ones no stubResolver ever actually serves ("gpt-4o",
+// "nope"). Those are used to prove the team-allowlist check and the
+// provider-registry check are two different failures with two different
+// status codes: the team has to clear the allowlist and fail at resolve
+// instead, the same way a real caller's request would.
+func defaultTestTeam() *auth.Team {
+	return &auth.Team{
+		ID:               "test-team",
+		AllowedProviders: []string{"groq"},
+		AllowedModels:    []string{"openai/gpt-oss-120b", "gpt-4o", "nope", "m"},
+	}
+}
+
 func newTestServer(t *testing.T, resolver Resolver) *httptest.Server {
 	t.Helper()
+	return newTestServerWithAuth(t, resolver, stubAuthenticator{team: defaultTestTeam()})
+}
 
-	srv := httptest.NewServer(NewRouter(resolver, discardLogger(), func() bool { return true }))
+func newTestServerWithAuth(t *testing.T, resolver Resolver, authr Authenticator) *httptest.Server {
+	t.Helper()
+	return newTestServerFull(t, resolver, authr, stubRateLimiter{})
+}
+
+func newTestServerFull(t *testing.T, resolver Resolver, authr Authenticator, limiter RateLimiter) *httptest.Server {
+	t.Helper()
+
+	srv := httptest.NewServer(NewRouter(resolver, authr, limiter, discardLogger(), func() bool { return true }))
 	t.Cleanup(srv.Close)
 	return srv
 }
 
 func post(t *testing.T, srv *httptest.Server, body string) *http.Response {
 	t.Helper()
+	return postWithAuth(t, srv, body, testAPIKey)
+}
 
-	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(body))
+func postWithAuth(t *testing.T, srv *httptest.Server, body, bearerKey string) *http.Response {
+	t.Helper()
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/chat/completions", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if bearerKey != "" {
+		req.Header.Set("Authorization", "Bearer "+bearerKey)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -123,6 +226,84 @@ func TestChatCompletionsUnknownModelIs404(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&body)
 	if !strings.Contains(body.Error.Message, "gpt-4o") {
 		t.Errorf("message = %q, want it to name the model", body.Error.Message)
+	}
+}
+
+func TestAuthMissingHeaderIs401(t *testing.T) {
+	srv := newTestServerWithAuth(t, stubResolver{prov: &provider.Mock{}}, stubAuthenticator{team: defaultTestTeam()})
+
+	resp := postWithAuth(t, srv, `{"model":"m","messages":[{"role":"user","content":"hi"}]}`, "")
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestAuthMalformedHeaderIs401(t *testing.T) {
+	srv := newTestServerWithAuth(t, stubResolver{prov: &provider.Mock{}}, stubAuthenticator{team: defaultTestTeam()})
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/chat/completions",
+		strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Basic dXNlcjpwYXNz") // well-formed, but not a bearer token
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestAuthUnknownKeyIs401(t *testing.T) {
+	srv := newTestServerWithAuth(t, stubResolver{prov: &provider.Mock{}}, stubAuthenticator{err: auth.ErrUnknownKey})
+
+	resp := post(t, srv, `{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+
+	var body errorBody
+	json.NewDecoder(resp.Body).Decode(&body)
+	if body.Error.Type != "invalid_api_key" {
+		t.Errorf("error.type = %q, want invalid_api_key", body.Error.Type)
+	}
+}
+
+// Proves Auth's context value actually reaches the handler, not just that a
+// bad credential gets rejected: authorizeModel's real branch, not its
+// nil-team wiring-bug branch, is what has to run for this to succeed.
+func TestAuthTeamReachesHandler(t *testing.T) {
+	restrictedTeam := &auth.Team{ID: "restricted", AllowedModels: []string{"only-this-model"}}
+	srv := newTestServerWithAuth(t, stubResolver{prov: &provider.Mock{}}, stubAuthenticator{team: restrictedTeam})
+
+	resp := post(t, srv, `{"model":"only-this-model","messages":[{"role":"user","content":"hi"}]}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for the team's one allowed model", resp.StatusCode)
+	}
+}
+
+// The allowlist check must reject before resolve ever runs — a resolver that
+// errors if called is what proves that, rather than merely asserting the
+// final status code.
+func TestChatCompletionsModelNotAllowedIs403(t *testing.T) {
+	restrictedTeam := &auth.Team{ID: "restricted", AllowedModels: []string{"only-this-model"}}
+	mustNotResolve := stubResolver{err: fmt.Errorf("resolve must not run once the allowlist check has rejected the request")}
+	srv := newTestServerWithAuth(t, mustNotResolve, stubAuthenticator{team: restrictedTeam})
+
+	resp := post(t, srv, `{"model":"some-other-model","messages":[{"role":"user","content":"hi"}]}`)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+
+	var body errorBody
+	json.NewDecoder(resp.Body).Decode(&body)
+	if !strings.Contains(body.Error.Message, "only-this-model") {
+		t.Errorf("message = %q, want it to name the allowed model", body.Error.Message)
 	}
 }
 
@@ -477,6 +658,7 @@ func TestStreamClientDisconnectCancelsUpstream(t *testing.T) {
 		t.Fatalf("building request: %v", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+testAPIKey)
 
 	done := make(chan error, 1)
 	go func() {
@@ -546,7 +728,7 @@ func TestRoutingEdges(t *testing.T) {
 
 func TestProbes(t *testing.T) {
 	t.Run("healthz is always ok", func(t *testing.T) {
-		srv := httptest.NewServer(NewRouter(stubResolver{}, discardLogger(), func() bool { return false }))
+		srv := httptest.NewServer(NewRouter(stubResolver{}, stubAuthenticator{}, stubRateLimiter{}, discardLogger(), func() bool { return false }))
 		defer srv.Close()
 
 		resp, err := http.Get(srv.URL + "/healthz")
@@ -566,7 +748,7 @@ func TestProbes(t *testing.T) {
 		tests := map[bool]int{true: http.StatusOK, false: http.StatusServiceUnavailable}
 
 		for ready, want := range tests {
-			srv := httptest.NewServer(NewRouter(stubResolver{}, discardLogger(), func() bool { return ready }))
+			srv := httptest.NewServer(NewRouter(stubResolver{}, stubAuthenticator{}, stubRateLimiter{}, discardLogger(), func() bool { return ready }))
 
 			resp, err := http.Get(srv.URL + "/readyz")
 			if err != nil {

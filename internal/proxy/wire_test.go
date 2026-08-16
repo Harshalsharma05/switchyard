@@ -115,3 +115,73 @@ func TestToChatResponseDerivesTotalTokens(t *testing.T) {
 		t.Errorf("finish_reason = %q", got.Choices[0].FinishReason)
 	}
 }
+
+// --- token estimation (Step 3.3) ---------------------------------------------
+
+func TestEstimateTokens(t *testing.T) {
+	tests := map[string]struct {
+		req              chatRequest
+		defaultMaxTokens int
+		want             int
+	}{
+		"max_tokens supplied is the output ceiling": {
+			req: chatRequest{
+				Messages:  []chatMessage{{Role: "user", Content: "12345678"}}, // 8 chars -> 2
+				MaxTokens: 500,
+			},
+			defaultMaxTokens: 1024,
+			want:             2 + perMessageTokenOverhead + 500,
+		},
+		"absent max_tokens falls back to the provider default": {
+			req: chatRequest{
+				Messages: []chatMessage{{Role: "user", Content: "12345678"}},
+			},
+			defaultMaxTokens: 1024,
+			want:             2 + perMessageTokenOverhead + 1024,
+		},
+		"every message carries its own overhead": {
+			req: chatRequest{
+				Messages: []chatMessage{
+					{Role: "system", Content: "1234"}, // 1
+					{Role: "user", Content: "1234"},   // 1
+				},
+				MaxTokens: 10,
+			},
+			defaultMaxTokens: 1024,
+			want:             (1 + perMessageTokenOverhead) + (1 + perMessageTokenOverhead) + 10,
+		},
+		"partial token rounds up rather than to zero": {
+			req: chatRequest{
+				Messages:  []chatMessage{{Role: "user", Content: "hi"}}, // 2 chars -> 1
+				MaxTokens: 10,
+			},
+			defaultMaxTokens: 1024,
+			want:             1 + perMessageTokenOverhead + 10,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := tc.req.estimateTokens(tc.defaultMaxTokens); got != tc.want {
+				t.Errorf("estimateTokens = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// The reservation is what bounds a team's in-flight exposure, so the estimate
+// must never come in under the prompt it is standing in for.
+func TestEstimateInputTokensIsNotWildlyLow(t *testing.T) {
+	// Roughly 100 words of English, which real tokenizers put near 130 tokens.
+	body := ""
+	for range 100 {
+		body += "sentence "
+	}
+
+	req := chatRequest{Messages: []chatMessage{{Role: "user", Content: body}}}
+	got := req.estimateInputTokens()
+
+	if got < 100 {
+		t.Errorf("estimateInputTokens = %d for a ~130-token prompt; the estimate must not run far under the truth", got)
+	}
+}

@@ -103,3 +103,59 @@ Each adapter wraps the caller's `ctx` with `context.WithTimeout(ctx, cfg.Timeout
 ### Anthropic stream usage: input and output tokens arrive a whole stream apart
 
 - Input tokens come once, at `message_start`; output tokens come later, at `message_delta`. `newStreamDecoder` returns a closure that closes over `inputTokens` to combine both into one `Usage` when `message_delta` arrives — the only adapter that needs stream-local state to decode correctly.
+
+---
+
+## Phase 3 — Auth & Rate Limiting
+
+### Step 3.1 — Team config & authentication
+
+- **SHA-256, not bcrypt, for API keys.** This hash runs on every request, not once at signup; bcrypt's deliberate slowness is right for a password but would put tens of milliseconds on a path this project measures in single digits. A leaked team key grants API quota under that team's own limits, not account access, so the lower threat model doesn't need bcrypt's cost.
+- **`configs/teams.yaml` stores the hash, never the plaintext key.** The file is committed to git; only a SHA-256 digest may live there. The plaintext exists only in the caller's own request and is never persisted.
+- **Auth middleware answers "who," not "what they can do."** It resolves a bearer token to a `*auth.Team` and attaches it to the context — nothing more. The model-allowlist 403 check lives in `handler.go` instead, because it needs the decoded request body, and nothing before the handler has parsed one.
+- **Router bug caught before it shipped: `Logger` must wrap `Auth`, not the other way round.** The original chain sketch put `Auth` between `Timing` and `Logger`. Since a 401 rejection returns without calling `next`, anything placed *inside* `Auth` — including `Logger` — would never run for a rejected request, so 401s would produce zero log lines. Fixed by moving `Logger` outside `Auth`.
+- **Rate limit / budget / priority fields are parsed and validated now, enforced starting Step 3.2 onward.** Same reasoning as `Provider.Ping` being declared in Phase 1 before Phase 5's health checker exists to call it — the schema doesn't get reopened when the enforcement phase arrives.
+- **Duplicate-hash detection lives in both `config.LoadTeams` and `auth.NewRegistry`.** Mirrors `provider.NewRegistry`'s own duplicate-name check existing alongside `LoadProviders`' — defense in depth: the registry's own invariant should hold even if something other than the YAML loader ever constructs one.
+
+### Step 3.2 — Token bucket
+
+- **Token bucket over sliding window or leaky bucket: burst tolerance.** A team that has been idle accrues capacity and can legitimately spend it in one burst — a batch job kicking off, a user pasting a long conversation. A sliding or fixed window would flatten that burst into an average rate and reject traffic a reasonable client would expect to succeed; a leaky bucket enforces a *constant* output rate and would smooth out the same legitimate burst into an artificial queue. Token bucket is the only one of the three whose whole point is "accrued idle capacity can be spent in a burst, then it's gone."
+- **One Lua script, not a Go read-modify-write.** Redis runs a script to completion without interleaving any other command, so two gateway replicas hitting the same key can't both read the same starting balance and both admit a request only one of them should have. A GET-then-SET across two round trips is exactly that race.
+- **Lazy refill, no background goroutine.** Every call recomputes the balance from `elapsed = now - stored_ts`, so a bucket untouched for an hour needs no catching up — the next call just sees a large `elapsed`. This is also what makes the algorithm replica-safe with zero coordination beyond Redis itself: there's no timer state anywhere to drift or duplicate across replicas.
+- **Time comes from Redis's own `TIME` command, not the caller's wall clock.** Replicas on hosts with clocks even slightly apart would each compute a different `elapsed` against the same stored timestamp. Redis is the one clock every replica already agrees on, for free.
+- **Key schema `switchyard:rl:{team_id}:{rpm|tpm}`, expiry via `PEXPIRE` in milliseconds, not `EXPIRE` in seconds.** Caught live: converting a sub-second TTL to whole seconds truncates to `0`, and `EXPIRE key 0` deletes the key immediately instead of leaving it alone — a bucket could vanish the instant it was written.
+- **Two independent buckets per team, not one.** A request can be within its RPM budget and still be too expensive in tokens, or vice versa — collapsing them into one bucket would let either dimension silently cap the other.
+
+### Step 3.3 — TPM reservation
+
+- **Reserve a ceiling up front, reconcile after.** The TPM bucket is charged `estimated_input + max_tokens` before the provider call; the unused portion is returned once real usage is known. The reservation always exceeds the eventual truth, so a request is never under-charged while in flight.
+- **Rejected: bill only after the response.** Output tokens aren't known until completion, so a team could exceed its TPM by an unbounded margin inside one burst, with the charge landing only after the damage was done.
+- **Rejected: meter input tokens only.** Exact and cheap, but leaves the expensive half unmetered — output is where both the cost and the capacity actually go.
+- **Reconciliation is signed, not refund-only.** `Reconcile` applies `reserved - actual`: positive returns tokens, negative debits an estimate that came in too low. One Lua script covers both directions.
+- **Refunds cap at capacity; debits may go negative.** Capping the top stops repeated over-reservation becoming burst credit. Allowing a negative balance makes a team that overshot wait out the deficit rather than have it forgiven — the refill and retry-after math both handle negative balances unchanged.
+- **A refund to an expired key recreates it full.** A bucket with no stored state is by definition full, so there is nothing to return to and nothing lost.
+- **`defer` owns the reconcile.** Registered immediately after a successful reserve, so an error, a panic, or a client disconnect all still return the reservation on the way out — the failure case Step 3.3 calls out specifically.
+- **A denied reserve yields a nil `*Reservation` that reconciles as a no-op.** Nothing was taken, so nothing is owed back; the nil-receiver method keeps that from becoming a nil check at every call site.
+- **Estimator is `bytes/4 + 4 per message`, not a real tokenizer.** Rejected `tiktoken` and friends: a separate dependency per provider dialect, to buy precision the reconcile step supplies anyway. Bytes rather than runes because `bytes/4` lands closer for multi-byte scripts.
+- **The output ceiling is a parameter, not a constant.** Every adapter substitutes its instance's `DefaultMaxTokens` when a caller omits `max_tokens`, and `proxy` can't reach that through the `Provider` interface — so the caller supplies it, keeping the limit in `configs/` per the no-hardcoded-limits rule. Step 3.4 wires where it comes from.
+- **TPM enforcement lands in the handler, not the middleware.** It needs the decoded body to estimate, and decoding happens in `ChatCompletions` — the same constraint that put the Step 3.1 model-allowlist check there. RPM needs no body and can stay middleware.
+
+### Step 3.4 — Rate limit middleware & responses
+
+- **Split enforcement: RPM in middleware, TPM in the handler.** Consequence of the 3.3 decision above — one "rate limit middleware" doesn't exist as a single unit; `RateLimit` (middleware) and `reserveTokens` (handler.go) share the same 429 response helper instead.
+- **`provider.Registry` gained `DefaultMaxTokensFor(model)`.** The TPM estimate needs the serving instance's configured ceiling, which `Provider` doesn't expose and `proxy` can't otherwise reach. Rejected adding the method to `Provider` itself — that interface is deliberately small, and the ceiling is already indexed per-model inside `Registry` the same way `byModel` is, so extending it there touches zero adapter files.
+- **Redis-down fail-open confirmed live, not just asserted.** Stopping Redis mid-session still returned 200s from real Ollama traffic. Caught two real bugs doing this: `docker compose stop` doesn't tear down the host port immediately (SIGTERM grace period), so a "Redis is down" test against it can silently pass against a still-half-alive Redis — had to point at a guaranteed-empty port instead.
+- **Fail-open took 3.5s before it was bounded.** go-redis's default dial/retry behavior turns "Redis unreachable" into several seconds of added latency — a slow fail-open is still the gateway being the reason a request is slow. Fixed with a `context.WithTimeout(200ms)` at each call site (`RateLimit` middleware, `reserveTokens`), which is the one mechanism a Go Redis client is guaranteed to respect regardless of its internal retry behavior. Tightened `redis.Options` (150ms dial/read/write, `MaxRetries: 1`) too, but the context deadline is the actual ceiling.
+- **`Reconcile`'s settle-up context is its own, not the request's.** A client disconnect or request timeout cancels `r.Context()`; reconciling on that context would fail before the Redis call could run, silently leaking the reservation until its TTL expired. `context.WithTimeout(context.Background(), 2s)` instead, called from a `defer` registered right after a successful reserve.
+- **`X-RateLimit-Reset` = seconds to full refill, not a fixed-window timestamp.** A token bucket has no discrete reset point; "time until this team could make its largest possible request again" is the closest honest analog.
+- **`X-RateLimit-Remaining` floors at zero for display.** The bucket itself can go negative (Step 3.3's overage debit), but a client-facing count showing a debt reads as a bug, not a feature.
+- **`Retry-After` rounds up, not down.** A truncated-down wait would advertise a retry time still inside the denial window, guaranteeing a second 429.
+
+### Step 3.5 — Priority tiers
+
+- **No priority queue, no shared pool.** Per the plan's own instruction. This reads a team's own bucket state and a fixed 80%/20% line — nothing coordinated across teams, nothing that reorders concurrent requests.
+- **Threshold checked on the bucket state *after* this request was admitted, not reconstructed to before it.** Two equally defensible readings existed; this one treats the request that crosses the 80% line as the one that gets shed, which is the simpler of the two and needs no extra arithmetic to undo Consume's already-applied deduction.
+- **RPM shed does not refund; TPM shed does.** RPM's unit cost is always exactly 1 — refunding it would erase the backpressure and make an immediate retry look free. TPM's reservation is a *ceiling* (estimated input + max_tokens) that can be far larger than 1; nothing was generated and no provider was called, so real usage is unambiguously zero, and leaving the full ceiling consumed would overcharge a request that never got as far as the ones that normally reconcile against real usage.
+- **The refund gets its own context, not the one already spent on the check.** `checkCtx` is budgeted to 200ms for the Reserve call; reusing it for the follow-up Reconcile risked the refund losing the race against its own deadline. Reconcile gets the same standalone `reconcileTimeout` context the deferred settle-up in `ChatCompletions` already uses.
+- **Shed responses reuse the 429 header contract but a distinct `priority_shed` error type.** Same `Retry-After`/`X-RateLimit-*` shape as hard exhaustion, so clients handle both with one code path, but the message says why: capacity existed, the team was just deprioritized.
+- **Verified against real Redis and real Ollama, not just the stub.** Primed a batch team's TPM bucket to 10% and confirmed the shed *and* the refund (balance returned to ~pre-request); primed a realtime team identically and confirmed it went through — same threshold, opposite outcome, live.

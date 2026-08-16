@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Harshalsharma05/switchyard/internal/provider"
+	"github.com/Harshalsharma05/switchyard/internal/ratelimit"
 )
 
 // maxRequestBytes bounds an inbound body. A gateway accepting unbounded JSON is
@@ -21,23 +23,31 @@ const maxRequestBytes = 1 << 20 // 1 MiB
 // Resolver is the slice of the provider registry this handler needs.
 //
 // It is declared here, by the consumer, rather than taken as a *provider.Registry:
-// the handler needs one method, and depending on the interface rather than the
-// concrete type is what lets tests inject a fake and what will let Phase 6 slot a
-// fallback-aware resolver in front of the registry without touching this file.
+// the handler needs these two methods, and depending on the interface rather
+// than the concrete type is what lets tests inject a fake and what will let
+// Phase 6 slot a fallback-aware resolver in front of the registry without
+// touching this file.
 type Resolver interface {
 	ForModel(model string) (provider.Provider, error)
+
+	// DefaultMaxTokensFor returns the resolved instance's configured ceiling
+	// for model, the same value substituted when a caller omits max_tokens.
+	// Step 3.3's TPM reservation needs it to estimate a request's cost before
+	// the provider is ever called.
+	DefaultMaxTokensFor(model string) (int, bool)
 }
 
 // Handler serves the public API.
 type Handler struct {
 	resolver Resolver
+	limiter  RateLimiter
 	log      *slog.Logger
 }
 
 // NewHandler wires the handler with its dependencies. Nothing here reads
 // package-level state.
-func NewHandler(resolver Resolver, log *slog.Logger) *Handler {
-	return &Handler{resolver: resolver, log: log}
+func NewHandler(resolver Resolver, limiter RateLimiter, log *slog.Logger) *Handler {
+	return &Handler{resolver: resolver, limiter: limiter, log: log}
 }
 
 // ChatCompletions serves POST /v1/chat/completions, streaming and
@@ -50,13 +60,43 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !h.authorizeModel(w, r, req.Model) {
+		return
+	}
+
 	prov, ok := h.resolve(w, r, req.Model)
 	if !ok {
 		return
 	}
 
+	reservation, ok := h.reserveTokens(w, r, req)
+	if !ok {
+		return
+	}
+
+	// actual is set right before every return below it, so the deferred
+	// Reconcile — which runs after streamChatCompletions has already
+	// returned, since it is called synchronously — always settles against
+	// real usage. It starts at zero on purpose: an error return that never
+	// reassigns it means "nothing was generated," which is the correct
+	// reservation to give back in full.
+	var actual int
+	defer func() {
+		// Not r.Context(): a client disconnect or a request that already hit
+		// its deadline both cancel that context, and Reconcile running on it
+		// would fail before the Redis call could even happen — silently
+		// leaking the reservation until its bucket TTL expired. See Step
+		// 3.3's DECISIONS.md entry on why the defer has to survive that.
+		ctx, cancel := context.WithTimeout(context.Background(), reconcileTimeout)
+		defer cancel()
+		if err := reservation.Reconcile(ctx, actual); err != nil {
+			h.log.ErrorContext(r.Context(), "reconciling TPM reservation",
+				slog.String("request_id", RequestIDFrom(r.Context())), slog.Any("error", err))
+		}
+	}()
+
 	if req.Stream {
-		h.streamChatCompletions(w, r, prov, req)
+		actual = h.streamChatCompletions(w, r, prov, req)
 		return
 	}
 
@@ -96,8 +136,119 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		metrics.providerTime = resp.Latency
 		metrics.usage = resp.Usage
 	}
+	actual = resp.Usage.InputTokens + resp.Usage.OutputTokens
 
 	h.writeSuccess(w, r, resp)
+}
+
+// reserveTokens checks and reserves the team's TPM bucket ahead of a
+// provider call, once the model is known to resolve and be allowed.
+//
+// The returned *ratelimit.Reservation is nil whenever there is nothing to
+// reconcile later: either Redis was unreachable and the check failed open,
+// or the request was denied (in which case ok is also false and the caller
+// already wrote a response). Reservation.Reconcile is a safe no-op on a nil
+// receiver, so ChatCompletions never has to branch on which case it is.
+func (h *Handler) reserveTokens(w http.ResponseWriter, r *http.Request, req chatRequest) (*ratelimit.Reservation, bool) {
+	team := TeamFrom(r.Context())
+	if team == nil {
+		h.log.ErrorContext(r.Context(), "chat completions reached without an authenticated team")
+		writeError(w, h.log, http.StatusInternalServerError, "internal_error",
+			"the gateway could not resolve the caller's team")
+		return nil, false
+	}
+
+	defaultMaxTokens, ok := h.resolver.DefaultMaxTokensFor(req.Model)
+	if !ok {
+		// resolve() already succeeded for this exact model, so a miss here is
+		// a wiring bug between the two Resolver methods, not a real one.
+		h.log.ErrorContext(r.Context(), "resolved model has no default max tokens",
+			slog.String("model", req.Model))
+		writeError(w, h.log, http.StatusInternalServerError, "internal_error",
+			"the gateway could not size this request's token reservation")
+		return nil, false
+	}
+
+	amount := req.estimateTokens(defaultMaxTokens)
+
+	// checkTimeout, not r.Context() directly: bounds how long a Redis problem
+	// can add to this request before failing open, independent of the
+	// underlying client's own retry behavior. See ratelimit.go's doc comment
+	// on checkTimeout for the 3.5-second failure this measured against.
+	checkCtx, cancel := context.WithTimeout(r.Context(), checkTimeout)
+	defer cancel()
+
+	reservation, res, err := h.limiter.Reserve(checkCtx, team.ID, ratelimit.TPM, team.RateLimits.TPM, amount, bucketTTL)
+	if err != nil {
+		// Fail open, same as the RPM middleware: Redis being unreachable must
+		// never be the reason a request fails.
+		h.log.ErrorContext(r.Context(), "TPM rate limit check failed; failing open",
+			slog.String("team", team.ID), slog.Any("error", err))
+		return nil, true
+	}
+	if !res.Allowed {
+		writeRateLimitError(w, h.log, ratelimit.TPM, team.RateLimits.TPM, res)
+		return nil, false
+	}
+
+	// The bucket admitted this reservation, but a batch-priority team past
+	// Step 3.5's threshold is shed anyway. Unlike RPM's fixed 1-unit cost,
+	// this reservation is a ceiling (estimated input plus max_tokens) that
+	// can be far larger than anything actually used — nothing was generated,
+	// no provider was ever called, so real usage is unambiguously zero.
+	// Reconciling with 0 gives the whole reservation back rather than
+	// leaving a request that never reached a provider looking as expensive
+	// as one that did.
+	if shouldShedForPriority(team, team.RateLimits.TPM, res) {
+		// A fresh context, not checkCtx: checkCtx was budgeted for the
+		// Reserve call above and may already be close to its 200ms ceiling,
+		// which could cut this refund off before it even starts. Reconcile
+		// gets the same standalone budget as the deferred one in
+		// ChatCompletions, for the same reason — giving back a reservation
+		// has to happen regardless of how much of the check's own budget is
+		// left.
+		reconcileCtx, cancel := context.WithTimeout(context.Background(), reconcileTimeout)
+		if err := reservation.Reconcile(reconcileCtx, 0); err != nil {
+			h.log.ErrorContext(r.Context(), "refunding priority-shed TPM reservation",
+				slog.String("team", team.ID), slog.Any("error", err))
+		}
+		cancel()
+
+		writePriorityShedError(w, h.log, ratelimit.TPM, team.RateLimits.TPM, res)
+		return nil, false
+	}
+
+	return reservation, true
+}
+
+// authorizeModel checks the authenticated team's model allowlist.
+//
+// It runs after decode, which is the earliest point the requested model is
+// known, and before resolve, so a team never learns whether SwitchYard could
+// even route a model it isn't allowed to use. A model absent from every
+// provider still gets its own distinct 404 from resolve — "not allowed" and
+// "doesn't exist" are different failures and Step 3.1 asks for different
+// status codes for them.
+func (h *Handler) authorizeModel(w http.ResponseWriter, r *http.Request, model string) bool {
+	team := TeamFrom(r.Context())
+	if team == nil {
+		// Every route this handler serves is mounted behind Auth, so a nil team
+		// here means the chain was wired wrong, not that the caller did
+		// anything wrong.
+		h.log.ErrorContext(r.Context(), "chat completions reached without an authenticated team")
+		writeError(w, h.log, http.StatusInternalServerError, "internal_error",
+			"the gateway could not resolve the caller's team")
+		return false
+	}
+
+	if !team.AllowsModel(model) {
+		writeError(w, h.log, http.StatusForbidden, "model_not_allowed",
+			fmt.Sprintf("team %q is not permitted to use model %q; allowed models: %s",
+				team.ID, model, strings.Join(team.AllowedModels, ", ")))
+		return false
+	}
+
+	return true
 }
 
 // resolve looks up the provider for a model, writing the client error itself
@@ -163,7 +314,12 @@ func (h *Handler) decode(w http.ResponseWriter, r *http.Request) (chatRequest, b
 // normalized provider.Chunks are translated to OpenAI-shaped SSE events and
 // flushed to the client as they arrive, never buffered into a full response
 // first.
-func (h *Handler) streamChatCompletions(w http.ResponseWriter, r *http.Request, prov provider.Provider, req chatRequest) {
+//
+// The named return, actualTokens, is what ChatCompletions reconciles the TPM
+// reservation against. It is set by the deferred closure below rather than
+// at each individual return, since this function has several exit points and
+// every one of them needs the same fallback logic applied.
+func (h *Handler) streamChatCompletions(w http.ResponseWriter, r *http.Request, prov provider.Provider, req chatRequest) (actualTokens int) {
 	metrics := metricsFrom(r.Context())
 	requestID := RequestIDFrom(r.Context())
 
@@ -218,6 +374,20 @@ func (h *Handler) streamChatCompletions(w http.ResponseWriter, r *http.Request, 
 	var content strings.Builder
 	var finish provider.FinishReason
 	var usage provider.Usage
+
+	defer func() {
+		actualTokens = usage.InputTokens + usage.OutputTokens
+		if actualTokens == 0 && content.Len() > 0 {
+			// A mid-stream failure can end things before the provider's
+			// terminal usage-bearing chunk ever arrives, but real generation
+			// still happened and still cost something. Reconciling as a full
+			// refund in that case would be wrong in the opposite direction
+			// from an under-estimate: it would let a team's TPM bucket ignore
+			// tokens it actually spent. Approximate from what was actually
+			// written instead of trusting an absence of data as a zero.
+			actualTokens = req.estimateInputTokens() + (content.Len()+charsPerToken-1)/charsPerToken
+		}
+	}()
 
 	// gotFirstByte and sentAny track two different things, and collapsing them
 	// into one flag was a real bug caught against live Groq traffic: a
@@ -339,6 +509,7 @@ func (h *Handler) streamChatCompletions(w http.ResponseWriter, r *http.Request, 
 		slog.Int("output_tokens", usage.OutputTokens),
 		slog.Int("content_bytes", content.Len()),
 	)
+	return
 }
 
 // writeSSEJSON marshals v and writes it as one SSE "data:" event. The blank

@@ -1,0 +1,25 @@
+# SwitchYard local dev/deploy stack.
+#
+# Filled in incrementally, one phase at a time — Redis now (Phase 3), Jaeger
+# and Prometheus/Grafana arrive with Phases 8-10. `docker compose up` is meant
+# to bring up everything by the end of Part 1; until then, bring up only what
+# the current phase needs.
+
+services:
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    # AOF persistence: rate-limit and budget state surviving a container
+    # restart matters more here than the extra disk I/O costs during dev.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis-data:

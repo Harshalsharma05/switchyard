@@ -23,16 +23,26 @@ import (
 //     below it. Anything inserted after this point is counted as
 //     gateway overhead, which is the honest accounting: work the
 //     gateway does is the gateway's cost.
-//  4. Logger     — innermost, so the duration it records covers the handler and
-//     nothing else's setup, and so it can read the finished timings.
+//  4. Logger     — outside Auth (and, from Phase 4, rate limiting and budget),
+//     so every request gets exactly one log line, including a 401 or
+//     a 429 — those middlewares reject by returning without calling
+//     next, which would make a Logger placed *inside* them silently
+//     skip logging the very requests it matters most to see.
+//  5. Auth       — mounted only on the API route group below, not on the
+//     probes: a load balancer's health check carries no API key, and
+//     Auth would 401 every one of them if it wrapped the whole router.
+//     Auth's own latency still lands inside Timing's overhead number,
+//     since Timing wraps Logger which wraps Auth.
+//  6. RateLimit   — inside Auth, since it needs the *auth.Team Auth attaches
+//     to the context. This only enforces RPM; TPM needs the decoded
+//     body, which nothing before the handler has parsed, so it is
+//     checked inside ChatCompletions instead (see reserveTokens in
+//     handler.go).
 //
-// Phases 3, 4, and 8 insert auth, rate limiting, budget, and tracing between
-// Timing and Logger — inside Timing on purpose, so their latency shows up in the
-// overhead number rather than hiding from it. Auth goes after RequestID so a
-// rejected request is still correlated; tracing goes outside auth so a rejection
-// still produces a span.
-func NewRouter(resolver Resolver, log *slog.Logger, ready func() bool) http.Handler {
-	h := NewHandler(resolver, log)
+// Phase 4's budget check and Phase 8's tracing insert alongside Auth and
+// RateLimit, inside Logger, for the same reasons.
+func NewRouter(resolver Resolver, authr Authenticator, limiter RateLimiter, log *slog.Logger, ready func() bool) http.Handler {
+	h := NewHandler(resolver, limiter, log)
 
 	r := chi.NewRouter()
 
@@ -41,11 +51,16 @@ func NewRouter(resolver Resolver, log *slog.Logger, ready func() bool) http.Hand
 	r.Use(Timing)
 	r.Use(Logger(log))
 
-	r.Post("/v1/chat/completions", h.ChatCompletions)
+	r.Group(func(r chi.Router) {
+		r.Use(Auth(authr, log))
+		r.Use(RateLimit(limiter, log))
+		r.Post("/v1/chat/completions", h.ChatCompletions)
+	})
 
 	// Probes live on the public listener because that is what a load balancer
 	// in front of the gateway can reach. They are also mounted on the admin
-	// listener for operators.
+	// listener for operators. Neither goes through Auth: a health check has no
+	// team to authenticate as.
 	r.Get("/healthz", Healthz)
 	r.Get("/readyz", Readyz(ready))
 

@@ -33,6 +33,13 @@ type Registry struct {
 	byName  map[string]Provider
 	byModel map[string]Provider
 
+	// defaultMaxTokens mirrors byModel's keys but holds the serving instance's
+	// configured ceiling rather than the instance itself — Step 3.3's TPM
+	// reservation needs this number and reaches it through the registry
+	// rather than through Provider, which stays free of anything
+	// budget-related per this repo's package boundaries.
+	defaultMaxTokens map[string]int
+
 	// order preserves config file order so admin listings and logs are stable
 	// rather than following Go's randomized map iteration.
 	order []Provider
@@ -49,9 +56,10 @@ func NewRegistry(cfgs []Config) (*Registry, error) {
 	}
 
 	r := &Registry{
-		byName:  make(map[string]Provider, len(cfgs)),
-		byModel: make(map[string]Provider),
-		order:   make([]Provider, 0, len(cfgs)),
+		byName:           make(map[string]Provider, len(cfgs)),
+		byModel:          make(map[string]Provider),
+		defaultMaxTokens: make(map[string]int),
+		order:            make([]Provider, 0, len(cfgs)),
 	}
 
 	for _, cfg := range cfgs {
@@ -75,6 +83,7 @@ func NewRegistry(cfgs []Config) (*Registry, error) {
 				)
 			}
 			r.byModel[model] = p
+			r.defaultMaxTokens[model] = cfg.DefaultMaxTokens
 		}
 
 		r.byName[cfg.Name] = p
@@ -91,6 +100,15 @@ func (r *Registry) ForModel(model string) (Provider, error) {
 		return nil, fmt.Errorf("resolving model %q: %w", model, ErrModelNotSupported)
 	}
 	return p, nil
+}
+
+// DefaultMaxTokensFor returns the serving instance's configured ceiling for
+// model — the same value every adapter substitutes when a caller omits
+// max_tokens. ok is false when no instance serves the model, mirroring
+// ForModel's own miss case.
+func (r *Registry) DefaultMaxTokensFor(model string) (int, bool) {
+	n, ok := r.defaultMaxTokens[model]
+	return n, ok
 }
 
 // ByName resolves an instance name, for the Phase 4 admin API and the Phase 5

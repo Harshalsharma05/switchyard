@@ -18,3 +18,19 @@ No. go build and go run ignore _test.go files completely — they will never end
 
 
 Phase 2 = take the request/response translator you built in Phase 1 and extend it so answers can flow back token-by-token in real time, correctly handling three different providers' streaming formats, client disconnects, and the fact that once you've started streaming you can't cleanly retry anymore.
+
+
+The token bucket (the thing you have to write by hand)
+
+This is the actual rate-limiting algorithm, and it's the classic whiteboard-interview question, which is why the plan won't let Claude Code write it for you.
+
+The mental model: imagine a bucket that holds, say, 60 tokens. Every request costs 1 token to make. The bucket refills at a steady rate — say 1 token every second. If the bucket's empty, you're rate-limited; wait for it to refill. If it's full, you can burst — fire off 60 requests instantly if you want, then you're throttled to the refill rate after that.
+
+Why this and not something simpler like "count requests in the last 60 seconds"? Because token bucket naturally allows short bursts (which real traffic actually looks like — nobody sends requests perfectly evenly spaced) while still enforcing a long-run average rate. That burst tolerance is the answer to the interview question "why token bucket over sliding window."
+
+The tricky implementation detail: you're running this in Redis, and multiple copies of your gateway might be checking the same team's bucket at the same time. If two requests both read "5 tokens left," both think they're allowed, and both proceed — you've now let through 2 requests when only 1 should've fit. That's a race condition. The fix is a Lua script — a tiny script that Redis runs as a single, uninterruptible unit, so "check if there's a token, and if so, take it" happens as one atomic step nobody can sneak in the middle of.
+
+"Lazy refill" instead of a background timer: rather than running a clock in the background that adds tokens every second (which gets messy across multiple server instances and can drift), you just store when the bucket was last touched. Next time someone checks the bucket, you calculate "how much time has passed since then, so how many tokens should've accrued" on the spot, right when it's needed. No background process, no synchronization headache, works identically whether you have 1 server or 10.
+
+You've got two separate buckets per team — one for requests-per-minute, one for tokens-per-minute (an AI response with 4000 tokens should count differently than one with 40).
+

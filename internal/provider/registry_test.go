@@ -205,6 +205,25 @@ func TestRegistryRejects(t *testing.T) {
 	}
 }
 
+func TestRegistryDefaultMaxTokensFor(t *testing.T) {
+	r, err := NewRegistry(registryConfigs())
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+
+	got, ok := r.DefaultMaxTokensFor("openai/gpt-oss-120b")
+	if !ok {
+		t.Fatal("DefaultMaxTokensFor: model not found")
+	}
+	if got != 1024 {
+		t.Errorf("DefaultMaxTokensFor = %d, want 1024", got)
+	}
+
+	if _, ok := r.DefaultMaxTokensFor("nonexistent-model"); ok {
+		t.Error("DefaultMaxTokensFor reported a match for an unregistered model")
+	}
+}
+
 func TestRegistryByNameAndListing(t *testing.T) {
 	cfgs := registryConfigs()
 	r, err := NewRegistry(cfgs)

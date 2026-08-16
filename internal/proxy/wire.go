@@ -115,6 +115,55 @@ func (r chatRequest) validate() error {
 	return nil
 }
 
+// Token estimation constants for the Step 3.3 TPM reservation.
+//
+// These are a heuristic, not a tokenizer. A real tokenizer would be exact,
+// but it would also mean a per-dialect dependency (OpenAI, Anthropic, and
+// Gemini tokenize differently), and the reservation is reconciled against the
+// provider's own reported usage the moment the response lands — so precision
+// bought up front is precision the settle-up would have supplied anyway.
+//
+// What does matter is that the estimate not be wildly *low*, since the
+// reservation is what caps a team's in-flight exposure.
+const (
+	// charsPerToken is the usual rule of thumb for English text. Length is
+	// measured in bytes rather than runes on purpose: for multi-byte scripts
+	// bytes/4 lands far closer to the real token count than runes/4 would.
+	charsPerToken = 4
+
+	// perMessageTokenOverhead covers the role tag and delimiters every
+	// provider wraps around a message, which the content length alone misses.
+	perMessageTokenOverhead = 4
+)
+
+// estimateInputTokens approximates the prompt's token count.
+func (r chatRequest) estimateInputTokens() int {
+	total := 0
+	for _, m := range r.Messages {
+		// Rounded up, so a short message never estimates as zero tokens.
+		total += (len(m.Content) + charsPerToken - 1) / charsPerToken
+		total += perMessageTokenOverhead
+	}
+	return total
+}
+
+// estimateTokens returns the ceiling to reserve against a team's TPM bucket:
+// the estimated prompt plus the most the response is allowed to be.
+//
+// defaultMaxTokens is supplied by the caller rather than read here, because
+// the ceiling that actually applies is the provider instance's configured
+// DefaultMaxTokens — which every adapter substitutes when a caller omits
+// max_tokens, and which this package cannot reach through the Provider
+// interface. Passing it in also keeps the limit in configs/ rather than
+// hardcoded in a helper.
+func (r chatRequest) estimateTokens(defaultMaxTokens int) int {
+	output := r.MaxTokens
+	if output <= 0 {
+		output = defaultMaxTokens
+	}
+	return r.estimateInputTokens() + output
+}
+
 // toProviderRequest converts the public shape into the canonical one.
 //
 // System messages stay in the array: hoisting them is each adapter's business,

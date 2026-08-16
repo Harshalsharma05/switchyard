@@ -17,10 +17,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/Harshalsharma05/switchyard/internal/admin"
+	"github.com/Harshalsharma05/switchyard/internal/auth"
 	"github.com/Harshalsharma05/switchyard/internal/config"
 	"github.com/Harshalsharma05/switchyard/internal/provider"
 	"github.com/Harshalsharma05/switchyard/internal/proxy"
+	"github.com/Harshalsharma05/switchyard/internal/ratelimit"
 )
 
 // Server settings come from the environment rather than configs/, because they
@@ -28,6 +32,8 @@ import (
 // and team behaviour stays in YAML.
 const (
 	defaultProvidersPath = "configs/providers.yaml"
+	defaultTeamsPath     = "configs/teams.yaml"
+	defaultRedisAddr     = "localhost:6379"
 	defaultPublicAddr    = ":8080"
 	defaultAdminAddr     = ":9090"
 	defaultDrainTimeout  = 25 * time.Second
@@ -66,6 +72,42 @@ func run() error {
 		log.Info("provider registered", slog.String("provider", p.Name()))
 	}
 
+	teams, err := config.LoadTeams(envOr("SWITCHYARD_TEAMS_CONFIG", defaultTeamsPath))
+	if err != nil {
+		return fmt.Errorf("loading team config: %w", err)
+	}
+
+	authRegistry, err := auth.NewRegistry(teams)
+	if err != nil {
+		return fmt.Errorf("building auth registry: %w", err)
+	}
+
+	// redis.NewClient never dials eagerly — the connection is opened lazily on
+	// the first command — so a Redis that is down right now does not stop the
+	// gateway from starting. That is deliberate, not an oversight: per
+	// CLAUDE.md, rate limiting fails open when Redis is unreachable, and
+	// refusing to boot over it would contradict that at the one moment it
+	// matters most.
+	//
+	// Timeouts and retries are tightened well below go-redis's defaults
+	// (5s dial timeout, several retries with exponential backoff) on purpose.
+	// Measured live: with the defaults, one request against a genuinely
+	// unreachable Redis took 3.5 seconds to fail open — a "fail open" that
+	// slow is the gateway being the reason a request is slow, which is
+	// exactly what fail-open exists to prevent. These bounds trade a little
+	// resilience to a single transient blip for detecting a real outage in
+	// well under a second, every time.
+	redisClient := redis.NewClient(&redis.Options{
+		Addr:         envOr("SWITCHYARD_REDIS_ADDR", defaultRedisAddr),
+		DialTimeout:  150 * time.Millisecond,
+		ReadTimeout:  150 * time.Millisecond,
+		WriteTimeout: 150 * time.Millisecond,
+		MaxRetries:   1,
+	})
+	defer redisClient.Close()
+
+	limiter := ratelimit.NewLimiter(redisClient)
+
 	// ready gates /readyz. It flips true once wiring is complete and false again
 	// the moment shutdown begins, so a load balancer stops sending new traffic
 	// while in-flight requests drain.
@@ -74,7 +116,7 @@ func run() error {
 
 	publicSrv := &http.Server{
 		Addr:              envOr("SWITCHYARD_ADDR", defaultPublicAddr),
-		Handler:           proxy.NewRouter(registry, log, isReady),
+		Handler:           proxy.NewRouter(registry, authRegistry, limiter, log, isReady),
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
 
@@ -120,6 +162,7 @@ func run() error {
 		slog.String("public_addr", publicSrv.Addr),
 		slog.String("admin_addr", adminSrv.Addr),
 		slog.Int("providers", len(registry.Providers())),
+		slog.Int("teams", len(teams)),
 	)
 
 	select {

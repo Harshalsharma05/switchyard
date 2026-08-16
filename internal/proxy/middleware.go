@@ -40,6 +40,7 @@ type ctxKey int
 const (
 	requestIDKey ctxKey = iota
 	metricsKey
+	teamKey
 )
 
 // RequestIDFrom returns the correlation ID attached to a request's context, or

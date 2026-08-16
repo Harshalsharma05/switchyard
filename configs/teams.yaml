@@ -1,0 +1,53 @@
+# SwitchYard team registry.
+#
+# `api_key_hash` is the SHA-256 hex digest of the team's plaintext key, never
+# the key itself — this file is committed to git. Generate one with:
+#
+#   echo -n "the-plaintext-key" | sha256sum | awk '{print $1}'
+#
+# Hand the plaintext key to the team out of band; SwitchYard never stores it.
+#
+# `allowed_providers` / `allowed_models` are enforced against a request's
+# resolved provider and requested model. `rate_limits` and
+# `monthly_budget_usd` are read starting in Steps 3.2 and 4.2 respectively —
+# declared here now so those phases don't reopen this file's shape.
+
+teams:
+  # Dev key: sk-switchyard-dev-acme-9f2b1c
+  - id: acme
+    name: Acme Corp
+    api_key_hash: 2ce25520782abab77e9a1fde48ff35112740f6bc078b28154dec3d32651b854b
+    allowed_providers:
+      - groq
+      - gemini
+      - ollama
+    allowed_models:
+      - openai/gpt-oss-120b
+      - openai/gpt-oss-20b
+      - gemini-3.5-flash
+      - gemini-3.5-flash-lite
+      - llama3.2:3b
+    rate_limits:
+      rpm: 60
+      tpm: 100000
+    monthly_budget_usd: 50.00
+    priority: realtime
+
+  # Dev key: sk-switchyard-dev-globex-7a4e0d
+  # Deliberately narrower than acme: no Gemini access, and batch priority, so
+  # the Phase 3 checklist's allowlist and priority-shedding tests have a team
+  # to exercise them against.
+  - id: globex
+    name: Globex Inc
+    api_key_hash: dd06a2a0a097eb98b0bb25130211d5f748218c5b2c27397b2f853a11a3ff9577
+    allowed_providers:
+      - groq
+      - ollama
+    allowed_models:
+      - openai/gpt-oss-20b
+      - llama3.2:3b
+    rate_limits:
+      rpm: 10
+      tpm: 20000
+    monthly_budget_usd: 5.00
+    priority: batch
