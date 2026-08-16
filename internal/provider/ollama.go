@@ -1,8 +1,10 @@
 package provider
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -27,8 +29,30 @@ func NewOllama(cfg Config) (*Ollama, error) {
 	return &Ollama{base: b}, nil
 }
 
-func (p *Ollama) Stream(context.Context, Request) (StreamReader, error) {
-	return nil, ErrStreamingNotImplemented
+// Stream hits the same /api/chat endpoint as Complete with stream:true, which
+// switches Ollama's response from one JSON object to newline-delimited JSON —
+// a different wire shape from OpenAI and Anthropic's SSE, handled by
+// ndjsonStreamReader instead of sseStreamReader.
+func (p *Ollama) Stream(ctx context.Context, req Request) (StreamReader, error) {
+	url := strings.TrimSuffix(p.cfg.BaseURL, "/") + "/api/chat"
+
+	resp, err := openStream(ctx, p.cfg, p.client, url, req.Model, nil, p.translateRequest(req, true))
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode >= http.StatusBadRequest {
+		return nil, readStreamError(resp, p.cfg, req.Model, p.classify)
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 4096), maxStreamLineBytes)
+
+	return &ndjsonStreamReader{
+		body:    resp.Body,
+		scanner: scanner,
+		decode:  p.decodeStreamLine,
+	}, nil
 }
 
 func (p *Ollama) Ping(ctx context.Context) error {
@@ -44,7 +68,7 @@ func (p *Ollama) Complete(ctx context.Context, req Request) (*Response, error) {
 	url := strings.TrimSuffix(p.cfg.BaseURL, "/") + "/api/chat"
 
 	// No auth header: Ollama runs locally and takes no key.
-	res, err := postJSON(ctx, p.cfg, p.client, url, req.Model, nil, p.translateRequest(req))
+	res, err := postJSON(ctx, p.cfg, p.client, url, req.Model, nil, p.translateRequest(req, false))
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +128,7 @@ type ollamaErrorEnvelope struct {
 
 // --- translation ------------------------------------------------------------
 
-func (p *Ollama) translateRequest(req Request) ollamaRequest {
+func (p *Ollama) translateRequest(req Request, stream bool) ollamaRequest {
 	maxTokens := req.MaxTokens
 	if maxTokens == 0 {
 		maxTokens = p.cfg.DefaultMaxTokens
@@ -119,7 +143,7 @@ func (p *Ollama) translateRequest(req Request) ollamaRequest {
 	return ollamaRequest{
 		Model:    req.Model,
 		Messages: msgs,
-		Stream:   false,
+		Stream:   stream,
 		Options: ollamaOptions{
 			Temperature: req.Temperature,
 			NumPredict:  maxTokens,
@@ -161,6 +185,27 @@ func ollamaFinishReason(s string) FinishReason {
 	default:
 		return FinishOther
 	}
+}
+
+// decodeStreamLine turns one NDJSON line into a Chunk. It satisfies
+// ndjsonStreamReader's decode field.
+//
+// It never reports done=true itself: the final line (done:true) still carries
+// content and usage worth forwarding, and the stream simply ends after it —
+// ndjsonStreamReader's Recv reaches that end the same way it reaches the end
+// of any other line-delimited body, via scanner.Scan() returning false.
+func (p *Ollama) decodeStreamLine(line []byte) (*Chunk, bool, error) {
+	var wire ollamaResponse
+	if err := json.Unmarshal(line, &wire); err != nil {
+		return nil, false, fmt.Errorf("decoding %s stream line: %w", p.cfg.Name, err)
+	}
+
+	chunk := &Chunk{Content: wire.Message.Content}
+	if wire.Done {
+		chunk.FinishReason = ollamaFinishReason(wire.DoneReason)
+		chunk.Usage = &Usage{InputTokens: wire.PromptEvalCount, OutputTokens: wire.EvalCount}
+	}
+	return chunk, false, nil
 }
 
 func (p *Ollama) classify(model string, status int, body []byte) *Error {

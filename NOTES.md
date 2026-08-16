@@ -15,3 +15,6 @@ They live next to the code they test, in the same package — openai.go and open
 
 Are they "needed" to run the gateway?
 No. go build and go run ignore _test.go files completely — they will never end up in your compiled gw.exe, and deleting every test file right now would not break the running gateway at all. In that narrow sense, no.
+
+
+Phase 2 = take the request/response translator you built in Phase 1 and extend it so answers can flow back token-by-token in real time, correctly handling three different providers' streaming formats, client disconnects, and the fact that once you've started streaming you can't cleanly retry anymore.

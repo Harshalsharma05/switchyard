@@ -202,3 +202,62 @@ func TestOllamaOfflineIsNetworkError(t *testing.T) {
 		t.Errorf("StatusCode = %d, want 0: no response was ever received", provErr.StatusCode)
 	}
 }
+
+// Ollama's stream is newline-delimited JSON, not SSE — a different wire
+// format from the other three adapters, decoded by ndjsonStreamReader rather
+// than sseStreamReader.
+func TestOllamaStreamDecodesNDJSONLines(t *testing.T) {
+	var raw map[string]any
+
+	p := newTestOllama(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		json.Unmarshal(body, &raw)
+
+		flusher := w.(http.Flusher)
+		for _, line := range []string{
+			`{"model":"llama3.2:3b","message":{"role":"assistant","content":"hi"},"done":false}`,
+			`{"model":"llama3.2:3b","message":{"role":"assistant","content":" there"},"done":false}`,
+			`{"model":"llama3.2:3b","message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","prompt_eval_count":7,"eval_count":2}`,
+		} {
+			io.WriteString(w, line+"\n")
+			flusher.Flush()
+		}
+	})
+
+	stream, err := p.Stream(context.Background(), Request{
+		Model:    "llama3.2:3b",
+		Messages: []Message{{Role: RoleUser, Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	chunks := drainStream(t, stream)
+
+	streamed, present := raw["stream"]
+	if !present || streamed != true {
+		t.Errorf("stream field = %v (present=%v), want an explicit true", streamed, present)
+	}
+
+	var content string
+	var finish FinishReason
+	var usage *Usage
+	for _, c := range chunks {
+		content += c.Content
+		if c.FinishReason != "" {
+			finish = c.FinishReason
+		}
+		if c.Usage != nil {
+			usage = c.Usage
+		}
+	}
+
+	if content != "hi there" {
+		t.Errorf("accumulated content = %q, want %q", content, "hi there")
+	}
+	if finish != FinishStop {
+		t.Errorf("FinishReason = %q, want %q", finish, FinishStop)
+	}
+	if usage == nil || usage.InputTokens != 7 || usage.OutputTokens != 2 {
+		t.Errorf("Usage = %+v, want {7 2}", usage)
+	}
+}

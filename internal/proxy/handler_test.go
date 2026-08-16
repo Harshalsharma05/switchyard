@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Harshalsharma05/switchyard/internal/provider"
 )
@@ -243,11 +245,6 @@ func TestChatCompletionsRejects(t *testing.T) {
 			want:     http.StatusBadRequest,
 			wantText: "max_token",
 		},
-		"streaming not yet": {
-			body:     `{"model":"m","messages":[{"role":"user","content":"hi"}],"stream":true}`,
-			want:     http.StatusBadRequest,
-			wantText: "streaming is not supported yet",
-		},
 	}
 
 	for name, tc := range tests {
@@ -270,17 +267,244 @@ func TestChatCompletionsRejects(t *testing.T) {
 	}
 }
 
-// Asking for a stream must not quietly produce a non-streaming reply the client
-// cannot parse, and must not reach a provider at all.
-func TestStreamingRequestNeverReachesProvider(t *testing.T) {
-	mock := &provider.Mock{}
+// parseSSE splits a raw SSE body into its "data:" payloads, stripping the
+// "data: " prefix and the blank-line event framing. Every streaming test
+// below reads through this rather than re-deriving the SSE grammar each time.
+func parseSSE(t *testing.T, body []byte) []string {
+	t.Helper()
+
+	var out []string
+	for _, block := range strings.Split(strings.TrimSpace(string(body)), "\n\n") {
+		block = strings.TrimSpace(block)
+		if block == "" {
+			continue
+		}
+		if !strings.HasPrefix(block, "data: ") {
+			t.Fatalf("SSE block missing the data: prefix: %q", block)
+		}
+		out = append(out, strings.TrimPrefix(block, "data: "))
+	}
+	return out
+}
+
+func TestStreamChatCompletionsSuccess(t *testing.T) {
+	mock := &provider.Mock{
+		ProviderName: "groq",
+		Models:       []string{"m"},
+		StreamChunks: []*provider.Chunk{
+			{Content: "hi"},
+			{Content: " there", FinishReason: provider.FinishStop, Usage: &provider.Usage{InputTokens: 5, OutputTokens: 2}},
+		},
+	}
+
+	srv := newTestServer(t, stubResolver{prov: mock})
+	resp := post(t, srv, `{"model":"m","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("Content-Type = %q, want text/event-stream", ct)
+	}
+	if cc := resp.Header.Get("Cache-Control"); cc != "no-cache" {
+		t.Errorf("Cache-Control = %q, want no-cache", cc)
+	}
+	if conn := resp.Header.Get("Connection"); conn != "keep-alive" {
+		t.Errorf("Connection = %q, want keep-alive", conn)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading body: %v", err)
+	}
+	events := parseSSE(t, body)
+	if len(events) != 3 {
+		t.Fatalf("got %d SSE events, want 3 (two chunks + [DONE]): %q", len(events), body)
+	}
+
+	var first chatChunkResponse
+	if err := json.Unmarshal([]byte(events[0]), &first); err != nil {
+		t.Fatalf("decoding first chunk: %v", err)
+	}
+	if first.Choices[0].Delta.Role != "assistant" {
+		t.Errorf("first chunk role = %q, want assistant", first.Choices[0].Delta.Role)
+	}
+	if first.Choices[0].Delta.Content != "hi" {
+		t.Errorf("first chunk content = %q, want %q", first.Choices[0].Delta.Content, "hi")
+	}
+	if first.Choices[0].FinishReason != nil {
+		t.Errorf("first chunk finish_reason = %v, want null", first.Choices[0].FinishReason)
+	}
+
+	var second chatChunkResponse
+	if err := json.Unmarshal([]byte(events[1]), &second); err != nil {
+		t.Fatalf("decoding second chunk: %v", err)
+	}
+	// Role appears once, on the first chunk only — mirroring OpenAI's dialect.
+	if second.Choices[0].Delta.Role != "" {
+		t.Errorf("second chunk role = %q, want omitted", second.Choices[0].Delta.Role)
+	}
+	if second.Choices[0].Delta.Content != " there" {
+		t.Errorf("second chunk content = %q, want %q", second.Choices[0].Delta.Content, " there")
+	}
+	if second.Choices[0].FinishReason == nil || *second.Choices[0].FinishReason != "stop" {
+		t.Errorf("second chunk finish_reason = %v, want stop", second.Choices[0].FinishReason)
+	}
+
+	if events[2] != "[DONE]" {
+		t.Errorf("final event = %q, want [DONE]", events[2])
+	}
+
+	if mock.StreamAttempts() != 1 {
+		t.Errorf("Stream called %d times, want 1", mock.StreamAttempts())
+	}
+	if mock.Attempts() != 0 {
+		t.Errorf("Complete called %d times, want 0: a streaming request must never reach the non-streaming path", mock.Attempts())
+	}
+}
+
+// A failure before any chunk is functionally identical to Stream() itself
+// failing: nothing has reached the client, so it gets a normal status-coded
+// error response rather than an SSE frame.
+func TestStreamChatCompletionsErrorBeforeFirstByte(t *testing.T) {
+	mock := &provider.Mock{
+		StreamErr: &provider.Error{Kind: provider.KindAuthFailed, Provider: "groq", Message: "invalid api key"},
+	}
+
+	srv := newTestServer(t, stubResolver{prov: mock})
+	resp := post(t, srv, `{"model":"m","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json: a pre-stream failure is a normal error response", ct)
+	}
+
+	var body errorBody
+	json.NewDecoder(resp.Body).Decode(&body)
+	if body.Error.Type != string(provider.KindAuthFailed) {
+		t.Errorf("error.type = %q, want %q", body.Error.Type, provider.KindAuthFailed)
+	}
+}
+
+// failAfterOneChunkReader simulates a provider that streams one good chunk
+// and then breaks — the case Step 2.4 calls out specifically, because the
+// status line and at least one event are already on the wire by then.
+type failAfterOneChunkReader struct {
+	sent bool
+}
+
+func (r *failAfterOneChunkReader) Recv() (*provider.Chunk, error) {
+	if !r.sent {
+		r.sent = true
+		return &provider.Chunk{Content: "partial"}, nil
+	}
+	return nil, &provider.Error{Kind: provider.KindServerError, Provider: "groq", Message: "connection reset", Retryable: true}
+}
+
+func (r *failAfterOneChunkReader) Close() error { return nil }
+
+func TestStreamChatCompletionsMidStreamError(t *testing.T) {
+	mock := &provider.Mock{
+		StreamFunc: func(context.Context, provider.Request) (provider.StreamReader, error) {
+			return &failAfterOneChunkReader{}, nil
+		},
+	}
+
+	srv := newTestServer(t, stubResolver{prov: mock})
+	resp := post(t, srv, `{"model":"m","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+
+	// The status line was already committed to 200 by the first chunk; a
+	// failure after that cannot change it.
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: headers were already sent before the failure", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	events := parseSSE(t, body)
+	if len(events) != 2 {
+		t.Fatalf("got %d SSE events, want 2 (one chunk + one error event): %q", len(events), body)
+	}
+
+	var errEvent errorBody
+	if err := json.Unmarshal([]byte(events[1]), &errEvent); err != nil {
+		t.Fatalf("decoding error event: %v", err)
+	}
+	if errEvent.Error.Message == "" {
+		t.Error("error event carried no message")
+	}
+	// No [DONE] after a failure: partial content already reached the client,
+	// so this is not a clean completion and must not be reported as one.
+	if events[1] == "[DONE]" {
+		t.Error("stream ended with [DONE] instead of an error event")
+	}
+}
+
+// blockingStreamReader never returns a chunk on its own; it waits for its
+// context to be cancelled, which is exactly what a client disconnect should
+// cause per Step 2.3.
+type blockingStreamReader struct {
+	ctx       context.Context
+	cancelled chan struct{}
+}
+
+func (r *blockingStreamReader) Recv() (*provider.Chunk, error) {
+	<-r.ctx.Done()
+	close(r.cancelled)
+	return nil, r.ctx.Err()
+}
+
+func (r *blockingStreamReader) Close() error { return nil }
+
+func TestStreamClientDisconnectCancelsUpstream(t *testing.T) {
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+
+	mock := &provider.Mock{
+		StreamFunc: func(ctx context.Context, req provider.Request) (provider.StreamReader, error) {
+			close(started)
+			return &blockingStreamReader{ctx: ctx, cancelled: cancelled}, nil
+		},
+	}
+
 	srv := newTestServer(t, stubResolver{prov: mock})
 
-	post(t, srv, `{"model":"m","messages":[{"role":"user","content":"hi"}],"stream":true}`)
-
-	if mock.Attempts() != 0 {
-		t.Errorf("provider was called %d times, want 0", mock.Attempts())
+	ctx, cancel := context.WithCancel(context.Background())
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+"/v1/chat/completions",
+		strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}],"stream":true}`))
+	if err != nil {
+		t.Fatalf("building request: %v", err)
 	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	done := make(chan error, 1)
+	go func() {
+		resp, err := http.DefaultClient.Do(httpReq)
+		if err == nil {
+			resp.Body.Close()
+		}
+		done <- err
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler never reached Stream")
+	}
+
+	// This is standing in for the client going away: cancelling the request's
+	// own context is what closes the underlying connection, which is what
+	// net/http then reports through the server-side request's Context.
+	cancel()
+
+	select {
+	case <-cancelled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream Recv was never cancelled after the client disconnected")
+	}
+
+	<-done
 }
 
 func TestOversizedBodyIsRejected(t *testing.T) {

@@ -138,10 +138,18 @@ func (r chatRequest) toProviderRequest() provider.Request {
 	}
 }
 
+// chatCompletionID builds the public-facing ID from the internal request ID.
+// Both the non-streaming response and every chunk of a streaming one carry
+// the same value, which is what lets a client correlate a stream's chunks
+// with one logical completion — exactly as OpenAI's own IDs do.
+func chatCompletionID(requestID string) string {
+	return "chatcmpl-" + requestID
+}
+
 // toChatResponse converts a canonical response back into the public shape.
 func toChatResponse(id string, created int64, resp *provider.Response) chatResponse {
 	return chatResponse{
-		ID:      "chatcmpl-" + id,
+		ID:      chatCompletionID(id),
 		Object:  "chat.completion",
 		Created: created,
 		Model:   resp.Model,
@@ -174,5 +182,69 @@ func wireFinishReason(r provider.FinishReason) string {
 		return "content_filter"
 	default:
 		return "stop"
+	}
+}
+
+// --- streaming wire shapes ---------------------------------------------------
+//
+// These mirror OpenAI's chat.completion.chunk objects, the SSE counterpart to
+// chatResponse above. The split from chatResponse exists for the same reason
+// chatRequest and provider.Request stay separate types: a chunk and a full
+// response share some fields but not the same shape, and forcing one type to
+// serve both would leak one dialect's quirks into the other.
+
+type chatChunkDelta struct {
+	// Role is set only on the first chunk of a stream, omitted on every later
+	// one — mirroring OpenAI's own dialect, where a client accumulates the
+	// message by starting from an empty one with role "assistant" and only
+	// appending Content from every chunk after.
+	Role    string `json:"role,omitempty"`
+	Content string `json:"content,omitempty"`
+}
+
+type chatChunkChoice struct {
+	Index int            `json:"index"`
+	Delta chatChunkDelta `json:"delta"`
+
+	// FinishReason is a pointer so it serializes as JSON null on every chunk
+	// but the last, rather than as the empty string OpenAI's own clients do
+	// not expect there.
+	FinishReason *string `json:"finish_reason"`
+}
+
+type chatChunkResponse struct {
+	ID      string            `json:"id"`
+	Object  string            `json:"object"`
+	Created int64             `json:"created"`
+	Model   string            `json:"model"`
+	Choices []chatChunkChoice `json:"choices"`
+}
+
+// toChatChunk converts one normalized provider.Chunk into the public wire
+// shape. includeRole is true only for the stream's first forwarded chunk; see
+// chatChunkDelta.Role.
+//
+// model is the requested model, not a served one read off the chunk:
+// provider.Chunk carries no Model field, because nothing before Phase 6 needs
+// it there — a stream has no fallback path yet, so the requested model and
+// the served one are always the same.
+func toChatChunk(id string, created int64, model string, chunk *provider.Chunk, includeRole bool) chatChunkResponse {
+	delta := chatChunkDelta{Content: chunk.Content}
+	if includeRole {
+		delta.Role = string(provider.RoleAssistant)
+	}
+
+	var finish *string
+	if chunk.FinishReason != "" {
+		s := wireFinishReason(chunk.FinishReason)
+		finish = &s
+	}
+
+	return chatChunkResponse{
+		ID:      id,
+		Object:  "chat.completion.chunk",
+		Created: created,
+		Model:   model,
+		Choices: []chatChunkChoice{{Index: 0, Delta: delta, FinishReason: finish}},
 	}
 }

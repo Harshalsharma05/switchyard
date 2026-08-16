@@ -9,6 +9,8 @@ import (
 	"runtime/debug"
 	"strconv"
 	"time"
+
+	"github.com/Harshalsharma05/switchyard/internal/provider"
 )
 
 // Response headers SwitchYard adds to every reply. They exist so a caller can
@@ -64,6 +66,13 @@ type requestMetrics struct {
 	// providerTime is what the request spent waiting on the upstream. Gateway
 	// overhead is everything else.
 	providerTime time.Duration
+
+	// usage is the token accounting for the request, zero-valued when no
+	// provider was reached. Both the streaming and non-streaming paths set it,
+	// so Logger reports token counts identically for either — this is how Step
+	// 2.3's "token counts logged correctly for streaming requests" is met,
+	// rather than a bespoke log line living only in the streaming handler.
+	usage provider.Usage
 }
 
 // metricsFrom returns the per-request metrics, or nil if Timing did not run.
@@ -294,6 +303,12 @@ func Logger(log *slog.Logger) func(http.Handler) http.Handler {
 					attrs = append(attrs,
 						slog.String("provider", m.providerName),
 						slog.String("served_model", m.servedModel),
+					)
+				}
+				if m.usage.InputTokens != 0 || m.usage.OutputTokens != 0 {
+					attrs = append(attrs,
+						slog.Int("input_tokens", m.usage.InputTokens),
+						slog.Int("output_tokens", m.usage.OutputTokens),
 					)
 				}
 			}

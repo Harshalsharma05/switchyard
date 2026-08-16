@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -33,10 +34,31 @@ func NewOpenAICompatible(cfg Config) (*OpenAICompatible, error) {
 	return &OpenAICompatible{base: b}, nil
 }
 
-// Stream is Phase 2 work. The Step 1.5 handler rejects stream:true before a
-// request reaches here; this is the backstop.
-func (p *OpenAICompatible) Stream(context.Context, Request) (StreamReader, error) {
-	return nil, ErrStreamingNotImplemented
+// Stream mirrors Complete's request setup but hits the same endpoint with
+// stream:true and hands back a reader instead of a parsed Response: OpenAI's
+// dialect uses one endpoint for both, distinguished only by that field.
+func (p *OpenAICompatible) Stream(ctx context.Context, req Request) (StreamReader, error) {
+	url := strings.TrimSuffix(p.cfg.BaseURL, "/") + "/chat/completions"
+
+	headers := map[string]string{}
+	if p.cfg.APIKey != "" {
+		headers["Authorization"] = "Bearer " + p.cfg.APIKey
+	}
+
+	resp, err := openStream(ctx, p.cfg, p.client, url, req.Model, headers, p.translateRequest(req, true))
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode >= http.StatusBadRequest {
+		return nil, readStreamError(resp, p.cfg, req.Model, p.classify)
+	}
+
+	return &sseStreamReader{
+		body:   resp.Body,
+		events: newSSEReader(resp.Body),
+		decode: p.decodeStreamEvent,
+	}, nil
 }
 
 // Ping issues the cheapest possible completion for the Phase 5 health checker.
@@ -59,7 +81,7 @@ func (p *OpenAICompatible) Complete(ctx context.Context, req Request) (*Response
 		headers["Authorization"] = "Bearer " + p.cfg.APIKey
 	}
 
-	res, err := postJSON(ctx, p.cfg, p.client, url, req.Model, headers, p.translateRequest(req))
+	res, err := postJSON(ctx, p.cfg, p.client, url, req.Model, headers, p.translateRequest(req, false))
 	if err != nil {
 		return nil, err
 	}
@@ -86,12 +108,20 @@ type oaiMessage struct {
 }
 
 type oaiChatRequest struct {
-	Model       string       `json:"model"`
-	Messages    []oaiMessage `json:"messages"`
-	MaxTokens   int          `json:"max_tokens,omitempty"`
-	Temperature *float32     `json:"temperature,omitempty"`
-	Stop        []string     `json:"stop,omitempty"`
-	Stream      bool         `json:"stream,omitempty"`
+	Model         string            `json:"model"`
+	Messages      []oaiMessage      `json:"messages"`
+	MaxTokens     int               `json:"max_tokens,omitempty"`
+	Temperature   *float32          `json:"temperature,omitempty"`
+	Stop          []string          `json:"stop,omitempty"`
+	Stream        bool              `json:"stream,omitempty"`
+	StreamOptions *oaiStreamOptions `json:"stream_options,omitempty"`
+}
+
+// oaiStreamOptions requests a final usage-only chunk before [DONE]. Without
+// it OpenAI's streaming dialect never reports token counts at all, which
+// Step 2.1's Chunk.Usage exists to carry.
+type oaiStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type oaiChatResponse struct {
@@ -101,6 +131,22 @@ type oaiChatResponse struct {
 		FinishReason string     `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+	} `json:"usage"`
+}
+
+// oaiStreamChunk is one "data:" event's payload during a stream. Choices is
+// empty on the trailing usage-only chunk stream_options.include_usage
+// requests, which is why len(Choices) is checked rather than indexed blindly.
+type oaiStreamChunk struct {
+	Choices []struct {
+		Delta struct {
+			Content string `json:"content"`
+		} `json:"delta"`
+		FinishReason *string `json:"finish_reason"`
+	} `json:"choices"`
+	Usage *struct {
 		PromptTokens     int `json:"prompt_tokens"`
 		CompletionTokens int `json:"completion_tokens"`
 	} `json:"usage"`
@@ -116,7 +162,11 @@ type oaiErrorEnvelope struct {
 
 // --- translation ------------------------------------------------------------
 
-func (p *OpenAICompatible) translateRequest(req Request) oaiChatRequest {
+// translateRequest takes stream as a parameter rather than reading req.Stream
+// so the caller — Complete or Stream — decides, the same way Ollama's
+// translateRequest forces its own stream field explicitly rather than
+// trusting the canonical Request to carry the right value.
+func (p *OpenAICompatible) translateRequest(req Request, stream bool) oaiChatRequest {
 	maxTokens := req.MaxTokens
 	if maxTokens == 0 {
 		maxTokens = p.cfg.DefaultMaxTokens
@@ -130,13 +180,18 @@ func (p *OpenAICompatible) translateRequest(req Request) oaiChatRequest {
 		msgs = append(msgs, oaiMessage{Role: string(m.Role), Content: m.Content})
 	}
 
-	return oaiChatRequest{
+	out := oaiChatRequest{
 		Model:       req.Model,
 		Messages:    msgs,
 		MaxTokens:   maxTokens,
 		Temperature: req.Temperature,
 		Stop:        req.Stop,
+		Stream:      stream,
 	}
+	if stream {
+		out.StreamOptions = &oaiStreamOptions{IncludeUsage: true}
+	}
+	return out
 }
 
 func (p *OpenAICompatible) translateResponse(model string, raw []byte, latency time.Duration) (*Response, error) {
@@ -177,6 +232,36 @@ func oaiFinishReason(s string) FinishReason {
 	default:
 		return FinishOther
 	}
+}
+
+// decodeStreamEvent turns one SSE event's data into a Chunk. It satisfies
+// sseStreamReader's decode field.
+func (p *OpenAICompatible) decodeStreamEvent(ev sseEvent) (*Chunk, bool, error) {
+	data := strings.TrimSpace(ev.Data)
+	if data == "" {
+		return nil, false, nil
+	}
+	if data == "[DONE]" {
+		return nil, true, nil
+	}
+
+	var wire oaiStreamChunk
+	if err := json.Unmarshal([]byte(data), &wire); err != nil {
+		return nil, false, fmt.Errorf("decoding %s stream chunk: %w", p.cfg.Name, err)
+	}
+
+	chunk := &Chunk{}
+	if wire.Usage != nil {
+		chunk.Usage = &Usage{InputTokens: wire.Usage.PromptTokens, OutputTokens: wire.Usage.CompletionTokens}
+	}
+	if len(wire.Choices) > 0 {
+		choice := wire.Choices[0]
+		chunk.Content = choice.Delta.Content
+		if choice.FinishReason != nil {
+			chunk.FinishReason = oaiFinishReason(*choice.FinishReason)
+		}
+	}
+	return chunk, false, nil
 }
 
 // classify turns an error response into a provider.Error, starting from the

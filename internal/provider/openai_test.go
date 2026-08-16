@@ -336,11 +336,96 @@ func TestNewOpenAICompatibleValidation(t *testing.T) {
 	}
 }
 
-func TestStreamNotImplementedYet(t *testing.T) {
-	p := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {})
+func TestStreamDecodesChunksAndTrailingUsage(t *testing.T) {
+	var gotBody oaiChatRequest
 
-	_, err := p.Stream(context.Background(), Request{Model: "openai/gpt-oss-20b"})
-	if !errors.Is(err, ErrStreamingNotImplemented) {
-		t.Errorf("err = %v, want ErrStreamingNotImplemented", err)
+	p := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &gotBody); err != nil {
+			t.Errorf("upstream received unparseable body: %v", err)
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		for _, line := range []string{
+			`data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}`,
+			``,
+			`data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}`,
+			``,
+			`data: {"choices":[{"delta":{"content":" there"},"finish_reason":"stop"}]}`,
+			``,
+			`data: {"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":2}}`,
+			``,
+			`data: [DONE]`,
+			``,
+		} {
+			io.WriteString(w, line+"\n")
+			flusher.Flush()
+		}
+	})
+
+	stream, err := p.Stream(context.Background(), Request{
+		Model:    "openai/gpt-oss-120b",
+		Messages: []Message{{Role: RoleUser, Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	chunks := drainStream(t, stream)
+
+	if !gotBody.Stream {
+		t.Error("stream field not sent as true")
+	}
+	if gotBody.StreamOptions == nil || !gotBody.StreamOptions.IncludeUsage {
+		t.Error("stream_options.include_usage not requested, so a real upstream would never send the usage chunk")
+	}
+
+	var content string
+	var finish FinishReason
+	var usage *Usage
+	for _, c := range chunks {
+		content += c.Content
+		if c.FinishReason != "" {
+			finish = c.FinishReason
+		}
+		if c.Usage != nil {
+			usage = c.Usage
+		}
+	}
+
+	if content != "hi there" {
+		t.Errorf("accumulated content = %q, want %q", content, "hi there")
+	}
+	if finish != FinishStop {
+		t.Errorf("FinishReason = %q, want %q", finish, FinishStop)
+	}
+	if usage == nil || usage.InputTokens != 11 || usage.OutputTokens != 2 {
+		t.Errorf("Usage = %+v, want {11 2}", usage)
+	}
+}
+
+// A stream request that never gets past the status line must classify the
+// same way a non-streaming failure does, per Step 2.4: error before the first
+// byte is a normal error, not a broken StreamReader.
+func TestStreamErrorBeforeFirstByte(t *testing.T) {
+	p := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		io.WriteString(w, `{"error":{"message":"invalid api key","type":"invalid_request_error"}}`)
+	})
+
+	stream, err := p.Stream(context.Background(), Request{
+		Model:    "openai/gpt-oss-120b",
+		Messages: []Message{{Role: RoleUser, Content: "hello"}},
+	})
+	if stream != nil {
+		t.Error("got a non-nil StreamReader alongside an error")
+	}
+
+	var provErr *Error
+	if !errors.As(err, &provErr) {
+		t.Fatalf("err = %v, want a *provider.Error", err)
+	}
+	if provErr.Kind != KindAuthFailed || provErr.Retryable {
+		t.Errorf("got kind=%q retryable=%v, want auth_failed retryable=false", provErr.Kind, provErr.Retryable)
 	}
 }

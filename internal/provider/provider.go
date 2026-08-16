@@ -63,9 +63,12 @@ type Chunk struct {
 	Usage        *Usage
 }
 
-// ErrStreamingNotImplemented is returned by Stream until Phase 2 lands. The
-// Phase 1 handler rejects stream:true before it ever reaches an adapter; this is
-// the backstop so a caller gets a clear error rather than a nil reader.
+// ErrStreamingNotImplemented is Mock's default Stream behaviour until a test
+// opts in with StreamFunc. The real adapters (OpenAI-compatible, Anthropic,
+// Gemini, Ollama) all implement Stream as of Phase 2; only the fake still
+// needs an explicit "not wired up" sentinel, for tests that exercise the
+// Step 1.5 handler's stream:true rejection without needing a working stream
+// behind it.
 var ErrStreamingNotImplemented = errors.New("streaming not implemented until phase 2")
 
 // base is the state and the trivial behaviour every adapter shares. Adapters

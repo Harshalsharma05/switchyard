@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -31,8 +32,33 @@ func NewGemini(cfg Config) (*Gemini, error) {
 	return &Gemini{base: b}, nil
 }
 
-func (p *Gemini) Stream(context.Context, Request) (StreamReader, error) {
-	return nil, ErrStreamingNotImplemented
+// Stream hits streamGenerateContent instead of generateContent, with
+// ?alt=sse so the response arrives as standard SSE rather than a single JSON
+// array — the array form cannot be parsed incrementally, so alt=sse is not
+// optional here. The request body schema is identical to Complete's; only the
+// endpoint and response framing change.
+func (p *Gemini) Stream(ctx context.Context, req Request) (StreamReader, error) {
+	endpoint := strings.TrimSuffix(p.cfg.BaseURL, "/") + "/models/" + url.PathEscape(req.Model) + ":streamGenerateContent?alt=sse"
+
+	headers := map[string]string{}
+	if p.cfg.APIKey != "" {
+		headers["x-goog-api-key"] = p.cfg.APIKey
+	}
+
+	resp, err := openStream(ctx, p.cfg, p.client, endpoint, req.Model, headers, p.translateRequest(req))
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode >= http.StatusBadRequest {
+		return nil, readStreamError(resp, p.cfg, req.Model, p.classify)
+	}
+
+	return &sseStreamReader{
+		body:   resp.Body,
+		events: newSSEReader(resp.Body),
+		decode: func(ev sseEvent) (*Chunk, bool, error) { return p.decodeStreamEvent(req.Model, ev) },
+	}, nil
 }
 
 func (p *Gemini) Ping(ctx context.Context) error {
@@ -228,6 +254,60 @@ func geminiFinishReason(s string) FinishReason {
 	default:
 		return FinishOther
 	}
+}
+
+// decodeStreamEvent turns one SSE event's data into a Chunk. It satisfies
+// sseStreamReader's decode field.
+//
+// Gemini reuses geminiResponse itself rather than a separate stream type: each
+// SSE event's data is a complete GenerateContentResponse — Gemini's streaming
+// dialect chunks the response schema unchanged, unlike OpenAI's separate
+// delta-shaped chunk type or Anthropic's separate named events.
+//
+// There is no end sentinel to check for here, unlike OpenAI's [DONE]: the
+// stream simply ends, and sseStreamReader's caller reaches that end via
+// sseReader.Next() returning io.EOF.
+func (p *Gemini) decodeStreamEvent(model string, ev sseEvent) (*Chunk, bool, error) {
+	data := strings.TrimSpace(ev.Data)
+	if data == "" {
+		return nil, false, nil
+	}
+
+	var wire geminiResponse
+	if err := json.Unmarshal([]byte(data), &wire); err != nil {
+		return nil, false, fmt.Errorf("decoding %s stream chunk: %w", p.cfg.Name, err)
+	}
+
+	if wire.PromptFeedback.BlockReason != "" {
+		return nil, false, &Error{
+			Kind:       KindContentPolicy,
+			Provider:   p.cfg.Name,
+			Model:      model,
+			StatusCode: http.StatusOK,
+			Retryable:  false,
+			Message:    "prompt blocked: " + truncateMessage(wire.PromptFeedback.BlockReason),
+		}
+	}
+
+	chunk := &Chunk{}
+	if wire.UsageMetadata.PromptTokenCount != 0 || wire.UsageMetadata.CandidatesTokenCount != 0 {
+		chunk.Usage = &Usage{
+			InputTokens:  wire.UsageMetadata.PromptTokenCount,
+			OutputTokens: wire.UsageMetadata.CandidatesTokenCount,
+		}
+	}
+	if len(wire.Candidates) > 0 {
+		candidate := wire.Candidates[0]
+		var content strings.Builder
+		for _, part := range candidate.Content.Parts {
+			content.WriteString(part.Text)
+		}
+		chunk.Content = content.String()
+		if candidate.FinishReason != "" {
+			chunk.FinishReason = geminiFinishReason(candidate.FinishReason)
+		}
+	}
+	return chunk, false, nil
 }
 
 func (p *Gemini) classify(model string, status int, body []byte) *Error {

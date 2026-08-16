@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -33,8 +34,37 @@ func NewAnthropic(cfg Config) (*Anthropic, error) {
 	return &Anthropic{base: b}, nil
 }
 
-func (p *Anthropic) Stream(context.Context, Request) (StreamReader, error) {
-	return nil, ErrStreamingNotImplemented
+// Stream hits the same /v1/messages endpoint as Complete with stream:true.
+// Anthropic's dialect is the most different of the three: instead of one
+// repeated chunk shape, it sends named events (message_start,
+// content_block_delta, message_delta, message_stop, ...), and input token
+// usage arrives once at message_start while output token usage arrives at
+// message_delta — so the two halves of one Usage are reported roughly a whole
+// stream apart. newStreamDecoder closes over inputTokens to bridge that gap.
+func (p *Anthropic) Stream(ctx context.Context, req Request) (StreamReader, error) {
+	url := strings.TrimSuffix(p.cfg.BaseURL, "/") + "/messages"
+
+	headers := map[string]string{
+		"anthropic-version": anthropicVersion,
+	}
+	if p.cfg.APIKey != "" {
+		headers["x-api-key"] = p.cfg.APIKey
+	}
+
+	resp, err := openStream(ctx, p.cfg, p.client, url, req.Model, headers, p.translateRequest(req, true))
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode >= http.StatusBadRequest {
+		return nil, readStreamError(resp, p.cfg, req.Model, p.classify)
+	}
+
+	return &sseStreamReader{
+		body:   resp.Body,
+		events: newSSEReader(resp.Body),
+		decode: p.newStreamDecoder(req.Model),
+	}, nil
 }
 
 func (p *Anthropic) Ping(ctx context.Context) error {
@@ -57,7 +87,7 @@ func (p *Anthropic) Complete(ctx context.Context, req Request) (*Response, error
 		headers["x-api-key"] = p.cfg.APIKey
 	}
 
-	res, err := postJSON(ctx, p.cfg, p.client, url, req.Model, headers, p.translateRequest(req))
+	res, err := postJSON(ctx, p.cfg, p.client, url, req.Model, headers, p.translateRequest(req, false))
 	if err != nil {
 		return nil, err
 	}
@@ -114,6 +144,37 @@ type anthropicErrorEnvelope struct {
 	} `json:"error"`
 }
 
+// --- stream event wire types -------------------------------------------------
+//
+// Each is only the slice of its event's JSON this adapter reads. Anthropic's
+// stream events carry more fields (content_block_start's block type, ping's
+// empty body, message_start's full initial message); the rest is left
+// unparsed rather than modeled, since nothing here needs it.
+
+type anthropicMessageStartEvent struct {
+	Message struct {
+		Usage struct {
+			InputTokens int `json:"input_tokens"`
+		} `json:"usage"`
+	} `json:"message"`
+}
+
+type anthropicContentBlockDeltaEvent struct {
+	Delta struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"delta"`
+}
+
+type anthropicMessageDeltaEvent struct {
+	Delta struct {
+		StopReason string `json:"stop_reason"`
+	} `json:"delta"`
+	Usage struct {
+		OutputTokens int `json:"output_tokens"`
+	} `json:"usage"`
+}
+
 // --- translation ------------------------------------------------------------
 
 // translateRequest hoists system messages out of the array into the top-level
@@ -123,7 +184,7 @@ type anthropicErrorEnvelope struct {
 // argument for keeping the system prompt as an ordinary Message in the
 // canonical Request: OpenAI and Ollama want it inline, Anthropic and Gemini
 // want it hoisted, and only the adapters that need the hoist perform it.
-func (p *Anthropic) translateRequest(req Request) anthropicRequest {
+func (p *Anthropic) translateRequest(req Request, stream bool) anthropicRequest {
 	maxTokens := req.MaxTokens
 	if maxTokens == 0 {
 		maxTokens = p.cfg.DefaultMaxTokens
@@ -150,6 +211,7 @@ func (p *Anthropic) translateRequest(req Request) anthropicRequest {
 		System:        strings.Join(systemParts, "\n\n"),
 		Temperature:   req.Temperature,
 		StopSequences: req.Stop,
+		Stream:        stream,
 	}
 }
 
@@ -200,6 +262,83 @@ func anthropicFinishReason(s string) FinishReason {
 		return FinishContentFilter
 	default:
 		return FinishOther
+	}
+}
+
+// newStreamDecoder builds the decode closure sseStreamReader drives. It is a
+// closure rather than a plain method because it must carry inputTokens across
+// events: message_start reports it once, near the start of the stream, and it
+// has to be remembered until message_delta reports the matching output count,
+// near the end.
+func (p *Anthropic) newStreamDecoder(model string) func(sseEvent) (*Chunk, bool, error) {
+	var inputTokens int
+
+	return func(ev sseEvent) (*Chunk, bool, error) {
+		data := strings.TrimSpace(ev.Data)
+		if data == "" {
+			return nil, false, nil
+		}
+
+		switch ev.Event {
+		case "message_start":
+			var wire anthropicMessageStartEvent
+			if err := json.Unmarshal([]byte(data), &wire); err != nil {
+				return nil, false, fmt.Errorf("decoding %s stream event: %w", p.cfg.Name, err)
+			}
+			inputTokens = wire.Message.Usage.InputTokens
+			return nil, false, nil
+
+		case "content_block_delta":
+			var wire anthropicContentBlockDeltaEvent
+			if err := json.Unmarshal([]byte(data), &wire); err != nil {
+				return nil, false, fmt.Errorf("decoding %s stream event: %w", p.cfg.Name, err)
+			}
+			// Only text_delta carries forwardable content in Part 1's text-only
+			// world; other delta types (input_json_delta, for tool use) never
+			// occur here because SwitchYard never sends tools.
+			if wire.Delta.Type != "text_delta" {
+				return nil, false, nil
+			}
+			return &Chunk{Content: wire.Delta.Text}, false, nil
+
+		case "message_delta":
+			var wire anthropicMessageDeltaEvent
+			if err := json.Unmarshal([]byte(data), &wire); err != nil {
+				return nil, false, fmt.Errorf("decoding %s stream event: %w", p.cfg.Name, err)
+			}
+			chunk := &Chunk{
+				Usage: &Usage{InputTokens: inputTokens, OutputTokens: wire.Usage.OutputTokens},
+			}
+			if wire.Delta.StopReason != "" {
+				chunk.FinishReason = anthropicFinishReason(wire.Delta.StopReason)
+			}
+			return chunk, false, nil
+
+		case "message_stop":
+			return nil, true, nil
+
+		case "error":
+			// Anthropic can send this mid-stream on a 200 response — a failure
+			// that never touched HTTP status, which is exactly why StreamReader
+			// surfaces it as a Recv error rather than relying on the status check
+			// Stream already did before the reader was even built.
+			var wire anthropicErrorEnvelope
+			if err := json.Unmarshal([]byte(data), &wire); err != nil {
+				wire = anthropicErrorEnvelope{}
+			}
+			return nil, false, &Error{
+				Kind:      KindServerError,
+				Provider:  p.cfg.Name,
+				Model:     model,
+				Retryable: true,
+				Message:   truncateMessage(wire.Error.Message),
+			}
+
+		default:
+			// ping, content_block_start, content_block_stop, and any future event
+			// type: nothing here is forwardable content.
+			return nil, false, nil
+		}
 	}
 }
 

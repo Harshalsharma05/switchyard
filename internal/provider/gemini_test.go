@@ -241,3 +241,99 @@ func TestGeminiClassify(t *testing.T) {
 		})
 	}
 }
+
+func TestGeminiStreamDecodesSSEChunks(t *testing.T) {
+	var gotPath, gotQuery string
+
+	p := newTestGemini(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		for _, line := range []string{
+			`data: {"candidates":[{"content":{"parts":[{"text":"hi"}],"role":"model"}}]}`,
+			``,
+			`data: {"candidates":[{"content":{"parts":[{"text":" there"}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":3}}`,
+			``,
+		} {
+			io.WriteString(w, line+"\n")
+			flusher.Flush()
+		}
+	})
+
+	stream, err := p.Stream(context.Background(), Request{
+		Model:    "gemini-2.0-flash",
+		Messages: []Message{{Role: RoleUser, Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	chunks := drainStream(t, stream)
+
+	// Unlike generateContent, this hits a different endpoint entirely, and
+	// alt=sse is what makes the response arrive as parseable SSE instead of one
+	// JSON array that cannot be read incrementally.
+	if gotPath != "/models/gemini-2.0-flash:streamGenerateContent" {
+		t.Errorf("path = %q, want the streaming endpoint", gotPath)
+	}
+	if gotQuery != "alt=sse" {
+		t.Errorf("query = %q, want alt=sse", gotQuery)
+	}
+
+	var content string
+	var finish FinishReason
+	var usage *Usage
+	for _, c := range chunks {
+		content += c.Content
+		if c.FinishReason != "" {
+			finish = c.FinishReason
+		}
+		if c.Usage != nil {
+			usage = c.Usage
+		}
+	}
+
+	if content != "hi there" {
+		t.Errorf("accumulated content = %q, want %q", content, "hi there")
+	}
+	if finish != FinishStop {
+		t.Errorf("FinishReason = %q, want %q", finish, FinishStop)
+	}
+	if usage == nil || usage.InputTokens != 9 || usage.OutputTokens != 3 {
+		t.Errorf("Usage = %+v, want {9 3}", usage)
+	}
+}
+
+// Gemini can block a prompt on the streaming endpoint the same way it does on
+// generateContent — a 200 status with a blockReason instead of candidates —
+// and that has to surface as a Recv error, not a silently empty stream.
+func TestGeminiStreamBlockedPromptIsContentPolicyError(t *testing.T) {
+	p := newTestGemini(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		io.WriteString(w, `data: {"promptFeedback":{"blockReason":"SAFETY"},"candidates":[]}`+"\n\n")
+		flusher.Flush()
+	})
+
+	stream, err := p.Stream(context.Background(), Request{
+		Model:    "gemini-2.0-flash",
+		Messages: []Message{{Role: RoleUser, Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	defer stream.Close()
+
+	_, err = stream.Recv()
+	var provErr *Error
+	if !errors.As(err, &provErr) {
+		t.Fatalf("err = %v, want a *provider.Error", err)
+	}
+	if provErr.Kind != KindContentPolicy {
+		t.Errorf("Kind = %q, want %q", provErr.Kind, KindContentPolicy)
+	}
+	if provErr.Model != "gemini-2.0-flash" {
+		t.Errorf("Model = %q, want the requested model recorded", provErr.Model)
+	}
+}

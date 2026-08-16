@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -92,4 +93,27 @@ func writeProviderError(w http.ResponseWriter, log *slog.Logger, err error) {
 	}
 
 	writeError(w, log, statusForKind(provErr.Kind), string(provErr.Kind), message)
+}
+
+// writeSSEError is writeProviderError's counterpart for a stream that has
+// already sent its headers and at least one event: the HTTP status line is
+// long gone, so the same error envelope goes out as an SSE "data:" event
+// instead of a status-coded response. See Step 2.4 in PART1_PLAN.md.
+func writeSSEError(w io.Writer, err error) error {
+	var provErr *provider.Error
+	if !errors.As(err, &provErr) {
+		return writeSSEJSON(w, errorBody{Error: errorDetail{
+			Message: "the gateway encountered an unexpected error",
+			Type:    "internal_error",
+		}})
+	}
+
+	message := provErr.Message
+	if message == "" {
+		message = "the upstream provider returned an error"
+	}
+	return writeSSEJSON(w, errorBody{Error: errorDetail{
+		Message: message,
+		Type:    string(provErr.Kind),
+	}})
 }

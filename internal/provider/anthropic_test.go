@@ -261,3 +261,107 @@ func TestAnthropicClassify(t *testing.T) {
 		})
 	}
 }
+
+// The marquee streaming test: input tokens arrive at message_start, output
+// tokens arrive later at message_delta, and the two must end up combined on
+// one Usage despite being reported a whole stream apart.
+func TestAnthropicStreamDecodesNamedEvents(t *testing.T) {
+	var gotBody anthropicRequest
+
+	p := newTestAnthropic(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &gotBody); err != nil {
+			t.Errorf("upstream received unparseable body: %v", err)
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		for _, block := range []string{
+			"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":15,\"output_tokens\":0}}}\n\n",
+			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0}\n\n",
+			"event: ping\ndata: {\"type\":\"ping\"}\n\n",
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\" there\"}}\n\n",
+			"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+			"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":4}}\n\n",
+			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+		} {
+			io.WriteString(w, block)
+			flusher.Flush()
+		}
+	})
+
+	stream, err := p.Stream(context.Background(), Request{
+		Model:    "claude-sonnet-4-5",
+		Messages: []Message{{Role: RoleUser, Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	chunks := drainStream(t, stream)
+
+	if !gotBody.Stream {
+		t.Error("stream field not sent as true")
+	}
+
+	var content string
+	var finish FinishReason
+	var usage *Usage
+	for _, c := range chunks {
+		content += c.Content
+		if c.FinishReason != "" {
+			finish = c.FinishReason
+		}
+		if c.Usage != nil {
+			usage = c.Usage
+		}
+	}
+
+	if content != "hi there" {
+		t.Errorf("accumulated content = %q, want %q", content, "hi there")
+	}
+	if finish != FinishStop {
+		t.Errorf("FinishReason = %q, want %q", finish, FinishStop)
+	}
+	// The load-bearing assertion: input_tokens from message_start combined with
+	// output_tokens from message_delta, even though Anthropic never reports both
+	// together in a single event.
+	if usage == nil || usage.InputTokens != 15 || usage.OutputTokens != 4 {
+		t.Errorf("Usage = %+v, want {15 4}", usage)
+	}
+}
+
+// Anthropic can fail mid-stream on an HTTP 200 via a named "error" event, a
+// failure the status-code check in Stream can never catch because the
+// response headers already said success.
+func TestAnthropicStreamMidStreamErrorEvent(t *testing.T) {
+	p := newTestAnthropic(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5}}}\n\n")
+		flusher.Flush()
+		io.WriteString(w, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"overloaded\"}}\n\n")
+		flusher.Flush()
+	})
+
+	stream, err := p.Stream(context.Background(), Request{
+		Model:    "claude-sonnet-4-5",
+		Messages: []Message{{Role: RoleUser, Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	defer stream.Close()
+
+	// message_start carries no forwardable content, so Recv's internal loop
+	// keeps reading and the very next event — the error — comes back from this
+	// same call rather than a second one.
+	_, err = stream.Recv()
+	var provErr *Error
+	if !errors.As(err, &provErr) {
+		t.Fatalf("err = %v, want a *provider.Error from the mid-stream error event", err)
+	}
+	if provErr.Message != "overloaded" {
+		t.Errorf("Message = %q, want the error event's message", provErr.Message)
+	}
+}

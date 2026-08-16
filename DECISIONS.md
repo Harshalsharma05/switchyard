@@ -63,3 +63,43 @@ Each adapter wraps the caller's `ctx` with `context.WithTimeout(ctx, cfg.Timeout
 ### Gateway overhead measurement: known limitation on Windows dev machine
 
 `X-Switchyard-Overhead-Ms` = handler time minus `provider.Response.Latency` (the adapter's own measured round trip), so adapter translation work correctly counts as overhead. Verified live against real Groq and Gemini calls. However, Go's monotonic clock on this Windows dev machine has ~529µs granularity — sub-millisecond overhead often reads as `0.000`. Not a code bug, but it means the sub-10ms number can't be credibly measured on Windows; Phase 11's load test must run inside Docker (Linux), where clock resolution is nanosecond-grade.
+
+---
+
+## Phase 2 — Streaming Passthrough
+
+### Wire format: separate `chatChunkResponse`, no usage on the wire
+
+- Mirrors OpenAI's `chat.completion.chunk` shape, kept as its own DTO from `chatResponse` — same reason request/response DTOs are split from the canonical types.
+- `role` sent once, on the first forwarded chunk only; `finish_reason` is `*string` so it's JSON `null` until the last chunk, not `""`.
+- Token usage is **not** put on the wire in Part 1 (no client `stream_options.include_usage` support yet). Still captured server-side into `requestMetrics.usage` and logged, satisfying the plan's "token counts logged correctly for streaming requests" without a wire change.
+
+### Provider overhead for a stream = time to first byte
+
+- `metrics.providerTime` is set once, on the stream's first `Recv()` outcome (chunk, EOF, or error) — not when `Stream()` returns.
+- Status/headers are never sent eagerly; the first real client `Write()` is the first forwarded chunk, which is also what `headerHook` (Phase 1) uses to timestamp the overhead header. Net effect: `X-Switchyard-Overhead-Ms` on a stream reads as time-to-first-token, the boundary the plan recommends.
+
+### Mid-stream error semantics: status code before the first byte, SSE event after
+
+- Tracked with one `sentAny bool`. `Stream()` failing, or any `Recv()` failing before a chunk has actually been written to the client, gets a normal status-coded error (`writeProviderError`) — nothing is on the wire yet, so the status line can still change.
+- A failure after at least one chunk was written gets an SSE `data:` event (`writeSSEError`, reusing the same `errorBody` envelope) since the status line is already committed. No `[DONE]` follows an error.
+- **No fallback on a mid-stream failure.** Partial content already reached the client; retrying against another provider would duplicate it, not fix it. (Matches the plan's recommended answer, recorded here for when Phase 6 exists.)
+
+### Client disconnect cancels the upstream call for free
+
+- `r.Context()` is passed straight into `prov.Stream()`; net/http already cancels a request's `Context` when the client's connection closes. No extra wiring, no polling — verified with a test that cancels the client-side context and confirms the mock's `Recv()` observes it.
+- `openStream` (the streaming HTTP helper) deliberately does **not** wrap `ctx` in the provider's `cfg.Timeout` the way the non-streaming `postJSON` does. That timeout is sized for one request/response round trip; a healthy stream can legitimately run far longer. The caller's own context is the only cancellation signal for a stream.
+
+### Content-free chunks are filtered, not forwarded
+
+- Found live against Groq's reasoning model: it sends dozens of chunks with empty content and no finish reason before real text starts. Forwarding each as its own SSE event was technically correct but needlessly noisy (72 events for a ten-line answer).
+- Since usage is never put on the wire, a chunk with no content and no finish reason carries nothing a client can use — now skipped. Cut the same response to 21 events with identical information content.
+
+### SSE parsing shared across dialects; NDJSON kept separate
+
+- One `sseReader`/`sseStreamReader` pair (in `provider/sse.go`) drives OpenAI, Anthropic, and Gemini — their event *framing* is identical (`event:`/`data:`, blank-line delimited); only what's inside `data:` differs, so each adapter supplies just a `decode` closure.
+- Ollama's NDJSON is a genuinely different wire format (one JSON object per line, no SSE framing) and gets its own `ndjsonStreamReader` rather than being forced through the SSE abstraction.
+
+### Anthropic stream usage: input and output tokens arrive a whole stream apart
+
+- Input tokens come once, at `message_start`; output tokens come later, at `message_delta`. `newStreamDecoder` returns a closure that closes over `inputTokens` to combine both into one `Usage` when `message_delta` arrives — the only adapter that needs stream-local state to decode correctly.

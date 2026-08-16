@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"io"
 	"sync"
 	"time"
 )
@@ -42,9 +43,24 @@ type Mock struct {
 	// PingFunc overrides Ping. When nil, Ping mirrors Complete's outcome.
 	PingFunc func(ctx context.Context) error
 
-	mu       sync.Mutex
-	attempts int
-	requests []Request
+	// StreamChunks is returned by Stream, one at a time, when StreamFunc and
+	// StreamErr are both nil. The slice is shared across calls, not copied, so
+	// tests that need per-call isolation should set StreamFunc instead.
+	StreamChunks []*Chunk
+
+	// StreamErr is returned by Stream when StreamFunc is nil.
+	StreamErr error
+
+	// StreamFunc overrides StreamChunks and StreamErr entirely, for tests that
+	// need to react to the request or hand back a reader with custom Recv
+	// behaviour (a mid-stream failure after N chunks, for instance).
+	StreamFunc func(ctx context.Context, req Request) (StreamReader, error)
+
+	mu             sync.Mutex
+	attempts       int
+	requests       []Request
+	streamAttempts int
+	streamRequests []Request
 }
 
 var _ Provider = (*Mock)(nil)
@@ -109,7 +125,25 @@ func (m *Mock) Complete(ctx context.Context, req Request) (*Response, error) {
 	}, nil
 }
 
-func (m *Mock) Stream(context.Context, Request) (StreamReader, error) {
+// Stream tracks its own attempt count and request log, kept separate from
+// Complete's (Attempts/Requests below) because Phase 6's retry-count
+// assertions are specifically about Complete and must not be diluted by a
+// test that also happens to exercise streaming.
+func (m *Mock) Stream(ctx context.Context, req Request) (StreamReader, error) {
+	m.mu.Lock()
+	m.streamAttempts++
+	m.streamRequests = append(m.streamRequests, req)
+	m.mu.Unlock()
+
+	if m.StreamFunc != nil {
+		return m.StreamFunc(ctx, req)
+	}
+	if m.StreamErr != nil {
+		return nil, m.StreamErr
+	}
+	if m.StreamChunks != nil {
+		return &mockStreamReader{chunks: m.StreamChunks}, nil
+	}
 	return nil, ErrStreamingNotImplemented
 }
 
@@ -142,3 +176,41 @@ func (m *Mock) Requests() []Request {
 	copy(out, m.requests)
 	return out
 }
+
+// StreamAttempts reports how many times Stream has been called.
+func (m *Mock) StreamAttempts() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.streamAttempts
+}
+
+// StreamRequests returns a copy of every request Stream received, in order.
+func (m *Mock) StreamRequests() []Request {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	out := make([]Request, len(m.streamRequests))
+	copy(out, m.streamRequests)
+	return out
+}
+
+// mockStreamReader replays a canned slice of chunks. It is the StreamReader
+// behind Mock.StreamChunks — simple by design, since anything a test needs
+// beyond "hand back these chunks in order" (a failure partway through,
+// latency, cancellation) is exactly what StreamFunc exists for instead of
+// growing this type's configuration surface.
+type mockStreamReader struct {
+	chunks []*Chunk
+	i      int
+}
+
+func (r *mockStreamReader) Recv() (*Chunk, error) {
+	if r.i >= len(r.chunks) {
+		return nil, io.EOF
+	}
+	c := r.chunks[r.i]
+	r.i++
+	return c, nil
+}
+
+func (r *mockStreamReader) Close() error { return nil }

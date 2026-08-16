@@ -106,6 +106,61 @@ func postJSON(ctx context.Context, cfg Config, client *http.Client, url, model s
 	}, nil
 }
 
+// openStream starts a streaming POST and hands back the live response without
+// reading its body. postJSON cannot be reused here: it reads the whole body
+// before returning, which is exactly the buffering Phase 2's design constraint
+// forbids for a stream. Ownership of resp.Body passes to the caller, which
+// must close it — the StreamReader implementations do this in Close.
+//
+// Unlike postJSON, this does not wrap ctx in a cfg.Timeout deadline. That
+// timeout is sized for one non-streaming round trip; a stream legitimately
+// runs far longer while still healthy. The cancellation signal for a stream is
+// the caller's own context, which Step 2.3's handler ties to the client
+// connection — when the client goes away, ctx.Done() fires and that is what
+// stops the upstream call.
+func openStream(ctx context.Context, cfg Config, client *http.Client, url, model string, headers map[string]string, payload any) (*http.Response, error) {
+	buf, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("encoding request for %s: %w", cfg.Name, err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buf))
+	if err != nil {
+		return nil, fmt.Errorf("building request for %s: %w", cfg.Name, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, NewTransportError(cfg.Name, model, err)
+	}
+	return resp, nil
+}
+
+// readStreamError classifies a non-2xx response to a streaming request. It
+// exists once here rather than once per adapter because every adapter follows
+// the same shape: read the (bounded) body, hand it to the adapter's own
+// classify, apply Retry-After. The one difference from postJSON's error path
+// is that there was never a stream to preserve, so the body is read in full —
+// this is the Step 2.4 "error before the first byte" case, not a mid-stream
+// one.
+func readStreamError(resp *http.Response, cfg Config, model string, classify func(model string, status int, body []byte) *Error) error {
+	defer resp.Body.Close()
+
+	body, err := readBody(resp.Body)
+	if err != nil {
+		return NewTransportError(cfg.Name, model, err)
+	}
+
+	provErr := classify(model, resp.StatusCode, body)
+	provErr.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+	return provErr
+}
+
 // parseRetryAfter interprets a Retry-After header, which RFC 9110 allows to be
 // either a delay in seconds or an absolute HTTP-date. Zero means the provider
 // gave no usable instruction.
