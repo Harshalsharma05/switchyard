@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/Harshalsharma05/switchyard/internal/admin"
 	"github.com/Harshalsharma05/switchyard/internal/budget"
+	"github.com/Harshalsharma05/switchyard/internal/health"
 	"github.com/Harshalsharma05/switchyard/internal/proxy"
 	"github.com/Harshalsharma05/switchyard/internal/ratelimit"
 )
@@ -35,6 +37,21 @@ const (
 	defaultPublicAddr    = ":8080"
 	defaultAdminAddr     = ":9090"
 	defaultDrainTimeout  = 25 * time.Second
+
+	// Health check cadence (Phase 5). These stay process-level env vars rather
+	// than configs/providers.yaml fields: every provider is probed on the same
+	// schedule, so there's nothing to route per-provider yet, and it keeps the
+	// same shape as SWITCHYARD_DRAIN_TIMEOUT above.
+	defaultHealthCheckInterval = 30 * time.Second
+	defaultHealthCheckTimeout  = 5 * time.Second
+
+	// Step 5.3 status thresholds. The error rates are the plan's own "e.g."
+	// examples; the two counts are round numbers for values the plan leaves
+	// unspecified entirely.
+	defaultDegradedErrorRate       = 0.10
+	defaultDownErrorRate           = 0.50
+	defaultDownConsecutiveFailures = 3
+	defaultRecoveryStreak          = 3
 
 	// readHeaderTimeout bounds how long a client may take to send its headers,
 	// which is the Slowloris defence. Note that WriteTimeout is deliberately
@@ -100,21 +117,70 @@ func run() error {
 	limiter := ratelimit.NewLimiter(redisClient)
 	budgetTracker := budget.NewTracker(redisClient)
 
+	// Step 5.2's passive signal: the proxy handler records every real
+	// provider call's outcome here. Same one-window-per-provider
+	// construction, from the same initial registry, as everything else built
+	// in this section.
+	healthRecorder := health.NewRecorder(initial.registry.Providers())
+
+	// Step 5.3's status computation reads healthRecorder's windows and is fed
+	// the active checker's ping outcomes below. Its thresholds are
+	// process-level env vars for the same reason the checker's interval and
+	// timeout are: they say how cautious this deployment wants to be, not
+	// something that differs per provider.
+	healthMonitor, err := health.NewMonitor(
+		initial.registry.Providers(),
+		healthRecorder,
+		redisClient,
+		log,
+		health.MonitorConfig{
+			DegradedErrorRate:       floatOr("SWITCHYARD_HEALTH_DEGRADED_ERROR_RATE", defaultDegradedErrorRate),
+			DownErrorRate:           floatOr("SWITCHYARD_HEALTH_DOWN_ERROR_RATE", defaultDownErrorRate),
+			DownConsecutiveFailures: intOr("SWITCHYARD_HEALTH_DOWN_CONSECUTIVE_FAILURES", defaultDownConsecutiveFailures),
+			RecoveryStreak:          intOr("SWITCHYARD_HEALTH_RECOVERY_STREAK", defaultRecoveryStreak),
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("building health monitor: %w", err)
+	}
+
+	// The Step 5.1 active health checker pings every provider on its own
+	// schedule, independent of request traffic, and reports each ping's
+	// outcome to healthMonitor. It's built from the initial registry's
+	// provider list once, at boot — like the rest of this function, it does
+	// not yet react to a hot reload replacing the registry.
+	checker, err := health.NewChecker(
+		initial.registry.Providers(),
+		healthMonitor,
+		log,
+		durationOr("SWITCHYARD_HEALTH_CHECK_INTERVAL", defaultHealthCheckInterval),
+		durationOr("SWITCHYARD_HEALTH_CHECK_TIMEOUT", defaultHealthCheckTimeout),
+	)
+	if err != nil {
+		return fmt.Errorf("building health checker: %w", err)
+	}
+
 	// ready gates /readyz. It flips true once wiring is complete and false again
 	// the moment shutdown begins, so a load balancer stops sending new traffic
 	// while in-flight requests drain.
 	var ready atomic.Bool
-	isReady := ready.Load
+
+	// Step 5.4: readiness also fails once every provider is Down —
+	// healthMonitor.AllDown() — but never on a single bad provider, which is
+	// a routing problem for Phase 6's fallback chains, not a readiness one.
+	isReady := func() bool {
+		return ready.Load() && !healthMonitor.AllDown()
+	}
 
 	publicSrv := &http.Server{
 		Addr:              envOr("SWITCHYARD_ADDR", defaultPublicAddr),
-		Handler:           proxy.NewRouter(store, store, limiter, budgetTracker, store, log, isReady),
+		Handler:           proxy.NewRouter(store, store, limiter, budgetTracker, store, healthRecorder, log, isReady),
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
 
 	adminSrv := &http.Server{
 		Addr: envOr("SWITCHYARD_ADMIN_ADDR", defaultAdminAddr),
-		Handler: admin.NewRouter(isReady, store, budgetTracker, store, newReloader(store, providersPath, teamsPath), log,
+		Handler: admin.NewRouter(isReady, store, budgetTracker, store, healthMonitor, newReloader(store, providersPath, teamsPath), log,
 			proxy.Recoverer(log),
 			proxy.RequestID,
 			proxy.Logger(log),
@@ -148,6 +214,11 @@ func run() error {
 
 	go serve(publicSrv, publicLn, "public", log, serverErr)
 	go serve(adminSrv, adminLn, "admin", log, serverErr)
+
+	// checker.Run blocks until ctx is cancelled, which happens on the same
+	// SIGINT/SIGTERM that starts draining the listeners below — so the health
+	// checker's goroutines stop on the same signal rather than outliving it.
+	go checker.Run(ctx)
 
 	ready.Store(true)
 	log.Info("gateway started",
@@ -247,4 +318,28 @@ func durationOr(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
+}
+
+func floatOr(key string, fallback float64) float64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return fallback
+	}
+	return f
+}
+
+func intOr(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	i, err := strconv.Atoi(v)
+	if err != nil {
+		return fallback
+	}
+	return i
 }

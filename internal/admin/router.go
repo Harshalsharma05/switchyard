@@ -24,11 +24,11 @@ type Middleware func(http.Handler) http.Handler
 // NewRouter builds the admin listener's handler.
 //
 // Steps 4.3 and 4.4 mount the team, provider, and reload endpoints here;
-// Phase 9 will add promhttp at /metrics. Route paths carry an explicit
-// /admin prefix even though the whole listener is already the admin port,
-// leaving room for /metrics and future operator endpoints to live at the
-// root without colliding with this namespace.
-func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers ProviderLister, reload Reloader, log *slog.Logger, middleware ...Middleware) http.Handler {
+// Step 5.4 adds the health endpoint; Phase 9 will add promhttp at /metrics.
+// Route paths carry an explicit /admin prefix even though the whole listener
+// is already the admin port, leaving room for /metrics and future operator
+// endpoints to live at the root without colliding with this namespace.
+func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers ProviderLister, healthReader HealthReader, reload Reloader, log *slog.Logger, middleware ...Middleware) http.Handler {
 	r := chi.NewRouter()
 
 	for _, mw := range middleware {
@@ -46,6 +46,7 @@ func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers 
 	})
 
 	r.Get("/admin/providers", listProviders(providers, log))
+	r.Get("/admin/providers/health", listProviderHealth(healthReader, log))
 	r.Post("/admin/reload", reloadConfig(reload, log))
 
 	return r

@@ -97,6 +97,14 @@ func (s stubCostCalculator) Cost(string, int, int) (int64, error) {
 	return s.costMicros, nil
 }
 
+// stubHealthRecorder is the fake behind the consumer-defined HealthRecorder
+// interface. It does nothing: no test in this file is about Step 5.2's
+// passive signal, that lives in internal/health's own tests against the real
+// Recorder, so this only needs to satisfy the interface without panicking.
+type stubHealthRecorder struct{}
+
+func (stubHealthRecorder) Record(string, time.Duration, error) {}
+
 // stubBudgetTracker is the fake behind the consumer-defined BudgetTracker
 // interface. Its zero value allows every reservation and reports zero spend,
 // which is enough for every test that is not specifically about budget
@@ -167,7 +175,7 @@ func newTestServerWithAuth(t *testing.T, resolver Resolver, authr Authenticator)
 func newTestServerFull(t *testing.T, resolver Resolver, authr Authenticator, limiter RateLimiter) *httptest.Server {
 	t.Helper()
 
-	srv := httptest.NewServer(NewRouter(resolver, authr, limiter, stubBudgetTracker{}, stubCostCalculator{}, discardLogger(), func() bool { return true }))
+	srv := httptest.NewServer(NewRouter(resolver, authr, limiter, stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, discardLogger(), func() bool { return true }))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -787,7 +795,7 @@ func TestRoutingEdges(t *testing.T) {
 
 func TestProbes(t *testing.T) {
 	t.Run("healthz is always ok", func(t *testing.T) {
-		srv := httptest.NewServer(NewRouter(stubResolver{}, stubAuthenticator{}, stubRateLimiter{}, stubBudgetTracker{}, stubCostCalculator{}, discardLogger(), func() bool { return false }))
+		srv := httptest.NewServer(NewRouter(stubResolver{}, stubAuthenticator{}, stubRateLimiter{}, stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, discardLogger(), func() bool { return false }))
 		defer srv.Close()
 
 		resp, err := http.Get(srv.URL + "/healthz")
@@ -807,7 +815,7 @@ func TestProbes(t *testing.T) {
 		tests := map[bool]int{true: http.StatusOK, false: http.StatusServiceUnavailable}
 
 		for ready, want := range tests {
-			srv := httptest.NewServer(NewRouter(stubResolver{}, stubAuthenticator{}, stubRateLimiter{}, stubBudgetTracker{}, stubCostCalculator{}, discardLogger(), func() bool { return ready }))
+			srv := httptest.NewServer(NewRouter(stubResolver{}, stubAuthenticator{}, stubRateLimiter{}, stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, discardLogger(), func() bool { return ready }))
 
 			resp, err := http.Get(srv.URL + "/readyz")
 			if err != nil {

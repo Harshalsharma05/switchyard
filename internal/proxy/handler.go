@@ -48,19 +48,34 @@ type CostCalculator interface {
 	Cost(model string, inputTokens, outputTokens int) (int64, error)
 }
 
+// HealthRecorder is the slice of health.Recorder this package needs: Step
+// 5.2's passive signal. The handler calls Record once per real provider call
+// — success or failure — so Step 5.3's status computation has live traffic to
+// judge a provider by, not just the active checker's periodic pings.
+//
+// latency is whatever the call site considers this attempt's response time:
+// full round trip for a non-streaming completion, time to first byte for a
+// stream. err is the exact error Complete or Stream returned, nil on success,
+// so Recorder can classify a provider.Error's Kind itself rather than the
+// handler pre-deciding what counts as a timeout.
+type HealthRecorder interface {
+	Record(providerName string, latency time.Duration, err error)
+}
+
 // Handler serves the public API.
 type Handler struct {
-	resolver      Resolver
-	limiter       RateLimiter
-	budgetTracker BudgetTracker
-	calc          CostCalculator
-	log           *slog.Logger
+	resolver       Resolver
+	limiter        RateLimiter
+	budgetTracker  BudgetTracker
+	calc           CostCalculator
+	healthRecorder HealthRecorder
+	log            *slog.Logger
 }
 
 // NewHandler wires the handler with its dependencies. Nothing here reads
 // package-level state.
-func NewHandler(resolver Resolver, limiter RateLimiter, budgetTracker BudgetTracker, calc CostCalculator, log *slog.Logger) *Handler {
-	return &Handler{resolver: resolver, limiter: limiter, budgetTracker: budgetTracker, calc: calc, log: log}
+func NewHandler(resolver Resolver, limiter RateLimiter, budgetTracker BudgetTracker, calc CostCalculator, healthRecorder HealthRecorder, log *slog.Logger) *Handler {
+	return &Handler{resolver: resolver, limiter: limiter, budgetTracker: budgetTracker, calc: calc, healthRecorder: healthRecorder, log: log}
 }
 
 // recordCost prices a finished request and stores it on metrics for Logger to
@@ -175,6 +190,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 			// overhead number.
 			metrics.providerTime = callElapsed
 		}
+		h.healthRecorder.Record(prov.Name(), callElapsed, err)
 
 		h.log.LogAttrs(r.Context(), slog.LevelWarn, "provider call failed",
 			slog.String("request_id", RequestIDFrom(r.Context())),
@@ -185,6 +201,8 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeProviderError(w, h.log, err)
 		return
 	}
+
+	h.healthRecorder.Record(resp.Provider, resp.Latency, nil)
 
 	if metrics != nil {
 		metrics.providerName = resp.Provider
@@ -480,10 +498,13 @@ func (h *Handler) streamChatCompletions(w http.ResponseWriter, r *http.Request, 
 	callStart := time.Now()
 	stream, err := prov.Stream(r.Context(), req.toProviderRequest())
 	if err != nil {
+		callElapsed := time.Since(callStart)
 		if metrics != nil {
 			metrics.providerName = prov.Name()
-			metrics.providerTime = time.Since(callStart)
+			metrics.providerTime = callElapsed
 		}
+		h.healthRecorder.Record(prov.Name(), callElapsed, err)
+
 		h.log.LogAttrs(r.Context(), slog.LevelWarn, "provider stream call failed",
 			slog.String("request_id", requestID),
 			slog.String("provider", prov.Name()),
@@ -537,6 +558,12 @@ func (h *Handler) streamChatCompletions(w http.ResponseWriter, r *http.Request, 
 	gotFirstByte := false
 	sentAny := false
 
+	// firstByteLatency is what health.Recorder gets as this attempt's latency,
+	// win or lose — kept independent of metrics (which can be nil if Timing
+	// did not run) because Step 5.2's passive signal is a functional part of
+	// Phase 5, not an observability nicety layered on top of it.
+	var firstByteLatency time.Duration
+
 	for {
 		chunk, err := stream.Recv()
 
@@ -546,9 +573,12 @@ func (h *Handler) streamChatCompletions(w http.ResponseWriter, r *http.Request, 
 		// comment, the overhead this request reports is a time-to-first-token
 		// measurement: the right boundary for a stream, where total duration is
 		// dominated by generation, not by the gateway.
-		if !gotFirstByte && metrics != nil {
-			metrics.providerTime = time.Since(callStart)
+		if !gotFirstByte {
+			firstByteLatency = time.Since(callStart)
 			gotFirstByte = true
+			if metrics != nil {
+				metrics.providerTime = firstByteLatency
+			}
 		}
 
 		if err != nil {
@@ -569,6 +599,7 @@ func (h *Handler) streamChatCompletions(w http.ResponseWriter, r *http.Request, 
 				// Nothing has reached the client yet — this is functionally a
 				// Stream() failure that just happened to surface on a later Recv
 				// instead, so it gets the same normal-error treatment.
+				h.healthRecorder.Record(prov.Name(), firstByteLatency, err)
 				h.log.LogAttrs(r.Context(), slog.LevelWarn, "provider stream failed before any chunk",
 					slog.String("request_id", requestID),
 					slog.String("provider", prov.Name()),
@@ -583,6 +614,7 @@ func (h *Handler) streamChatCompletions(w http.ResponseWriter, r *http.Request, 
 			// only way left to tell the client this failed, and the stream ends
 			// here — no [DONE], and no fallback: partial content already
 			// reached the client, so retrying would duplicate it.
+			h.healthRecorder.Record(prov.Name(), firstByteLatency, err)
 			h.log.LogAttrs(r.Context(), slog.LevelWarn, "provider stream failed mid-stream",
 				slog.String("request_id", requestID),
 				slog.String("provider", prov.Name()),
@@ -628,15 +660,17 @@ func (h *Handler) streamChatCompletions(w http.ResponseWriter, r *http.Request, 
 		sentAny = true
 	}
 
+	// Only reached on a clean stream completion — every mid-stream failure
+	// return above already recorded its own outcome and returned before here.
+	h.healthRecorder.Record(prov.Name(), firstByteLatency, nil)
+
 	if metrics != nil {
 		metrics.usage = usage
-		// Only reached on a clean stream completion — every mid-stream
-		// failure return above skips this, so a request that never got a
-		// terminal usage-bearing chunk is priced at zero rather than guessed
-		// from the estimator actualTokens falls back to. That is a known gap
-		// (see DECISIONS.md): real generation happened and cost something,
-		// but Step 4.1 only has the provider's own usage figures to price
-		// from, and this one never arrived.
+		// A request that never got a terminal usage-bearing chunk is priced at
+		// zero rather than guessed from the estimator actualTokens falls back
+		// to. That is a known gap (see DECISIONS.md): real generation happened
+		// and cost something, but Step 4.1 only has the provider's own usage
+		// figures to price from, and this one never arrived.
 		h.recordCost(r.Context(), metrics, req.Model, usage)
 	}
 

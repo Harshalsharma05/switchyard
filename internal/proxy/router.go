@@ -44,8 +44,8 @@ import (
 // inside ChatCompletions too (see reserveBudget in handler.go), right after
 // the TPM reservation succeeds. Phase 8's tracing inserts alongside Auth and
 // RateLimit, inside Logger, for the same reasons those two do.
-func NewRouter(resolver Resolver, authr Authenticator, limiter RateLimiter, budgetTracker BudgetTracker, calc CostCalculator, log *slog.Logger, ready func() bool) http.Handler {
-	h := NewHandler(resolver, limiter, budgetTracker, calc, log)
+func NewRouter(resolver Resolver, authr Authenticator, limiter RateLimiter, budgetTracker BudgetTracker, calc CostCalculator, healthRecorder HealthRecorder, log *slog.Logger, ready func() bool) http.Handler {
+	h := NewHandler(resolver, limiter, budgetTracker, calc, healthRecorder, log)
 
 	r := chi.NewRouter()
 
@@ -88,12 +88,14 @@ func Healthz(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte(`{"status":"ok"}` + "\n"))
 }
 
-// Readyz reports whether the gateway can serve traffic — in Phase 1, whether
-// config loaded and the registry was built.
-//
-// Phase 5 extends this to consider provider health, where the rule is that only
-// *all* providers being down makes the gateway unready. One bad provider is a
-// routing problem, not a reason to be pulled from a load balancer.
+// Readyz reports whether the gateway can serve traffic. ready is composed in
+// cmd/gateway from two things as of Step 5.4: whether config loaded and the
+// registry was built (Phase 1), and whether at least one provider is not
+// Down (health.Monitor.AllDown). Readyz itself stays a plain bool check —
+// the OR of those two conditions lives where they're both in scope, not
+// here — so only *every* provider being down makes the gateway unready. One
+// bad provider is a routing problem for Phase 6's fallback chains, not a
+// reason to be pulled from a load balancer.
 func Readyz(ready func() bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
