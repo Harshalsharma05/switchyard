@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Harshalsharma05/switchyard/internal/budget"
 	"github.com/Harshalsharma05/switchyard/internal/provider"
 	"github.com/Harshalsharma05/switchyard/internal/ratelimit"
 )
@@ -37,17 +38,49 @@ type Resolver interface {
 	DefaultMaxTokensFor(model string) (int, bool)
 }
 
+// CostCalculator is the slice of budget.Calculator this package needs.
+//
+// Declared here, by the consumer, for the same reason Resolver and
+// RateLimiter are: the handler depends on turning a model and a token count
+// into a price, not on how that price was loaded or computed — which is what
+// lets a test inject a fake without building a real pricing table.
+type CostCalculator interface {
+	Cost(model string, inputTokens, outputTokens int) (int64, error)
+}
+
 // Handler serves the public API.
 type Handler struct {
-	resolver Resolver
-	limiter  RateLimiter
-	log      *slog.Logger
+	resolver      Resolver
+	limiter       RateLimiter
+	budgetTracker BudgetTracker
+	calc          CostCalculator
+	log           *slog.Logger
 }
 
 // NewHandler wires the handler with its dependencies. Nothing here reads
 // package-level state.
-func NewHandler(resolver Resolver, limiter RateLimiter, log *slog.Logger) *Handler {
-	return &Handler{resolver: resolver, limiter: limiter, log: log}
+func NewHandler(resolver Resolver, limiter RateLimiter, budgetTracker BudgetTracker, calc CostCalculator, log *slog.Logger) *Handler {
+	return &Handler{resolver: resolver, limiter: limiter, budgetTracker: budgetTracker, calc: calc, log: log}
+}
+
+// recordCost prices a finished request and stores it on metrics for Logger to
+// report.
+//
+// A pricing-lookup failure is logged and left at zero rather than surfaced to
+// the caller: by the time this runs, the response has already succeeded (or
+// the stream has already completed) and cost accounting must never become the
+// reason a request fails — the same rule CLAUDE.md states for telemetry.
+func (h *Handler) recordCost(ctx context.Context, metrics *requestMetrics, model string, usage provider.Usage) {
+	if metrics == nil {
+		return
+	}
+	cost, err := h.calc.Cost(model, usage.InputTokens, usage.OutputTokens)
+	if err != nil {
+		h.log.ErrorContext(ctx, "computing request cost",
+			slog.String("model", model), slog.Any("error", err))
+		return
+	}
+	metrics.costMicros = cost
 }
 
 // ChatCompletions serves POST /v1/chat/completions, streaming and
@@ -95,6 +128,33 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	budgetReservation, ok := h.reserveBudget(w, r, req)
+	if !ok {
+		// The TPM defer above still fires with actual left at zero — a full
+		// refund, correct here since no provider was ever called. Nothing
+		// about this reservation itself needs unwinding: reserveBudget only
+		// returns a non-nil handle when it succeeded.
+		return
+	}
+
+	// Mirrors the TPM defer immediately above: registered right after a
+	// successful reservation, so it settles on every exit path, and reads
+	// costMicros from metrics rather than a local variable because
+	// recordCost — called from both the streaming and non-streaming paths
+	// below — is what actually knows the real cost once usage is final.
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), reconcileTimeout)
+		defer cancel()
+		var actualCostMicros int64
+		if m := metricsFrom(r.Context()); m != nil {
+			actualCostMicros = m.costMicros
+		}
+		if err := budgetReservation.Reconcile(ctx, actualCostMicros); err != nil {
+			h.log.ErrorContext(r.Context(), "reconciling budget reservation",
+				slog.String("request_id", RequestIDFrom(r.Context())), slog.Any("error", err))
+		}
+	}()
+
 	if req.Stream {
 		actual = h.streamChatCompletions(w, r, prov, req)
 		return
@@ -135,6 +195,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		// it is. That makes the headline number larger, and honest.
 		metrics.providerTime = resp.Latency
 		metrics.usage = resp.Usage
+		h.recordCost(r.Context(), metrics, resp.Model, resp.Usage)
 	}
 	actual = resp.Usage.InputTokens + resp.Usage.OutputTokens
 
@@ -216,6 +277,83 @@ func (h *Handler) reserveTokens(w http.ResponseWriter, r *http.Request, req chat
 
 		writePriorityShedError(w, h.log, ratelimit.TPM, team.RateLimits.TPM, res)
 		return nil, false
+	}
+
+	return reservation, true
+}
+
+// reserveBudget checks and reserves against the team's monthly spend cap,
+// once the TPM bucket has already admitted the request.
+//
+// Unlike reserveTokens, a Redis failure here denies the request rather than
+// letting it through: per CLAUDE.md, budget enforcement fails *closed*,
+// because an unrecoverable dollar is a different class of problem than a
+// delayed request — the one dependency in this gateway where "never be the
+// reason a request fails" is deliberately overridden.
+func (h *Handler) reserveBudget(w http.ResponseWriter, r *http.Request, req chatRequest) (*budget.Reservation, bool) {
+	team := TeamFrom(r.Context())
+	if team == nil {
+		h.log.ErrorContext(r.Context(), "chat completions reached without an authenticated team")
+		writeError(w, h.log, http.StatusInternalServerError, "internal_error",
+			"the gateway could not resolve the caller's team")
+		return nil, false
+	}
+
+	defaultMaxTokens, ok := h.resolver.DefaultMaxTokensFor(req.Model)
+	if !ok {
+		// resolve() already succeeded for this exact model, so a miss here is
+		// a wiring bug between Resolver's two methods, not a real one — same
+		// reasoning reserveTokens gives for its own identical check.
+		h.log.ErrorContext(r.Context(), "resolved model has no default max tokens",
+			slog.String("model", req.Model))
+		writeError(w, h.log, http.StatusInternalServerError, "internal_error",
+			"the gateway could not size this request's budget reservation")
+		return nil, false
+	}
+
+	estimatedMicros, err := h.calc.Cost(req.Model, req.estimateInputTokens(), req.estimateOutputCeiling(defaultMaxTokens))
+	if err != nil {
+		// Same "wiring bug, not a real gap" reasoning as recordCost: resolve()
+		// already proved a provider serves this model, and every served model
+		// has a pricing entry by construction.
+		h.log.ErrorContext(r.Context(), "estimating request cost",
+			slog.String("model", req.Model), slog.Any("error", err))
+		writeError(w, h.log, http.StatusInternalServerError, "internal_error",
+			"the gateway could not price this request")
+		return nil, false
+	}
+
+	// checkTimeout, not r.Context() directly: same reasoning as
+	// reserveTokens's identical use of it — bounds how long a Redis problem
+	// can add to this request, independent of the underlying client's own
+	// retry behavior.
+	checkCtx, cancel := context.WithTimeout(r.Context(), checkTimeout)
+	defer cancel()
+
+	reservation, res, err := h.budgetTracker.Reserve(checkCtx, team.ID, team.MonthlyBudgetMicros, estimatedMicros)
+	if err != nil {
+		h.log.ErrorContext(r.Context(), "budget check failed; failing closed",
+			slog.String("team", team.ID), slog.Any("error", err))
+		writeBudgetUnavailableError(w, h.log)
+		return nil, false
+	}
+
+	if !res.Allowed {
+		writeBudgetExceededError(w, h.log, team.ID, res.SpentMicros, team.MonthlyBudgetMicros)
+		return nil, false
+	}
+
+	// res.SpentMicros is the total *after* admitting this request, the same
+	// "after, not reconstructed to before" reading Step 3.5 already uses for
+	// its own threshold check — the request that crosses the 80% line is the
+	// one that gets the warning.
+	if utilization(res.SpentMicros, team.MonthlyBudgetMicros) >= budgetWarnThreshold {
+		w.Header().Set(HeaderBudgetWarning, "true")
+		h.log.LogAttrs(r.Context(), slog.LevelWarn, "team approaching monthly budget",
+			slog.String("team", team.ID),
+			slog.Int64("spent_micros", res.SpentMicros),
+			slog.Int64("cap_micros", team.MonthlyBudgetMicros),
+		)
 	}
 
 	return reservation, true
@@ -492,6 +630,14 @@ func (h *Handler) streamChatCompletions(w http.ResponseWriter, r *http.Request, 
 
 	if metrics != nil {
 		metrics.usage = usage
+		// Only reached on a clean stream completion — every mid-stream
+		// failure return above skips this, so a request that never got a
+		// terminal usage-bearing chunk is priced at zero rather than guessed
+		// from the estimator actualTokens falls back to. That is a known gap
+		// (see DECISIONS.md): real generation happened and cost something,
+		// but Step 4.1 only has the provider's own usage figures to price
+		// from, and this one never arrived.
+		h.recordCost(r.Context(), metrics, req.Model, usage)
 	}
 
 	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {

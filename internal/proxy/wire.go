@@ -147,6 +147,18 @@ func (r chatRequest) estimateInputTokens() int {
 	return total
 }
 
+// estimateOutputCeiling returns the most the response is allowed to be: the
+// caller's own max_tokens if set, otherwise the provider's configured
+// default. Both Step 3.3's TPM estimate and Step 4.2's budget estimate need
+// this same ceiling — priced or counted differently by each — so it is its
+// own helper rather than logic duplicated inside estimateTokens.
+func (r chatRequest) estimateOutputCeiling(defaultMaxTokens int) int {
+	if r.MaxTokens > 0 {
+		return r.MaxTokens
+	}
+	return defaultMaxTokens
+}
+
 // estimateTokens returns the ceiling to reserve against a team's TPM bucket:
 // the estimated prompt plus the most the response is allowed to be.
 //
@@ -157,11 +169,7 @@ func (r chatRequest) estimateInputTokens() int {
 // interface. Passing it in also keeps the limit in configs/ rather than
 // hardcoded in a helper.
 func (r chatRequest) estimateTokens(defaultMaxTokens int) int {
-	output := r.MaxTokens
-	if output <= 0 {
-		output = defaultMaxTokens
-	}
-	return r.estimateInputTokens() + output
+	return r.estimateInputTokens() + r.estimateOutputCeiling(defaultMaxTokens)
 }
 
 // toProviderRequest converts the public shape into the canonical one.

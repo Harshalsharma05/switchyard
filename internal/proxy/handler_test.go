@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Harshalsharma05/switchyard/internal/auth"
+	"github.com/Harshalsharma05/switchyard/internal/budget"
 	"github.com/Harshalsharma05/switchyard/internal/provider"
 	"github.com/Harshalsharma05/switchyard/internal/ratelimit"
 )
@@ -81,6 +82,45 @@ func (s stubRateLimiter) Reserve(context.Context, string, ratelimit.LimitType, i
 	return nil, ratelimit.Result{Allowed: true, Remaining: 999}, nil
 }
 
+// stubCostCalculator is the fake behind the consumer-defined CostCalculator
+// interface. Its zero value prices every model at zero, which is enough for
+// every test that is not specifically about cost accounting.
+type stubCostCalculator struct {
+	costMicros int64
+	err        error
+}
+
+func (s stubCostCalculator) Cost(string, int, int) (int64, error) {
+	if s.err != nil {
+		return 0, s.err
+	}
+	return s.costMicros, nil
+}
+
+// stubBudgetTracker is the fake behind the consumer-defined BudgetTracker
+// interface. Its zero value allows every reservation and reports zero spend,
+// which is enough for every test that is not specifically about budget
+// enforcement — the same role stubRateLimiter's permissive default plays for
+// RateLimiter.
+type stubBudgetTracker struct {
+	result *budget.Result
+	err    error
+}
+
+func (s stubBudgetTracker) Reserve(context.Context, string, int64, int64) (*budget.Reservation, budget.Result, error) {
+	if s.err != nil {
+		return nil, budget.Result{}, s.err
+	}
+	if s.result != nil {
+		// nil is always safe here regardless of Allowed, mirroring
+		// stubRateLimiter's Reserve: budget.Reservation's fields are
+		// unexported, so this package cannot fabricate a working one, and a
+		// denied reservation has nothing to reconcile anyway.
+		return nil, *s.result, nil
+	}
+	return nil, budget.Result{Allowed: true, SpentMicros: 0}, nil
+}
+
 // stubAuthenticator is the fake behind the consumer-defined Authenticator
 // interface, the same role stubResolver plays for Resolver.
 type stubAuthenticator struct {
@@ -127,7 +167,7 @@ func newTestServerWithAuth(t *testing.T, resolver Resolver, authr Authenticator)
 func newTestServerFull(t *testing.T, resolver Resolver, authr Authenticator, limiter RateLimiter) *httptest.Server {
 	t.Helper()
 
-	srv := httptest.NewServer(NewRouter(resolver, authr, limiter, discardLogger(), func() bool { return true }))
+	srv := httptest.NewServer(NewRouter(resolver, authr, limiter, stubBudgetTracker{}, stubCostCalculator{}, discardLogger(), func() bool { return true }))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -724,11 +764,30 @@ func TestRoutingEdges(t *testing.T) {
 			t.Errorf("status = %d, want 405", resp.StatusCode)
 		}
 	})
+
+	// Phase 4's own checklist: "Admin port is not reachable from the public
+	// port's network interface." Binding the two listeners to separate
+	// addresses (main.go) is what makes that a network fact rather than a
+	// routing convention, but the routing side of it — proxy.NewRouter never
+	// mounting any /admin path at all — deserves its own direct proof rather
+	// than trusting that main.go's two net.Listen calls are the whole story.
+	for _, path := range []string{"/admin/teams", "/admin/teams/acme", "/admin/providers", "/admin/reload"} {
+		t.Run("admin path "+path+" is not mounted on the public router", func(t *testing.T) {
+			resp, err := http.Get(srv.URL + path)
+			if err != nil {
+				t.Fatalf("GET: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusNotFound {
+				t.Errorf("status = %d, want 404: the public router must not serve any /admin path", resp.StatusCode)
+			}
+		})
+	}
 }
 
 func TestProbes(t *testing.T) {
 	t.Run("healthz is always ok", func(t *testing.T) {
-		srv := httptest.NewServer(NewRouter(stubResolver{}, stubAuthenticator{}, stubRateLimiter{}, discardLogger(), func() bool { return false }))
+		srv := httptest.NewServer(NewRouter(stubResolver{}, stubAuthenticator{}, stubRateLimiter{}, stubBudgetTracker{}, stubCostCalculator{}, discardLogger(), func() bool { return false }))
 		defer srv.Close()
 
 		resp, err := http.Get(srv.URL + "/healthz")
@@ -748,7 +807,7 @@ func TestProbes(t *testing.T) {
 		tests := map[bool]int{true: http.StatusOK, false: http.StatusServiceUnavailable}
 
 		for ready, want := range tests {
-			srv := httptest.NewServer(NewRouter(stubResolver{}, stubAuthenticator{}, stubRateLimiter{}, discardLogger(), func() bool { return ready }))
+			srv := httptest.NewServer(NewRouter(stubResolver{}, stubAuthenticator{}, stubRateLimiter{}, stubBudgetTracker{}, stubCostCalculator{}, discardLogger(), func() bool { return ready }))
 
 			resp, err := http.Get(srv.URL + "/readyz")
 			if err != nil {

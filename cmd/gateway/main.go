@@ -20,9 +20,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/Harshalsharma05/switchyard/internal/admin"
-	"github.com/Harshalsharma05/switchyard/internal/auth"
-	"github.com/Harshalsharma05/switchyard/internal/config"
-	"github.com/Harshalsharma05/switchyard/internal/provider"
+	"github.com/Harshalsharma05/switchyard/internal/budget"
 	"github.com/Harshalsharma05/switchyard/internal/proxy"
 	"github.com/Harshalsharma05/switchyard/internal/ratelimit"
 )
@@ -58,28 +56,21 @@ func main() {
 func run() error {
 	log := newLogger()
 
-	providers, err := config.LoadProviders(envOr("SWITCHYARD_PROVIDERS_CONFIG", defaultProvidersPath))
-	if err != nil {
-		return fmt.Errorf("loading provider config: %w", err)
-	}
+	providersPath := envOr("SWITCHYARD_PROVIDERS_CONFIG", defaultProvidersPath)
+	teamsPath := envOr("SWITCHYARD_TEAMS_CONFIG", defaultTeamsPath)
 
-	registry, err := provider.NewRegistry(providers.Configs)
+	// loadLiveConfig (cmd/gateway/reload.go) is the one place providers.yaml
+	// and teams.yaml are read, validated, and turned into registries — boot
+	// and every later POST /admin/reload run the exact same steps, so the
+	// two can never drift into checking different things.
+	initial, providerCount, teamCount, err := loadLiveConfig(providersPath, teamsPath)
 	if err != nil {
-		return fmt.Errorf("building provider registry: %w", err)
+		return err
 	}
+	store := newConfigStore(initial)
 
-	for _, p := range registry.Providers() {
+	for _, p := range initial.registry.Providers() {
 		log.Info("provider registered", slog.String("provider", p.Name()))
-	}
-
-	teams, err := config.LoadTeams(envOr("SWITCHYARD_TEAMS_CONFIG", defaultTeamsPath))
-	if err != nil {
-		return fmt.Errorf("loading team config: %w", err)
-	}
-
-	authRegistry, err := auth.NewRegistry(teams)
-	if err != nil {
-		return fmt.Errorf("building auth registry: %w", err)
 	}
 
 	// redis.NewClient never dials eagerly — the connection is opened lazily on
@@ -107,6 +98,7 @@ func run() error {
 	defer redisClient.Close()
 
 	limiter := ratelimit.NewLimiter(redisClient)
+	budgetTracker := budget.NewTracker(redisClient)
 
 	// ready gates /readyz. It flips true once wiring is complete and false again
 	// the moment shutdown begins, so a load balancer stops sending new traffic
@@ -116,13 +108,13 @@ func run() error {
 
 	publicSrv := &http.Server{
 		Addr:              envOr("SWITCHYARD_ADDR", defaultPublicAddr),
-		Handler:           proxy.NewRouter(registry, authRegistry, limiter, log, isReady),
+		Handler:           proxy.NewRouter(store, store, limiter, budgetTracker, store, log, isReady),
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
 
 	adminSrv := &http.Server{
 		Addr: envOr("SWITCHYARD_ADMIN_ADDR", defaultAdminAddr),
-		Handler: admin.NewRouter(isReady,
+		Handler: admin.NewRouter(isReady, store, budgetTracker, store, newReloader(store, providersPath, teamsPath), log,
 			proxy.Recoverer(log),
 			proxy.RequestID,
 			proxy.Logger(log),
@@ -161,8 +153,8 @@ func run() error {
 	log.Info("gateway started",
 		slog.String("public_addr", publicSrv.Addr),
 		slog.String("admin_addr", adminSrv.Addr),
-		slog.Int("providers", len(registry.Providers())),
-		slog.Int("teams", len(teams)),
+		slog.Int("providers", providerCount),
+		slog.Int("teams", teamCount),
 	)
 
 	select {

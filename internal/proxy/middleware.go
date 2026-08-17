@@ -74,6 +74,12 @@ type requestMetrics struct {
 	// 2.3's "token counts logged correctly for streaming requests" is met,
 	// rather than a bespoke log line living only in the streaming handler.
 	usage provider.Usage
+
+	// costMicros is the request's price in integer micro-dollars, set by
+	// handler.go's recordCost once usage is final. It stays zero whenever
+	// usage does — no provider reached, or a mid-stream failure that never
+	// received a terminal usage-bearing chunk (see streamChatCompletions).
+	costMicros int64
 }
 
 // metricsFrom returns the per-request metrics, or nil if Timing did not run.
@@ -310,6 +316,7 @@ func Logger(log *slog.Logger) func(http.Handler) http.Handler {
 					attrs = append(attrs,
 						slog.Int("input_tokens", m.usage.InputTokens),
 						slog.Int("output_tokens", m.usage.OutputTokens),
+						slog.Int64("cost_micros", m.costMicros),
 					)
 				}
 			}

@@ -255,6 +255,34 @@ func TestRegistryByNameAndListing(t *testing.T) {
 	}
 }
 
+// Step 4.3: GET /admin/providers needs each instance's static config, not
+// just its name — Configs is what exposes that without widening the
+// Provider interface itself.
+func TestRegistryConfigs(t *testing.T) {
+	cfgs := registryConfigs()
+	r, err := NewRegistry(cfgs)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+
+	got := r.Configs()
+	if len(got) != len(cfgs) {
+		t.Fatalf("Configs() returned %d entries, want %d", len(got), len(cfgs))
+	}
+	for i, cfg := range cfgs {
+		if got[i].Name != cfg.Name || got[i].BaseURL != cfg.BaseURL || got[i].Type != cfg.Type {
+			t.Errorf("Configs()[%d] = %+v, want %+v", i, got[i], cfg)
+		}
+	}
+
+	// Defensive copy: mutating what Configs() returned must not reach back
+	// into the registry's own state.
+	got[0].Name = "tampered"
+	if r.Configs()[0].Name == "tampered" {
+		t.Error("Configs() did not return a copy: mutating the result affected the registry")
+	}
+}
+
 // typeName reports a value's concrete type without importing reflect into
 // non-test code.
 func typeName(v any) string {

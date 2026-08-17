@@ -43,6 +43,16 @@ type Registry struct {
 	// order preserves config file order so admin listings and logs are stable
 	// rather than following Go's randomized map iteration.
 	order []Provider
+
+	// configs mirrors order but holds each instance's resolved Config rather
+	// than the instance itself. Nothing before Step 4.3 needed this — the
+	// registry only ever needed to build adapters and resolve models — but
+	// GET /admin/providers needs to report each instance's static
+	// configuration, and Provider deliberately stays too small an interface
+	// to expose it (see the Phase 1 "keep the interface small" rule). Kept
+	// alongside order rather than looked up by name each time, since the
+	// admin listing always wants every instance anyway.
+	configs []Config
 }
 
 // NewRegistry constructs every instance and indexes it.
@@ -60,6 +70,7 @@ func NewRegistry(cfgs []Config) (*Registry, error) {
 		byModel:          make(map[string]Provider),
 		defaultMaxTokens: make(map[string]int),
 		order:            make([]Provider, 0, len(cfgs)),
+		configs:          make([]Config, 0, len(cfgs)),
 	}
 
 	for _, cfg := range cfgs {
@@ -88,6 +99,7 @@ func NewRegistry(cfgs []Config) (*Registry, error) {
 
 		r.byName[cfg.Name] = p
 		r.order = append(r.order, p)
+		r.configs = append(r.configs, cfg)
 	}
 
 	return r, nil
@@ -125,6 +137,18 @@ func (r *Registry) ByName(name string) (Provider, error) {
 func (r *Registry) Providers() []Provider {
 	out := make([]Provider, len(r.order))
 	copy(out, r.order)
+	return out
+}
+
+// Configs returns every instance's resolved Config, in the same file order
+// as Providers. It exists for GET /admin/providers: the caller is
+// responsible for never serializing Config.APIKey back out over that API —
+// this method returns it unredacted, the same way Config itself always has,
+// because redaction is a presentation concern for whoever renders the
+// response, not a registry concern.
+func (r *Registry) Configs() []Config {
+	out := make([]Config, len(r.configs))
+	copy(out, r.configs)
 	return out
 }
 

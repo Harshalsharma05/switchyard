@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "b3f2a6b0-2e7e-4c1a-9c1e-switchyard0001",
     "name": "SwitchYard Gateway",
-    "description": "Manual/automated coverage for everything SwitchYard supports through Phase 2 (Provider Abstraction, Core Proxy, Streaming Passthrough): non-streaming and streaming /v1/chat/completions across all three configured providers, the request-validation error paths, streaming error semantics, and the liveness/readiness probes on both listeners.\n\nBefore running:\n1. Start the gateway with real provider keys loaded (`GROQ_API_KEY`, `GEMINI_API_KEY` in `.env`).\n2. Ollama requests need a local `ollama serve` with the configured model pulled (`ollama pull llama3.2:3b`) — otherwise skip that folder.\n3. Adjust the `*_model` collection variables if your `configs/providers.yaml` lists different model names.\n\nStreaming requests: Postman buffers the full SSE body before showing it (it is not a progressive SSE viewer), so you will see every `data: ...` event at once in the response body. For a literal token-by-token demo, use `curl -N` instead — this collection is for correctness checks, not the visual demo.",
+    "description": "Manual/automated coverage for everything SwitchYard supports through Phase 4 (Provider Abstraction, Core Proxy, Streaming Passthrough, Auth & Rate Limiting, Budget Enforcement & Admin API): non-streaming and streaming /v1/chat/completions across all three configured providers, the request-validation error paths, streaming error semantics, the liveness/readiness probes on both listeners, and the admin API for team/provider introspection and live limit/budget management.\n\nBefore running:\n1. Start the gateway with real provider keys loaded (`GROQ_API_KEY`, `GEMINI_API_KEY` in `.env`) and Redis reachable — rate limiting and budget enforcement both depend on it.\n2. Ollama requests need a local `ollama serve` with the configured model pulled (`ollama pull llama3.2:3b`) — otherwise skip that folder.\n3. Adjust the `*_model` collection variables if your `configs/providers.yaml` lists different model names, and `team_id` if your `configs/teams.yaml` uses different IDs.\n\nStreaming requests: Postman buffers the full SSE body before showing it (it is not a progressive SSE viewer), so you will see every `data: ...` event at once in the response body. For a literal token-by-token demo, use `curl -N` instead — this collection is for correctness checks, not the visual demo.\n\nAdmin API requests target `{{admin_url}}` (port 9090), never `{{base_url}}` — the admin API is deliberately unreachable from the public listener. Running the \"Patch Team\" folder mutates the running gateway's in-memory team registry (not `configs/teams.yaml` on disk); the last request in that folder restores the original values so the collection is safe to re-run.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -10,7 +10,8 @@
     { "key": "admin_url", "value": "http://localhost:9090", "type": "string" },
     { "key": "groq_model", "value": "openai/gpt-oss-20b", "type": "string" },
     { "key": "gemini_model", "value": "gemini-3.5-flash-lite", "type": "string" },
-    { "key": "ollama_model", "value": "llama3.2:3b", "type": "string" }
+    { "key": "ollama_model", "value": "llama3.2:3b", "type": "string" },
+    { "key": "team_id", "value": "acme", "type": "string" }
   ],
   "item": [
     {
@@ -585,6 +586,381 @@
             "method": "GET",
             "header": [],
             "url": { "raw": "{{admin_url}}/readyz", "host": ["{{admin_url}}"], "path": ["readyz"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Admin API",
+      "item": [
+        {
+          "name": "GET /admin/teams",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"response is an array\", () => pm.expect(body).to.be.an(\"array\"));",
+                  "pm.test(\"at least one team listed\", () => pm.expect(body.length).to.be.above(0));",
+                  "const team = body.find(t => t.id === pm.collectionVariables.get(\"team_id\"));",
+                  "pm.test(\"configured team is present\", () => pm.expect(team).to.not.be.undefined);",
+                  "pm.test(\"team carries rate_limits\", () => pm.expect(team.rate_limits).to.have.keys(\"rpm\", \"tpm\"));",
+                  "pm.test(\"team carries monthly_budget_usd\", () => pm.expect(team.monthly_budget_usd).to.be.a(\"number\"));",
+                  "pm.test(\"spent_usd is a number or null, never a lying zero on error\", () => pm.expect(team.spent_usd === null || typeof team.spent_usd === \"number\").to.be.true);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{admin_url}}/admin/teams", "host": ["{{admin_url}}"], "path": ["admin", "teams"] },
+            "description": "Lists every configured team with its configured RPM/TPM limits, configured monthly budget, and live spend for the current period read from Redis. Live RPM/TPM *remaining* is deliberately not shown here — see DECISIONS.md's Step 4.3 entry on why that needs a read-only Peek on the hand-written token bucket that does not exist yet."
+          }
+        },
+        {
+          "name": "GET /admin/teams/{id} - Success",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"id matches requested team\", () => pm.expect(body.id).to.eql(pm.collectionVariables.get(\"team_id\")));",
+                  "pm.test(\"name present\", () => pm.expect(body.name).to.be.a(\"string\").and.not.empty);",
+                  "pm.test(\"allowed_models present\", () => pm.expect(body.allowed_models).to.be.an(\"array\"));",
+                  "pm.test(\"priority is realtime or batch\", () => pm.expect([\"realtime\", \"batch\"]).to.include(body.priority));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{admin_url}}/admin/teams/{{team_id}}",
+              "host": ["{{admin_url}}"],
+              "path": ["admin", "teams", "{{team_id}}"]
+            }
+          }
+        },
+        {
+          "name": "GET /admin/teams/{id} - Unknown (404)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 404\", () => pm.response.to.have.status(404));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"error type is team_not_found\", () => pm.expect(body.error.type).to.eql(\"team_not_found\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{admin_url}}/admin/teams/not-a-real-team",
+              "host": ["{{admin_url}}"],
+              "path": ["admin", "teams", "not-a-real-team"]
+            }
+          }
+        },
+        {
+          "name": "PATCH /admin/teams/{id} - Adjust RPM",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"rpm updated to 75\", () => pm.expect(body.rate_limits.rpm).to.eql(75));",
+                  "pm.test(\"tpm unchanged (field was not in the patch)\", () => pm.expect(body.rate_limits.tpm).to.eql(100000));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rpm\": 75\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{admin_url}}/admin/teams/{{team_id}}",
+              "host": ["{{admin_url}}"],
+              "path": ["admin", "teams", "{{team_id}}"]
+            },
+            "description": "Adjusts a team's RPM limit without a gateway restart. Only the fields present in the body change — tpm and monthly_budget_usd are untouched. Takes effect on the very next request that authenticates against this team (see DECISIONS.md's Step 4.3 entry on the copy-on-write registry). Assumes configs/teams.yaml's acme entry starts at rpm: 60, tpm: 100000 — the last request in this folder restores it."
+          }
+        },
+        {
+          "name": "PATCH /admin/teams/{id} - Adjust Budget (USD)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"monthly_budget_usd updated\", () => pm.expect(body.monthly_budget_usd).to.eql(75.5));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"monthly_budget_usd\": 75.50\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{admin_url}}/admin/teams/{{team_id}}",
+              "host": ["{{admin_url}}"],
+              "path": ["admin", "teams", "{{team_id}}"]
+            },
+            "description": "The body carries a decimal USD amount; the gateway converts it to integer micro-dollars once at the admin boundary, the same conversion internal/config performs at boot from configs/teams.yaml."
+          }
+        },
+        {
+          "name": "PATCH /admin/teams/{id} - Invalid Value (400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 400\", () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rpm\": 0\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{admin_url}}/admin/teams/{{team_id}}",
+              "host": ["{{admin_url}}"],
+              "path": ["admin", "teams", "{{team_id}}"]
+            },
+            "description": "A non-positive rpm must be rejected — and rejected atomically: this must not have partially applied alongside any other field in the same body."
+          }
+        },
+        {
+          "name": "PATCH /admin/teams/{id} - Unknown Field (400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 400\", () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rmp\": 10\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{admin_url}}/admin/teams/{{team_id}}",
+              "host": ["{{admin_url}}"],
+              "path": ["admin", "teams", "{{team_id}}"]
+            },
+            "description": "rmp (transposed from rpm) must be rejected, not silently ignored — the admin API rejects unknown fields the same way the public API's request decoding does."
+          }
+        },
+        {
+          "name": "PATCH /admin/teams/{id} - Unknown Team (404)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 404\", () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rpm\": 10\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{admin_url}}/admin/teams/not-a-real-team",
+              "host": ["{{admin_url}}"],
+              "path": ["admin", "teams", "not-a-real-team"]
+            }
+          }
+        },
+        {
+          "name": "PATCH /admin/teams/{id} - Restore Original Values",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"rpm restored to 60\", () => pm.expect(body.rate_limits.rpm).to.eql(60));",
+                  "pm.test(\"budget restored to 50\", () => pm.expect(body.monthly_budget_usd).to.eql(50));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rpm\": 60,\n  \"tpm\": 100000,\n  \"monthly_budget_usd\": 50.00\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{admin_url}}/admin/teams/{{team_id}}",
+              "host": ["{{admin_url}}"],
+              "path": ["admin", "teams", "{{team_id}}"]
+            },
+            "description": "Undoes the two PATCH requests above so this collection can be re-run against the same running gateway without configs/teams.yaml drifting from the live registry. Values match acme's entry in configs/teams.yaml — update this request if that file changes."
+          }
+        },
+        {
+          "name": "POST /admin/teams/{id}/reset-budget",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"spent_usd is exactly 0 after reset\", () => pm.expect(body.spent_usd).to.eql(0));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{admin_url}}/admin/teams/{{team_id}}/reset-budget",
+              "host": ["{{admin_url}}"],
+              "path": ["admin", "teams", "{{team_id}}", "reset-budget"]
+            },
+            "description": "Deletes the team's current-period spend counter in Redis outright (not a SET to 0) — see DECISIONS.md's Step 4.3 entry for why that distinction matters. Run a real /v1/chat/completions request against this team first if you want to see a nonzero spend_usd get reset."
+          }
+        },
+        {
+          "name": "POST /admin/teams/{id}/reset-budget - Unknown Team (404)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 404\", () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{admin_url}}/admin/teams/not-a-real-team/reset-budget",
+              "host": ["{{admin_url}}"],
+              "path": ["admin", "teams", "not-a-real-team", "reset-budget"]
+            }
+          }
+        },
+        {
+          "name": "GET /admin/providers",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"response is an array\", () => pm.expect(body).to.be.an(\"array\"));",
+                  "pm.test(\"all three providers listed\", () => pm.expect(body.length).to.be.at.least(3));",
+                  "pm.test(\"every entry carries name, type, base_url, models\", () => {",
+                  "  body.forEach(p => {",
+                  "    pm.expect(p.name).to.be.a(\"string\").and.not.empty;",
+                  "    pm.expect(p.type).to.be.a(\"string\").and.not.empty;",
+                  "    pm.expect(p.base_url).to.be.a(\"string\").and.not.empty;",
+                  "    pm.expect(p.models).to.be.an(\"array\").and.not.empty;",
+                  "  });",
+                  "});",
+                  "pm.test(\"no entry leaks an api_key field\", () => {",
+                  "  body.forEach(p => pm.expect(p).to.not.have.property(\"api_key\"));",
+                  "});",
+                  "pm.test(\"raw body never contains the word api_key\", () => pm.expect(pm.response.text()).to.not.include(\"api_key\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{admin_url}}/admin/providers", "host": ["{{admin_url}}"], "path": ["admin", "providers"] },
+            "description": "Static provider configuration only — no credentials, no health status (health arrives in Phase 5). Confirms the API key resolved from the environment at boot never reaches this response."
+          }
+        },
+        {
+          "name": "POST /admin/reload",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"status is reloaded\", () => pm.expect(body.status).to.eql(\"reloaded\"));",
+                  "pm.test(\"providers count is positive\", () => pm.expect(body.providers).to.be.above(0));",
+                  "pm.test(\"teams count is positive\", () => pm.expect(body.teams).to.be.above(0));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": { "raw": "{{admin_url}}/admin/reload", "host": ["{{admin_url}}"], "path": ["admin", "reload"] },
+            "description": "Re-reads configs/providers.yaml and configs/teams.yaml from disk, validates both fully, and only then atomically swaps them in — a valid reload here is what re-picks-up any hand edits made to either file since boot (including undoing a PATCH from the folder above, since a reload always reflects what's on disk, not prior runtime overrides). The rejected-reload path (a bad YAML file must leave the gateway running on its old config) is intentionally not exercised here — it would mean this collection corrupting your local configs/providers.yaml mid-run. That path is covered by cmd/gateway's own `go test -race ./cmd/gateway/...` (TestReloadRejectedLeavesStoreOnOldConfig), which is safe to run because it never touches the real config files."
           }
         }
       ]

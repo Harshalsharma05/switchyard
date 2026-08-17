@@ -8,6 +8,7 @@
 package admin
 
 import (
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -22,10 +23,12 @@ type Middleware func(http.Handler) http.Handler
 
 // NewRouter builds the admin listener's handler.
 //
-// Phase 4 mounts the team and provider endpoints here, and Phase 9 mounts
-// promhttp at /metrics. For now it carries only the probes, so operators can
-// check readiness without going through the public port.
-func NewRouter(ready func() bool, middleware ...Middleware) http.Handler {
+// Steps 4.3 and 4.4 mount the team, provider, and reload endpoints here;
+// Phase 9 will add promhttp at /metrics. Route paths carry an explicit
+// /admin prefix even though the whole listener is already the admin port,
+// leaving room for /metrics and future operator endpoints to live at the
+// root without colliding with this namespace.
+func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers ProviderLister, reload Reloader, log *slog.Logger, middleware ...Middleware) http.Handler {
 	r := chi.NewRouter()
 
 	for _, mw := range middleware {
@@ -34,6 +37,16 @@ func NewRouter(ready func() bool, middleware ...Middleware) http.Handler {
 
 	r.Get("/healthz", healthz)
 	r.Get("/readyz", readyz(ready))
+
+	r.Route("/admin/teams", func(r chi.Router) {
+		r.Get("/", listTeams(teams, spend, log))
+		r.Get("/{id}", getTeam(teams, spend, log))
+		r.Patch("/{id}", patchTeam(teams, spend, log))
+		r.Post("/{id}/reset-budget", resetBudget(teams, spend, log))
+	})
+
+	r.Get("/admin/providers", listProviders(providers, log))
+	r.Post("/admin/reload", reloadConfig(reload, log))
 
 	return r
 }

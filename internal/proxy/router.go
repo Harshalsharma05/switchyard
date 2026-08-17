@@ -39,10 +39,13 @@ import (
 //     checked inside ChatCompletions instead (see reserveTokens in
 //     handler.go).
 //
-// Phase 4's budget check and Phase 8's tracing insert alongside Auth and
-// RateLimit, inside Logger, for the same reasons.
-func NewRouter(resolver Resolver, authr Authenticator, limiter RateLimiter, log *slog.Logger, ready func() bool) http.Handler {
-	h := NewHandler(resolver, limiter, log)
+// Step 4.2's budget check is not a middleware layer either, for the same
+// reason TPM isn't: it needs the decoded body to estimate a cost, so it runs
+// inside ChatCompletions too (see reserveBudget in handler.go), right after
+// the TPM reservation succeeds. Phase 8's tracing inserts alongside Auth and
+// RateLimit, inside Logger, for the same reasons those two do.
+func NewRouter(resolver Resolver, authr Authenticator, limiter RateLimiter, budgetTracker BudgetTracker, calc CostCalculator, log *slog.Logger, ready func() bool) http.Handler {
+	h := NewHandler(resolver, limiter, budgetTracker, calc, log)
 
 	r := chi.NewRouter()
 

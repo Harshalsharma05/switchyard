@@ -43,9 +43,9 @@ const bucketTTL = 2 * time.Minute
 // calls out specifically.
 const reconcileTimeout = 2 * time.Second
 
-// checkTimeout bounds the RPM Consume and TPM Reserve calls, independent of
-// whatever the underlying Redis client's own dial/retry settings happen to
-// be.
+// checkTimeout bounds the RPM Consume, TPM Reserve, and Step 4.2 budget
+// Reserve calls, independent of whatever the underlying Redis client's own
+// dial/retry settings happen to be.
 //
 // Measured live: with go-redis's defaults, one request against a genuinely
 // unreachable Redis took 3.5 seconds to fail open — the connection pool
