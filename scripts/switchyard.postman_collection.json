@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "b3f2a6b0-2e7e-4c1a-9c1e-switchyard0001",
     "name": "SwitchYard Gateway",
-    "description": "Manual/automated coverage for everything SwitchYard supports through Phase 6 (Provider Abstraction, Core Proxy, Streaming Passthrough, Auth & Rate Limiting, Budget Enforcement & Admin API, Health Checking, Retry & Fallback Routing): non-streaming and streaming /v1/chat/completions across all three configured providers, the request-validation error paths, streaming error semantics, the liveness/readiness probes on both listeners, the admin API for team/provider introspection and live limit/budget management, provider health, and the fallback chain.\n\nAuthentication: the collection sends `Authorization: Bearer {{acme_key}}` on every request via collection-level auth. The admin listener has no auth of its own (Part 1 scopes auth to the public API), so the header is simply ignored there. Requests that must run as a different team override it per-request — see the Phase 6 folder.\n\nBefore running:\n1. Start the gateway with real provider keys loaded (`GROQ_API_KEY`, `GEMINI_API_KEY` in `.env`) and Redis reachable — rate limiting and budget enforcement both depend on it.\n2. Ollama requests need a local `ollama serve` with the configured model pulled (`ollama pull llama3.2:3b`) — otherwise skip that folder.\n3. Adjust the `*_model` collection variables if your `configs/providers.yaml` lists different model names, and `team_id`/`*_key` if your `configs/teams.yaml` uses different IDs or keys.\n4. The Phase 6 folder is the only one that needs the gateway put into a deliberate failure state first; that folder's own description spells out the two setups.\n\nStreaming requests: Postman buffers the full SSE body before showing it (it is not a progressive SSE viewer), so you will see every `data: ...` event at once in the response body. For a literal token-by-token demo, use `curl -N` instead — this collection is for correctness checks, not the visual demo.\n\nAdmin API requests target `{{admin_url}}` (port 9090), never `{{base_url}}` — the admin API is deliberately unreachable from the public listener. Running the \"Patch Team\" folder mutates the running gateway's in-memory team registry (not `configs/teams.yaml` on disk); the last request in that folder restores the original values so the collection is safe to re-run.",
+    "description": "Manual/automated coverage for everything SwitchYard supports through Phase 7 (Provider Abstraction, Core Proxy, Streaming Passthrough, Auth & Rate Limiting, Budget Enforcement & Admin API, Health Checking, Retry & Fallback Routing, Circuit Breaker): non-streaming and streaming /v1/chat/completions across all three configured providers, the request-validation error paths, streaming error semantics, the liveness/readiness probes on both listeners, the admin API for team/provider introspection and live limit/budget management, provider health, the fallback chain, and the circuit breaker with its chaos harness.\n\nAuthentication: the collection sends `Authorization: Bearer {{acme_key}}` on every request via collection-level auth. The admin listener has no auth of its own (Part 1 scopes auth to the public API), so the header is simply ignored there. Requests that must run as a different team override it per-request — see the Phase 6 folder.\n\nBefore running:\n1. Start the gateway with real provider keys loaded (`GROQ_API_KEY`, `GEMINI_API_KEY` in `.env`) and Redis reachable — rate limiting and budget enforcement both depend on it.\n2. Ollama requests need a local `ollama serve` with the configured model pulled (`ollama pull llama3.2:3b`) — otherwise skip that folder.\n3. Adjust the `*_model` collection variables if your `configs/providers.yaml` lists different model names, and `team_id`/`*_key` if your `configs/teams.yaml` uses different IDs or keys.\n4. The Phase 6 folder needs the gateway put into a deliberate failure state first; that folder's own description spells out the two setups.\n5. The Phase 7 folder needs the gateway restarted with the chaos harness enabled and a few breaker thresholds lowered so the test runs in seconds rather than minutes; that folder's description gives the exact command. Unlike Phase 6 it needs no config-file edits and no provider stopped — the chaos endpoint puts the gateway into (and out of) its failure state.\n\nStreaming requests: Postman buffers the full SSE body before showing it (it is not a progressive SSE viewer), so you will see every `data: ...` event at once in the response body. For a literal token-by-token demo, use `curl -N` instead — this collection is for correctness checks, not the visual demo.\n\nAdmin API requests target `{{admin_url}}` (port 9090), never `{{base_url}}` — the admin API is deliberately unreachable from the public listener. Running the \"Patch Team\" folder mutates the running gateway's in-memory team registry (not `configs/teams.yaml` on disk); the last request in that folder restores the original values so the collection is safe to re-run.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "auth": {
@@ -13,6 +13,7 @@
     { "key": "base_url", "value": "http://localhost:8080", "type": "string" },
     { "key": "admin_url", "value": "http://localhost:9090", "type": "string" },
     { "key": "groq_model", "value": "openai/gpt-oss-20b", "type": "string" },
+    { "key": "groq_frontier_model", "value": "openai/gpt-oss-120b", "type": "string" },
     { "key": "gemini_model", "value": "gemini-3.5-flash-lite", "type": "string" },
     { "key": "ollama_model", "value": "llama3.2:3b", "type": "string" },
     { "key": "team_id", "value": "acme", "type": "string" },
@@ -1221,6 +1222,451 @@
               "path": ["admin", "teams", "{{team_id}}"]
             },
             "description": "Step 6.4's billing check, run right after \"Fast Tier Fallback\". The requested model was Ollama's (free, $0.00 in configs/providers.yaml) and a paid provider actually served it — so a nonzero spend here proves the request was billed at the *served* model's price, not the requested one's. For a clean reading, POST /admin/teams/{{team_id}}/reset-budget first, then run the fallback request, then this."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Circuit Breaker & Chaos (Phase 7)",
+      "description": "Step 7.1–7.5 verification. Unlike the Phase 6 folder this needs no config edits and no provider stopped — the chaos endpoint puts the gateway into its failure state and takes it back out again.\n\nSETUP — restart the gateway with the harness on and the breaker thresholds lowered so this runs in seconds:\n\n  SWITCHYARD_ENV=dev \\\n  SWITCHYARD_CHAOS_ENABLED=true \\\n  SWITCHYARD_BREAKER_FAILURE_THRESHOLD=3 \\\n  SWITCHYARD_BREAKER_WINDOW=5m \\\n  SWITCHYARD_BREAKER_COOLDOWN_BASE=30s \\\n  SWITCHYARD_BREAKER_SUCCESS_THRESHOLD=1 \\\n  go run ./cmd/gateway\n\nWindow is stretched to 5m purely so you are not racing a 30s clock between manual sends; cooldown stays long enough to observe Open before it half-opens. Run the requests top to bottom — several depend on the state the previous one left behind.\n\nWHAT THE CALLER SEES: breaking Groq's fast model does NOT produce errors at the client. The fast tier falls back to Gemini, so every request still returns 200 — that is the point of the whole phase. The breaker opening is visible in the response *headers*, in GET /admin/providers/health, and in the gateway log, not in a failed request.\n\nNOT COVERED HERE: \"exactly one probe in HalfOpen, others rejected\" needs concurrent requests landing in the same instant, which Postman cannot express. That one is covered by `go test -race ./internal/resilience/...` (TestHalfOpenAdmitsOneProbeUnderConcurrency, 50 goroutines racing for one slot) and by TestReplicasShareOneProbeSlot for the cross-replica case.",
+      "item": [
+        {
+          "name": "1. Chaos Refused Without Dev Flags (404) — run on a DEFAULT gateway",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 404, not 403\", () => pm.response.to.have.status(404));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"answers as though the route does not exist\", () => pm.expect(body.error.type).to.eql(\"not_found\"));",
+                  "pm.test(\"body never admits a chaos harness exists\", () => pm.expect(pm.response.text().toLowerCase()).to.not.include(\"chaos\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{admin_url}}/admin/chaos", "host": ["{{admin_url}}"], "path": ["admin", "chaos"] },
+            "description": "THE GUARD. Run this once against a gateway started normally (`go run ./cmd/gateway`, no SWITCHYARD_ENV, no SWITCHYARD_CHAOS_ENABLED) — then restart with the SETUP env above for every other request in this folder.\n\n404 rather than 403 is deliberate: a 403 would confirm the endpoint exists and is merely refusing, which tells anyone probing a production gateway that the capability is there and worth attacking. A 404 is the same answer a build that never had chaos compiled in would give.\n\nAlso worth trying once: start with SWITCHYARD_CHAOS_ENABLED=true but WITHOUT SWITCHYARD_ENV=dev. Still 404, and the startup log carries `chaos harness was requested but refused: not a dev environment`. Both conditions are required, and neither is sufficient alone."
+          }
+        },
+        {
+          "name": "2. Chaos Status — Available in Dev",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"harness reports available\", () => pm.expect(body.available).to.be.true);",
+                  "pm.test(\"no rules active yet\", () => pm.expect(body.rules).to.be.an(\"array\").that.is.empty);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{admin_url}}/admin/chaos", "host": ["{{admin_url}}"], "path": ["admin", "chaos"] },
+            "description": "Confirms the SETUP env actually took. If this 404s, the gateway is not running with both SWITCHYARD_ENV=dev and SWITCHYARD_CHAOS_ENABLED=true — check the startup log for the `chaos harness is ENABLED` warning line."
+          }
+        },
+        {
+          "name": "3. Chaos Rejects an Untargeted Rule (400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 400\", () => pm.response.to.have.status(400));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"message explains the rule must target something\", () => pm.expect(body.error.message).to.include(\"must target a provider, a model, or both\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rules\": [ { \"mode\": \"error\" } ]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{admin_url}}/admin/chaos", "host": ["{{admin_url}}"], "path": ["admin", "chaos"] },
+            "description": "A rule naming neither a provider nor a model would break every call the gateway makes. Even in dev that should not be reachable by fat-fingering one field, so it is rejected at validation."
+          }
+        },
+        {
+          "name": "4. Chaos Rejects an Unknown Mode (400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 400\", () => pm.response.to.have.status(400));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"message names the offending mode\", () => pm.expect(body.error.message).to.include(\"explode\"));",
+                  "pm.test(\"message says which rule index\", () => pm.expect(body.error.message).to.include(\"rule 0\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rules\": [ { \"provider\": \"groq\", \"mode\": \"explode\" } ]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{admin_url}}/admin/chaos", "host": ["{{admin_url}}"], "path": ["admin", "chaos"] },
+            "description": "The four valid modes are error, latency, rate_limit and drop. Rules are validated in full before any of them is stored, so a bad rule at the end of a list cannot leave half a rule set applied."
+          }
+        },
+        {
+          "name": "5. Chaos - Break Groq's Fast Model",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"one rule is active\", () => pm.expect(body.rules).to.have.lengthOf(1));",
+                  "pm.test(\"rule targets groq and the fast model only\", () => {",
+                  "  pm.expect(body.rules[0].provider).to.eql(\"groq\");",
+                  "  pm.expect(body.rules[0].model).to.eql(pm.collectionVariables.get(\"groq_model\"));",
+                  "  pm.expect(body.rules[0].mode).to.eql(\"error\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rules\": [\n    { \"provider\": \"groq\", \"model\": \"{{groq_model}}\", \"mode\": \"error\" }\n  ]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{admin_url}}/admin/chaos", "host": ["{{admin_url}}"], "path": ["admin", "chaos"] },
+            "description": "Targets ONE model on ONE provider, which is what makes request 8 (the sibling-model check) meaningful. Groq keeps serving its 120b model normally; only the fast model breaks.\n\nThe forged failure is a retryable KindServerError, so it exercises retry, then fallback, then the breaker — a non-retryable fault would exercise the give-up path and leave all three untested."
+          }
+        },
+        {
+          "name": "6. Trip the Breaker — SEND THIS 3 TIMES",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200 — the caller never sees the broken provider\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"fallback engaged\", () => pm.expect(pm.response.headers.get(\"X-Switchyard-Fallback\")).to.eql(\"true\"));",
+                  "pm.test(\"not served by the broken provider\", () => pm.expect(pm.response.headers.get(\"X-Switchyard-Provider\")).to.not.eql(\"groq\"));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"a real completion came back\", () => pm.expect(body.choices[0].message.content).to.be.a(\"string\").and.not.empty);",
+                  "console.log(`served by ${pm.response.headers.get(\"X-Switchyard-Provider\")} in ${pm.response.responseTime}ms — send this 3x total, then move to request 7`);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{groq_model}}\",\n  \"messages\": [ { \"role\": \"user\", \"content\": \"Say hi in three words.\" } ],\n  \"max_tokens\": 32\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/chat/completions",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "chat", "completions"]
+            },
+            "description": "PRESS SEND THREE TIMES (matching SWITCHYARD_BREAKER_FAILURE_THRESHOLD=3 from the SETUP).\n\nEach send is exactly one failure against the groq+fast-model breaker — not one per retry. The breaker hears one verdict per candidate per request, because otherwise a single client request could contribute a whole threshold's worth of failures on its own.\n\nEvery send returns 200. That is the headline result of Phase 6 + 7 together: the primary is broken, the caller is unaffected. Watch the gateway log for the `falling back to next candidate` line on each send, and for `circuit breaker transition ... to=open reason=failure_threshold_exceeded` on the third — that log line is the \"opens at the configured threshold, not before\" checklist item.\n\nOn the 4th and later sends the log shows `skipping candidate on open circuit breaker` instead of a retry-then-fallback sequence: no provider call is made at all."
+          }
+        },
+        {
+          "name": "7. Health Shows Groq Degraded by the Open Breaker",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "const groq = body.find(p => p.provider === \"groq\");",
+                  "pm.test(\"groq is present\", () => pm.expect(groq).to.not.be.undefined);",
+                  "pm.test(\"groq is degraded, never down — a breaker is a decision to stop trying, not proof of unreachability\", () => pm.expect(groq.status).to.eql(\"degraded\"));",
+                  "pm.test(\"the transition reason names the breaker\", () => {",
+                  "  pm.expect(groq.last_transition, \"no transition recorded yet — wait one health-check interval (~30s) and resend\").to.not.be.null;",
+                  "  pm.expect(groq.last_transition.reason).to.eql(\"circuit_breaker_open\");",
+                  "});",
+                  "pm.test(\"gemini is unaffected\", () => {",
+                  "  const gemini = body.find(p => p.provider === \"gemini\");",
+                  "  pm.expect(gemini.status).to.eql(\"healthy\");",
+                  "});",
+                  "console.log(body.map(p => `${p.provider}: ${p.status} (${p.last_transition ? p.last_transition.reason : \"no transitions\"})`).join(\" | \"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{admin_url}}/admin/providers/health",
+              "host": ["{{admin_url}}"],
+              "path": ["admin", "providers", "health"]
+            },
+            "description": "Step 7.4's health integration: the gateway is already refusing groq traffic, so reporting it healthy would contradict its own behaviour.\n\nTIMING: health status is recomputed on the active checker's tick (default every 30s), NOT on the request path — that is what keeps Phase 5 inside the 10ms overhead budget. So there is up to a 30-second lag between the breaker opening and this endpoint saying so. If the test fails, wait and resend.\n\nDegraded and never down is deliberate: escalating to down would drag /readyz through AllDown() on what may be a perfectly healthy fleet."
+          }
+        },
+        {
+          "name": "8. Sibling Model Unaffected — RUN PROMPTLY AFTER 6",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200 — the sibling model still serves\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"a real completion came back, not a chain_exhausted 503\", () => pm.expect(body.choices[0].message.content).to.be.a(\"string\").and.not.empty);",
+                  "const served = pm.response.headers.get(\"X-Switchyard-Provider\");",
+                  "if (served === \"groq\") {",
+                  "  pm.test(\"served by groq — direct proof the 120b breaker is closed while the 20b one is open\", () => pm.expect(served).to.eql(\"groq\"));",
+                  "} else {",
+                  "  console.log(`served by ${served}, not groq — the health checker has already demoted groq to degraded, so it sank below gemini in the chain. Still correct (degraded sinks, it does not skip), but no longer isolating evidence. Re-run the whole folder and send this within ~30s of request 6 for the strict check.`);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{groq_frontier_model}}\",\n  \"messages\": [ { \"role\": \"user\", \"content\": \"Say hi in three words.\" } ],\n  \"max_tokens\": 32\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/chat/completions",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "chat", "completions"]
+            },
+            "description": "Step 7.4's granularity rule: the breaker is keyed on provider+model, so groq's 120b is untouched by the 20b breaker being open. Same provider instance, same API key, same base URL — only the model differs.\n\nRUN THIS WITHIN ~30 SECONDS OF REQUEST 6 for the strict version. Here is the subtlety worth understanding: the *breaker* is per provider+model, but *health status* is per provider — so once the health checker notices the open breaker and marks groq degraded, groq's other models sink below healthy providers in chain ordering and gemini may serve this instead. That is correct behaviour (degraded sinks, it does not skip), but it stops being evidence of per-model isolation.\n\nThe unambiguous proof of isolation is TestBreakerIsPerProviderAndModelEndToEnd in internal/proxy, which uses one mock serving both models so anything keyed by provider alone would skip them together."
+          }
+        },
+        {
+          "name": "9. Chaos - Swap to an 8s Latency Rule",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"the rule set was replaced, not appended to\", () => pm.expect(body.rules).to.have.lengthOf(1));",
+                  "pm.test(\"latency rule is active\", () => {",
+                  "  pm.expect(body.rules[0].mode).to.eql(\"latency\");",
+                  "  pm.expect(body.rules[0].latency_ms).to.eql(8000);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rules\": [\n    { \"provider\": \"groq\", \"model\": \"{{groq_model}}\", \"mode\": \"latency\", \"latency_ms\": 8000 }\n  ]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{admin_url}}/admin/chaos", "host": ["{{admin_url}}"], "path": ["admin", "chaos"] },
+            "description": "Sets up the next request. POST replaces the whole rule set rather than appending, so a demo script can put the gateway in a known state with one call instead of clearing first and hoping nothing was left behind.\n\nLatency mode delays the call and then lets it proceed — it does not fail it. Groq would now take 8 seconds to answer this model *if it were called at all*. Request 10 proves it is not."
+          }
+        },
+        {
+          "name": "10. Open Breaker Costs No Latency Penalty",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"returned in well under the 8s injected delay — the broken provider was never called\", () => pm.expect(pm.response.responseTime).to.be.below(5000));",
+                  "pm.test(\"fallback engaged\", () => pm.expect(pm.response.headers.get(\"X-Switchyard-Fallback\")).to.eql(\"true\"));",
+                  "pm.test(\"not served by groq\", () => pm.expect(pm.response.headers.get(\"X-Switchyard-Provider\")).to.not.eql(\"groq\"));",
+                  "console.log(`${pm.response.responseTime}ms with an 8000ms fault armed on the primary — the open breaker skipped it without waiting`);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{groq_model}}\",\n  \"messages\": [ { \"role\": \"user\", \"content\": \"Say hi in three words.\" } ],\n  \"max_tokens\": 32\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/chat/completions",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "chat", "completions"]
+            },
+            "description": "THE POINT OF THE WHOLE PHASE, as a number you can read off the response.\n\nAn 8-second fault is armed on the primary. If the breaker were closed, this request would wait out that 8 seconds (times the retry count) before falling back. Because the breaker is open, the candidate is skipped before the budget check, before resolution, and before any provider call — so the request costs a cached state read instead.\n\nThat is the difference between a breaker and plain fallback: fallback alone still pays the full timeout on every request to a dead provider. Run this before request 12 (the reset) — afterwards the breaker is closed and this request really will take 8+ seconds, which is itself a useful contrast worth trying once."
+          }
+        },
+        {
+          "name": "11. Chaos - Clear All Rules",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"no rules remain\", () => pm.expect(body.rules).to.be.an(\"array\").that.is.empty);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": { "raw": "{{admin_url}}/admin/chaos", "host": ["{{admin_url}}"], "path": ["admin", "chaos"] },
+            "description": "Back to normal behaviour. The breaker is still open at this point — clearing the fault does not close the circuit, which is exactly why the manual reset below exists."
+          }
+        },
+        {
+          "name": "12. Manual Breaker Reset",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"provider echoed back\", () => pm.expect(body.provider).to.eql(\"groq\"));",
+                  "pm.test(\"at least one breaker was reset\", () => pm.expect(body.breakers_reset).to.be.above(0));",
+                  "console.log(`reset ${body.breakers_reset} breaker(s) for groq`);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{admin_url}}/admin/providers/groq/breaker/reset",
+              "host": ["{{admin_url}}"],
+              "path": ["admin", "providers", "groq", "breaker", "reset"]
+            },
+            "description": "Step 7.4's manual intervention: an operator who already knows a provider is healthy should not have to wait out a cooldown to prove it. Closes every breaker belonging to this provider and clears the shared Redis episode with it.\n\nbreakers_reset is the count actually touched, which is what distinguishes a provider name that matched nothing from one whose breakers were all already closed. Expect 1 or 2 here depending on whether request 8 caused groq's 120b breaker to be created.\n\nIf the shared Redis state cannot be cleared this returns 502 rather than 200 — the local breakers were still reset, but the rest of the fleet may be holding the old episode, and that is worth telling the operator rather than reporting a clean success."
+          }
+        },
+        {
+          "name": "13. Groq Serves Normally After the Reset",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"a real completion came back\", () => pm.expect(body.choices[0].message.content).to.be.a(\"string\").and.not.empty);",
+                  "const served = pm.response.headers.get(\"X-Switchyard-Provider\");",
+                  "console.log(`served by ${served} — see this request's description if that is not groq`);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{groq_model}}\",\n  \"messages\": [ { \"role\": \"user\", \"content\": \"Say hi in three words.\" } ],\n  \"max_tokens\": 32\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/chat/completions",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "chat", "completions"]
+            },
+            "description": "The gateway is serving normally again with no chaos and no open breaker.\n\nDo not assert on the provider here. Groq's *health status* is still degraded from the error rate the chaos run left in the passive window (last 100 requests or last 60s, whichever is shorter), so groq sinks below healthy gemini in chain ordering and gemini may well serve this. That is correct — degraded sinks, it does not skip — and it clears itself within about a minute.\n\nThe direct evidence that the reset worked is request 12's own breakers_reset count, plus GET /admin/providers/health returning groq to healthy once the window ages out."
+          }
+        },
+        {
+          "name": "14. Breaker Reset - Unknown Provider (404)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 404\", () => pm.response.to.have.status(404));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"error type is provider_not_found\", () => pm.expect(body.error.type).to.eql(\"provider_not_found\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{admin_url}}/admin/providers/grok/breaker/reset",
+              "host": ["{{admin_url}}"],
+              "path": ["admin", "providers", "grok", "breaker", "reset"]
+            },
+            "description": "\"grok\" instead of \"groq\". The name is validated against the configured provider list so a typo at incident time reads as an error rather than a silent no-op success."
+          }
+        },
+        {
+          "name": "15. Breaker Route Does Not Shadow the Health Route",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200 — health still routes correctly\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"response is the health array, not a provider named 'health'\", () => pm.expect(pm.response.json()).to.be.an(\"array\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{admin_url}}/admin/providers/health",
+              "host": ["{{admin_url}}"],
+              "path": ["admin", "providers", "health"]
+            },
+            "description": "Mounting POST /admin/providers/{name}/breaker/reset puts a wildcard under /admin/providers, so the one routing hazard is \"health\" being read as a provider name. This confirms the literal route still wins."
           }
         }
       ]

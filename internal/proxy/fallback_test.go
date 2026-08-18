@@ -59,7 +59,7 @@ func newTieredServer(t *testing.T, team *auth.Team, oracle HealthOracle, groq, o
 		tier:    fastTier,
 	}
 	srv := httptest.NewServer(NewRouter(resolver, stubAuthenticator{team: team}, stubRateLimiter{},
-		stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, oracle,
+		stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, oracle, nil, nil,
 		noRetryConfig(t), discardLogger(), func() bool { return true }))
 	t.Cleanup(srv.Close)
 	return srv
@@ -204,7 +204,7 @@ func TestNoTierMeansNoFallback(t *testing.T) {
 
 	resolver := stubResolver{byModel: map[string]provider.Provider{"fast-a": groq, "fast-b": ollama}}
 	srv := httptest.NewServer(NewRouter(resolver, stubAuthenticator{team: tieredTeam()}, stubRateLimiter{},
-		stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, nil,
+		stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, nil, nil, nil,
 		noRetryConfig(t), discardLogger(), func() bool { return true }))
 	t.Cleanup(srv.Close)
 
@@ -243,7 +243,7 @@ func newTieredServerWithRetry(t *testing.T, cfg resilience.Config, groq, ollama 
 		tier:    fastTier,
 	}
 	srv := httptest.NewServer(NewRouter(resolver, stubAuthenticator{team: tieredTeam()}, stubRateLimiter{},
-		stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, nil,
+		stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, nil, nil, nil,
 		cfg, discardLogger(), func() bool { return true }))
 	t.Cleanup(srv.Close)
 	return srv
@@ -292,7 +292,7 @@ func TestSingleCandidateFailureKeepsItsOwnStatus(t *testing.T) {
 
 	resolver := stubResolver{byModel: map[string]provider.Provider{"fast-a": groq}}
 	srv := httptest.NewServer(NewRouter(resolver, stubAuthenticator{team: tieredTeam()}, stubRateLimiter{},
-		stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, nil,
+		stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, nil, nil, nil,
 		noRetryConfig(t), discardLogger(), func() bool { return true }))
 	t.Cleanup(srv.Close)
 
@@ -419,7 +419,7 @@ func newCostAwareServer(t *testing.T, tracker BudgetTracker, calc CostCalculator
 	team.MonthlyBudgetMicros = 1_000_000
 
 	srv := httptest.NewServer(NewRouter(resolver, stubAuthenticator{team: team}, stubRateLimiter{},
-		tracker, calc, stubHealthRecorder{}, nil,
+		tracker, calc, stubHealthRecorder{}, nil, nil, nil,
 		noRetryConfig(t), logTo, func() bool { return true }))
 	t.Cleanup(srv.Close)
 	return srv

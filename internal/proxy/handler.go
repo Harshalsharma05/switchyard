@@ -79,6 +79,8 @@ type Handler struct {
 	calc           CostCalculator
 	healthRecorder HealthRecorder
 	health         HealthOracle
+	breakers       Breakers
+	chaos          *Chaos
 	retryConfig    resilience.Config
 	log            *slog.Logger
 }
@@ -90,7 +92,12 @@ type Handler struct {
 // — the same optimistic default CLAUDE.md mandates for a stale health
 // checker, and what keeps every pre-Phase-6 test from having to grow a
 // monitor it does not care about.
-func NewHandler(resolver Resolver, limiter RateLimiter, budgetTracker BudgetTracker, calc CostCalculator, healthRecorder HealthRecorder, health HealthOracle, retryConfig resilience.Config, log *slog.Logger) *Handler {
+//
+// breakers may be nil too, on the same reasoning: no registry means no
+// candidate is ever skipped, which is exactly how the chain behaved before
+// Step 7.4. chaos may be nil as well — Chaos.Apply is a no-op on a nil
+// receiver, so no harness means no injected faults.
+func NewHandler(resolver Resolver, limiter RateLimiter, budgetTracker BudgetTracker, calc CostCalculator, healthRecorder HealthRecorder, health HealthOracle, breakers Breakers, chaos *Chaos, retryConfig resilience.Config, log *slog.Logger) *Handler {
 	return &Handler{
 		resolver:       resolver,
 		limiter:        limiter,
@@ -98,6 +105,8 @@ func NewHandler(resolver Resolver, limiter RateLimiter, budgetTracker BudgetTrac
 		calc:           calc,
 		healthRecorder: healthRecorder,
 		health:         health,
+		breakers:       breakers,
+		chaos:          chaos,
 		retryConfig:    retryConfig,
 		log:            log,
 	}
@@ -255,8 +264,18 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 			attemptReq := baseReq
 			attemptReq.Model = cand.Model
 
+			// Step 7.5: an injected fault replaces the provider call and then
+			// travels the identical path a real failure would — recorded to
+			// health below, counted by the breaker in runChain, retried and
+			// failed over by Phase 6. Injecting here rather than around the
+			// closure is what buys that; a harness wrapped outside this would
+			// skip the health recording and test a path that does not exist.
 			callStart := time.Now()
-			resp, err := prov.Complete(ctx, attemptReq)
+			var resp *provider.Response
+			err := h.chaos.Apply(ctx, cand.Provider, cand.Model)
+			if err == nil {
+				resp, err = prov.Complete(ctx, attemptReq)
+			}
 			callElapsed := time.Since(callStart)
 
 			if err != nil {
@@ -610,8 +629,16 @@ func (h *Handler) streamChatCompletions(w http.ResponseWriter, r *http.Request, 
 			attemptReq := baseReq
 			attemptReq.Model = cand.Model
 
+			// Same injection point as the non-streaming path, for the same
+			// reason. It sits before Stream returns, so an injected fault is
+			// always a before-the-first-byte failure — which is the only kind
+			// Step 6.3 permits a fallback for anyway.
 			callStart = time.Now()
-			s, err := prov.Stream(ctx, attemptReq)
+			var s provider.StreamReader
+			err := h.chaos.Apply(ctx, cand.Provider, cand.Model)
+			if err == nil {
+				s, err = prov.Stream(ctx, attemptReq)
+			}
 			if err != nil {
 				elapsed := time.Since(callStart)
 				failedAttemptsTime += elapsed

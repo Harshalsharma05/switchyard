@@ -192,6 +192,18 @@ func (l *transitionLog) last() (Transition, bool) {
 	return l.entries[idx], true
 }
 
+// BreakerOracle reports whether a provider has any circuit breaker open —
+// Step 7.4's "breaker state feeds the health status."
+//
+// It is declared here, by the consumer, and not as an import of
+// internal/resilience: that package already imports this one for
+// health.Status, so the dependency has to run this way round or the two would
+// form a cycle. resilience.BreakerRegistry satisfies it structurally, and
+// cmd/gateway is what connects the two.
+type BreakerOracle interface {
+	AnyOpen(providerName string) bool
+}
+
 // Monitor computes and stores each provider's Status. It is fed by two
 // sources: Checker calls Observe once per provider per tick with the active
 // ping's outcome, and Observe itself pulls the latest passive Stats from
@@ -205,6 +217,7 @@ func (l *transitionLog) last() (Transition, bool) {
 type Monitor struct {
 	cfg      MonitorConfig
 	recorder *Recorder
+	breakers BreakerOracle
 	rdb      *redis.Client
 	log      *slog.Logger
 
@@ -227,7 +240,9 @@ type Monitor struct {
 // each provider's last known status from Redis, best-effort, which is what
 // lets status survive a gateway restart: a stale or unreachable Redis simply
 // leaves the optimistic Healthy default in place.
-func NewMonitor(providers []provider.Provider, recorder *Recorder, rdb *redis.Client, log *slog.Logger, cfg MonitorConfig) (*Monitor, error) {
+// breakers may be nil, which simply removes that signal from classify — the
+// shape every optional dependency in this project takes.
+func NewMonitor(providers []provider.Provider, recorder *Recorder, breakers BreakerOracle, rdb *redis.Client, log *slog.Logger, cfg MonitorConfig) (*Monitor, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -239,7 +254,7 @@ func NewMonitor(providers []provider.Provider, recorder *Recorder, rdb *redis.Cl
 		order = append(order, p.Name())
 	}
 
-	m := &Monitor{cfg: cfg, recorder: recorder, rdb: rdb, log: log, states: states, order: order}
+	m := &Monitor{cfg: cfg, recorder: recorder, breakers: breakers, rdb: rdb, log: log, states: states, order: order}
 	m.restoreFromRedis(context.Background(), providers)
 	return m, nil
 }
@@ -324,7 +339,7 @@ func (m *Monitor) Observe(ctx context.Context, providerName string, pingErr erro
 
 	stats := m.recorder.Stats(providerName)
 
-	raw, reason := m.classify(st, stats)
+	raw, reason := m.classify(providerName, st, stats)
 	m.transition(ctx, providerName, st, raw, reason, pingErr == nil)
 
 	// Baseline updates after classification, against the reading that was
@@ -337,13 +352,27 @@ func (m *Monitor) Observe(ctx context.Context, providerName string, pingErr erro
 // ignoring hysteresis entirely — transition is what applies that. Down
 // conditions are checked first, so a provider that is both failing pings and
 // showing a high error rate is reported for the more severe reason.
-func (m *Monitor) classify(st *providerState, stats Stats) (Status, string) {
+func (m *Monitor) classify(providerName string, st *providerState, stats Stats) (Status, string) {
 	if st.consecutiveFails >= m.cfg.DownConsecutiveFailures {
 		return StatusDown, "consecutive_ping_failures"
 	}
 	if stats.Count > 0 && stats.ErrorRate >= m.cfg.DownErrorRate {
 		return StatusDown, "error_rate_hard_threshold"
 	}
+
+	// Step 7.4: an open breaker means the gateway is already refusing to send
+	// this provider traffic, so reporting it healthy would contradict the
+	// gateway's own behaviour. It is ranked above the error-rate checks that
+	// follow — all three yield Degraded, so only the recorded reason differs,
+	// and "circuit_breaker_open" is the more actionable line for an operator:
+	// it names what is happening now rather than the measurement that caused
+	// it. Never Down: a breaker is a decision to stop trying, not evidence
+	// that the provider is unreachable, and the two shouldn't be conflated in
+	// a status an operator reads during an incident.
+	if m.breakers != nil && m.breakers.AnyOpen(providerName) {
+		return StatusDegraded, "circuit_breaker_open"
+	}
+
 	if stats.Count > 0 && stats.ErrorRate >= m.cfg.DegradedErrorRate {
 		return StatusDegraded, "error_rate_threshold"
 	}

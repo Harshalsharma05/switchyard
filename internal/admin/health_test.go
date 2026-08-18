@@ -1,15 +1,19 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/Harshalsharma05/switchyard/internal/health"
+	"github.com/Harshalsharma05/switchyard/internal/provider"
 )
 
 // fakeHealthReader is the fake behind HealthReader. Its zero value reports no
@@ -24,6 +28,30 @@ func (f fakeHealthReader) Snapshots() []health.ProviderHealth {
 	return f.snapshots
 }
 
+// fakeBreakerResetter is the fake behind BreakerResetter. Its zero value
+// reports nothing reset and no error, which is all the tests that are not
+// about the breaker endpoint need.
+type fakeBreakerResetter struct {
+	count int
+	err   error
+
+	mu       sync.Mutex
+	resetFor []string
+}
+
+func (f *fakeBreakerResetter) Reset(_ context.Context, providerName string) (int, error) {
+	f.mu.Lock()
+	f.resetFor = append(f.resetFor, providerName)
+	f.mu.Unlock()
+	return f.count, f.err
+}
+
+func (f *fakeBreakerResetter) calls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.resetFor...)
+}
+
 // newTestAdminServerWithHealth builds a router with a caller-controlled
 // HealthReader and permissive defaults for everything else this file's tests
 // don't care about — the same shape newTestAdminServerWithReload gives
@@ -31,7 +59,7 @@ func (f fakeHealthReader) Snapshots() []health.ProviderHealth {
 func newTestAdminServerWithHealth(t *testing.T, reader HealthReader) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(NewRouter(func() bool { return true },
-		testTeamStore(t), &fakeSpendReader{}, fakeProviderLister{}, reader, fakeReloader, discardLogger()))
+		testTeamStore(t), &fakeSpendReader{}, fakeProviderLister{}, reader, &fakeBreakerResetter{}, nil, fakeReloader, discardLogger()))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -142,5 +170,100 @@ func TestListProviderHealthEmptyIsAnEmptyArray(t *testing.T) {
 	}
 	if strings.TrimSpace(string(raw)) != "[]" {
 		t.Errorf("body = %q, want []", raw)
+	}
+}
+
+// --- POST /admin/providers/{name}/breaker/reset (Step 7.4) -------------------
+
+// newTestAdminServerWithBreakers builds a router whose provider list and
+// breaker resetter are both caller-controlled, since the endpoint consults
+// one to validate the name it passes to the other.
+func newTestAdminServerWithBreakers(t *testing.T, providers ProviderLister, resetter BreakerResetter) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(NewRouter(func() bool { return true },
+		testTeamStore(t), &fakeSpendReader{}, providers, fakeHealthReader{}, resetter, nil, fakeReloader, discardLogger()))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func configuredProviders() fakeProviderLister {
+	return fakeProviderLister{configs: []provider.Config{{Name: "groq"}, {Name: "ollama"}}}
+}
+
+func TestResetBreakerClosesAProvidersBreakers(t *testing.T) {
+	resetter := &fakeBreakerResetter{count: 2}
+	srv := newTestAdminServerWithBreakers(t, configuredProviders(), resetter)
+
+	resp, err := http.Post(srv.URL+"/admin/providers/groq/breaker/reset", "", nil)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	var view breakerResetView
+	if err := json.NewDecoder(resp.Body).Decode(&view); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if view.Provider != "groq" || view.Reset != 2 {
+		t.Errorf("view = %+v, want groq with 2 reset", view)
+	}
+
+	if got := resetter.calls(); len(got) != 1 || got[0] != "groq" {
+		t.Errorf("resetter called with %v, want exactly [groq]", got)
+	}
+}
+
+// TestResetBreakerRejectsAnUnknownProvider proves a typo at incident time
+// reads as an error rather than a no-op success.
+func TestResetBreakerRejectsAnUnknownProvider(t *testing.T) {
+	resetter := &fakeBreakerResetter{}
+	srv := newTestAdminServerWithBreakers(t, configuredProviders(), resetter)
+
+	resp, err := http.Post(srv.URL+"/admin/providers/grok/breaker/reset", "", nil)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+	if got := resetter.calls(); len(got) != 0 {
+		t.Errorf("resetter was called with %v for an unknown provider, want no calls", got)
+	}
+}
+
+// TestResetBreakerReportsASharedStateFailure proves a Redis failure during
+// reset is surfaced rather than reported as a clean success — the local
+// breakers were reset, but the rest of the fleet may still hold the episode.
+func TestResetBreakerReportsASharedStateFailure(t *testing.T) {
+	resetter := &fakeBreakerResetter{count: 1, err: errors.New("redis is down")}
+	srv := newTestAdminServerWithBreakers(t, configuredProviders(), resetter)
+
+	resp, err := http.Post(srv.URL+"/admin/providers/groq/breaker/reset", "", nil)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", resp.StatusCode)
+	}
+}
+
+// TestBreakerResetRouteDoesNotShadowTheHealthRoute guards the one routing
+// hazard in mounting a wildcard under /admin/providers: "health" must keep
+// reaching the health endpoint rather than being read as a provider name.
+func TestBreakerResetRouteDoesNotShadowTheHealthRoute(t *testing.T) {
+	srv := newTestAdminServerWithBreakers(t, configuredProviders(), &fakeBreakerResetter{})
+
+	resp, err := http.Get(srv.URL + "/admin/providers/health")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 from the health endpoint", resp.StatusCode)
 	}
 }

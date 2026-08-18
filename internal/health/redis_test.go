@@ -44,7 +44,7 @@ func TestMonitorStatusSurvivesRestart(t *testing.T) {
 	t.Cleanup(func() { rdb.Del(context.Background(), statusKey(name)) })
 
 	cfg := testMonitorConfig()
-	first, err := NewMonitor(providers, NewRecorder(providers), rdb, log, cfg)
+	first, err := NewMonitor(providers, NewRecorder(providers), nil, rdb, log, cfg)
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestMonitorStatusSurvivesRestart(t *testing.T) {
 
 	// A fresh Monitor, same Redis, same provider name: this stands in for the
 	// gateway process restarting while Redis stays up.
-	second, err := NewMonitor(providers, NewRecorder(providers), rdb, log, cfg)
+	second, err := NewMonitor(providers, NewRecorder(providers), nil, rdb, log, cfg)
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestMonitorRestoreIsFailOpenOnUnknownKey(t *testing.T) {
 	name := "never-persisted-" + time.Now().Format("150405.000000000")
 	providers := []provider.Provider{&provider.Mock{ProviderName: name}}
 
-	m, err := NewMonitor(providers, NewRecorder(providers), rdb, log, testMonitorConfig())
+	m, err := NewMonitor(providers, NewRecorder(providers), nil, rdb, log, testMonitorConfig())
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}

@@ -22,7 +22,7 @@ import (
 // newTestServerFull hardcodes a permissive stub for both.
 func newTestServerWithBudget(t *testing.T, resolver Resolver, authr Authenticator, limiter RateLimiter, budgetTracker BudgetTracker, calc CostCalculator) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(NewRouter(resolver, authr, limiter, budgetTracker, calc, stubHealthRecorder{}, nil, noRetryConfig(t), discardLogger(), func() bool { return true }))
+	srv := httptest.NewServer(NewRouter(resolver, authr, limiter, budgetTracker, calc, stubHealthRecorder{}, nil, nil, nil, noRetryConfig(t), discardLogger(), func() bool { return true }))
 	t.Cleanup(srv.Close)
 	return srv
 }

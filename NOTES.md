@@ -34,6 +34,10 @@ The tricky implementation detail: you're running this in Redis, and multiple cop
 
 You've got two separate buckets per team — one for requests-per-minute, one for tokens-per-minute (an AI response with 4000 tokens should count differently than one with 40).
 
+### What Phase 7 is actually building
+
+Phase 6 built the logic of "if this fails, try somewhere else." But it had a hidden flaw: retry-and-fallback reacts to failures one at a time. If a provider is properly broken — not a blip, actually down — you'd still keep attempting it on every single new request, wait for it to time out, fail, then fall back. That's slow, and it keeps hammering something that's already struggling. The circuit breaker's whole job is to remember "this thing is currently broken" so you can stop even trying it until there's reason to believe it's recovered. This is the piece the plan flags as the single most likely thing an interviewer asks about, which is exactly why you're writing it by hand instead of letting Claude Code generate it.
+
 Step 7.1 — The three-state light switch
 
 Think of a circuit breaker like an actual electrical circuit breaker in your house — it exists to stop a small problem (one faulty appliance) from becoming a big one (the whole house catching fire). Three states:
@@ -48,3 +52,7 @@ Closed → Open: too many failures happened recently (you're counting failures i
 Open → HalfOpen: after waiting some cooldown period, automatically try being a bit more optimistic
 HalfOpen → Closed: if a handful of test requests in a row succeed, trust it's actually recovered
 HalfOpen → Open: if even one test request fails, nope — go straight back to fully blocking, and (smart addition) make the next cooldown even longer than before, so a provider that keeps failing gets tested less and less frequently instead of you hammering it every 30 seconds forever
+
+## One limitation worth knowing before Phase 11
+
+Chaos does not affect Provider.Ping. Health checks call the adapter directly, bypassing the proxy, so active checks keep succeeding while chaos is breaking real requests. The consequence for the 11.4 demo: a chaos'd provider goes degraded (via the passive error-rate signal) and its breaker opens and fallback engages — but it won't reach down via consecutive_ping_failures. That's arguably more realistic than the alternative, but it's a deliberate gap, not an oversight. Making Ping chaos-able would mean wrapping provider.Provider, which is a bigger structural change than 7.5 warrants — flag it if you'd rather have it.

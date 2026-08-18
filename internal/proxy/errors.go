@@ -135,7 +135,13 @@ func writeChainExhaustedError(w http.ResponseWriter, log *slog.Logger, requested
 		}
 
 		var provErr *provider.Error
-		if errors.As(f.err, &provErr) {
+		switch {
+		case errors.Is(f.err, errBreakerOpen):
+			// Named explicitly so the breakdown distinguishes "we tried and it
+			// failed" from "we deliberately did not try," which is the more
+			// useful thing for an operator reading a failover to know.
+			detail.Type = "circuit_breaker_open"
+		case errors.As(f.err, &provErr):
 			detail.Type = string(provErr.Kind)
 			if provErr.Message != "" {
 				detail.Message = provErr.Message

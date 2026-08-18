@@ -213,7 +213,7 @@ func newTestServerWithAuth(t *testing.T, resolver Resolver, authr Authenticator)
 func newTestServerFull(t *testing.T, resolver Resolver, authr Authenticator, limiter RateLimiter) *httptest.Server {
 	t.Helper()
 
-	srv := httptest.NewServer(NewRouter(resolver, authr, limiter, stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, nil, noRetryConfig(t), discardLogger(), func() bool { return true }))
+	srv := httptest.NewServer(NewRouter(resolver, authr, limiter, stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, nil, nil, nil, noRetryConfig(t), discardLogger(), func() bool { return true }))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -833,7 +833,7 @@ func TestRoutingEdges(t *testing.T) {
 
 func TestProbes(t *testing.T) {
 	t.Run("healthz is always ok", func(t *testing.T) {
-		srv := httptest.NewServer(NewRouter(stubResolver{}, stubAuthenticator{}, stubRateLimiter{}, stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, nil, noRetryConfig(t), discardLogger(), func() bool { return false }))
+		srv := httptest.NewServer(NewRouter(stubResolver{}, stubAuthenticator{}, stubRateLimiter{}, stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, nil, nil, nil, noRetryConfig(t), discardLogger(), func() bool { return false }))
 		defer srv.Close()
 
 		resp, err := http.Get(srv.URL + "/healthz")
@@ -853,7 +853,7 @@ func TestProbes(t *testing.T) {
 		tests := map[bool]int{true: http.StatusOK, false: http.StatusServiceUnavailable}
 
 		for ready, want := range tests {
-			srv := httptest.NewServer(NewRouter(stubResolver{}, stubAuthenticator{}, stubRateLimiter{}, stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, nil, noRetryConfig(t), discardLogger(), func() bool { return ready }))
+			srv := httptest.NewServer(NewRouter(stubResolver{}, stubAuthenticator{}, stubRateLimiter{}, stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, nil, nil, nil, noRetryConfig(t), discardLogger(), func() bool { return ready }))
 
 			resp, err := http.Get(srv.URL + "/readyz")
 			if err != nil {

@@ -28,7 +28,7 @@ type Middleware func(http.Handler) http.Handler
 // Route paths carry an explicit /admin prefix even though the whole listener
 // is already the admin port, leaving room for /metrics and future operator
 // endpoints to live at the root without colliding with this namespace.
-func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers ProviderLister, healthReader HealthReader, reload Reloader, log *slog.Logger, middleware ...Middleware) http.Handler {
+func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers ProviderLister, healthReader HealthReader, breakers BreakerResetter, chaos ChaosController, reload Reloader, log *slog.Logger, middleware ...Middleware) http.Handler {
 	r := chi.NewRouter()
 
 	for _, mw := range middleware {
@@ -47,7 +47,22 @@ func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers 
 
 	r.Get("/admin/providers", listProviders(providers, log))
 	r.Get("/admin/providers/health", listProviderHealth(healthReader, log))
+	// Registered after /admin/providers/health so chi's static-over-wildcard
+	// precedence is not the only thing keeping "health" from being read as a
+	// provider name; the literal route is more specific either way.
+	r.Post("/admin/providers/{name}/breaker/reset", resetBreaker(breakers, providers, log))
 	r.Post("/admin/reload", reloadConfig(reload, log))
+
+	// Step 7.5's chaos controls. The routes are always registered and answer
+	// 404 unless the harness is available, rather than being conditionally
+	// mounted: the guard that matters is inside the harness, and keeping the
+	// routing table identical in every environment means a production gateway
+	// is indistinguishable from a build that never had chaos compiled in.
+	r.Route("/admin/chaos", func(r chi.Router) {
+		r.Get("/", getChaos(chaos, log))
+		r.Post("/", setChaos(chaos, log))
+		r.Delete("/", deleteChaos(chaos, log))
+	})
 
 	return r
 }

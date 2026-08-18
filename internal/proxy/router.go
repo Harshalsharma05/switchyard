@@ -46,8 +46,12 @@ import (
 // inside ChatCompletions too (see reserveBudget in handler.go), right after
 // the TPM reservation succeeds. Phase 8's tracing inserts alongside Auth and
 // RateLimit, inside Logger, for the same reasons those two do.
-func NewRouter(resolver Resolver, authr Authenticator, limiter RateLimiter, budgetTracker BudgetTracker, calc CostCalculator, healthRecorder HealthRecorder, healthOracle HealthOracle, retryConfig resilience.Config, log *slog.Logger, ready func() bool) http.Handler {
-	h := NewHandler(resolver, limiter, budgetTracker, calc, healthRecorder, healthOracle, retryConfig, log)
+// chaos is the Step 7.5 harness, and may be nil. Note that it is injected on
+// the request path here but exposed nowhere on this router: its controls are
+// mounted on the admin listener only, so nothing reachable from the public
+// port can turn fault injection on.
+func NewRouter(resolver Resolver, authr Authenticator, limiter RateLimiter, budgetTracker BudgetTracker, calc CostCalculator, healthRecorder HealthRecorder, healthOracle HealthOracle, breakers Breakers, chaos *Chaos, retryConfig resilience.Config, log *slog.Logger, ready func() bool) http.Handler {
+	h := NewHandler(resolver, limiter, budgetTracker, calc, healthRecorder, healthOracle, breakers, chaos, retryConfig, log)
 
 	r := chi.NewRouter()
 

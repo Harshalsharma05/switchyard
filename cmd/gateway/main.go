@@ -68,6 +68,38 @@ const (
 	// tier.
 	defaultRetryMaxTotalAttempts = 5
 
+	// Phase 7 circuit breaker. Process-level env vars for the same reason the
+	// health thresholds above are: they say how quickly this deployment wants
+	// to stop trying, not something that differs per provider.
+	//
+	// The plan specifies none of these numbers. Five failures in thirty
+	// seconds is a real outage rather than a bad minute; a ten-second first
+	// cooldown is long enough to matter and short enough that a brief blip
+	// recovers quickly, doubling to five minutes if probes keep failing. Two
+	// consecutive good probes to close, so one lucky request cannot reopen the
+	// floodgates.
+	defaultBreakerFailureThreshold = 5
+	defaultBreakerWindow           = 30 * time.Second
+	defaultBreakerCooldownBase     = 10 * time.Second
+	defaultBreakerCooldownMax      = 5 * time.Minute
+	defaultBreakerSuccessThreshold = 2
+
+	// Sized above the largest provider timeout in configs/providers.yaml
+	// (Ollama's 120s), so a slow-but-alive probe is never mistaken for an
+	// abandoned one.
+	defaultBreakerProbeTimeout = 150 * time.Second
+
+	// Half a second of staleness against a value that changes a few times a
+	// day: enough that the shared read amortises to nothing at any real
+	// request rate, short enough that a stale verdict costs a handful of
+	// requests. See resilience.BreakerConfig.StateCacheTTL.
+	defaultBreakerStateCacheTTL = 500 * time.Millisecond
+
+	// Step 7.5's chaos harness. The default environment is "production"
+	// specifically so that a deployment which sets nothing at all cannot get
+	// fault injection: the safe value is the one you get by forgetting.
+	defaultEnvironment = "production"
+
 	// readHeaderTimeout bounds how long a client may take to send its headers,
 	// which is the Slowloris defence. Note that WriteTimeout is deliberately
 	// left unset: a provider call can legitimately take 30 seconds and a Phase 2
@@ -138,6 +170,33 @@ func run() error {
 	// in this section.
 	healthRecorder := health.NewRecorder(initial.registry.Providers())
 
+	// Phase 7's breakers, one per provider+model, created lazily on first use.
+	// Built before healthMonitor because Step 7.4 feeds breaker state into
+	// health status, so the monitor needs this to exist first — the dependency
+	// runs registry -> monitor and never back, which is also why
+	// internal/health declares the BreakerOracle interface rather than
+	// importing internal/resilience.
+	breakerRegistry, err := resilience.NewBreakerRegistry(
+		resilience.BreakerConfig{
+			FailureThreshold: intOr("SWITCHYARD_BREAKER_FAILURE_THRESHOLD", defaultBreakerFailureThreshold),
+			Window:           durationOr("SWITCHYARD_BREAKER_WINDOW", defaultBreakerWindow),
+			CooldownBase:     durationOr("SWITCHYARD_BREAKER_COOLDOWN_BASE", defaultBreakerCooldownBase),
+			CooldownMax:      durationOr("SWITCHYARD_BREAKER_COOLDOWN_MAX", defaultBreakerCooldownMax),
+			SuccessThreshold: intOr("SWITCHYARD_BREAKER_SUCCESS_THRESHOLD", defaultBreakerSuccessThreshold),
+			ProbeTimeout:     durationOr("SWITCHYARD_BREAKER_PROBE_TIMEOUT", defaultBreakerProbeTimeout),
+			StateCacheTTL:    durationOr("SWITCHYARD_BREAKER_STATE_CACHE_TTL", defaultBreakerStateCacheTTL),
+		},
+		log,
+		// Step 7.3: each breaker gets a Redis-backed store scoped to its own
+		// provider+model keys, so replicas agree on which circuits are open.
+		func(labels resilience.Labels) resilience.BreakerStore {
+			return resilience.NewRedisStore(redisClient, labels)
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("building circuit breaker registry: %w", err)
+	}
+
 	// Step 5.3's status computation reads healthRecorder's windows and is fed
 	// the active checker's ping outcomes below. Its thresholds are
 	// process-level env vars for the same reason the checker's interval and
@@ -146,6 +205,7 @@ func run() error {
 	healthMonitor, err := health.NewMonitor(
 		initial.registry.Providers(),
 		healthRecorder,
+		breakerRegistry,
 		redisClient,
 		log,
 		health.MonitorConfig{
@@ -188,6 +248,16 @@ func run() error {
 		return fmt.Errorf("building retry policy: %w", err)
 	}
 
+	// Step 7.5's fault-injection harness. It refuses to become available
+	// unless the environment is dev *and* the operator explicitly asked, so
+	// the default deployment — which sets neither — has no reachable path to
+	// injecting a failure. See proxy.NewChaos for why both are required.
+	chaos := proxy.NewChaos(
+		envOr("SWITCHYARD_ENV", defaultEnvironment),
+		boolOr("SWITCHYARD_CHAOS_ENABLED", false),
+		log,
+	)
+
 	// ready gates /readyz. It flips true once wiring is complete and false again
 	// the moment shutdown begins, so a load balancer stops sending new traffic
 	// while in-flight requests drain.
@@ -206,13 +276,13 @@ func run() error {
 		// (Step 5.2's passive samples), healthMonitor the read side Step 6.2's
 		// chain ordering consults to skip a down provider and sink a degraded
 		// one.
-		Handler:           proxy.NewRouter(store, store, limiter, budgetTracker, store, healthRecorder, healthMonitor, retryConfig, log, isReady),
+		Handler:           proxy.NewRouter(store, store, limiter, budgetTracker, store, healthRecorder, healthMonitor, breakerRegistry, chaos, retryConfig, log, isReady),
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
 
 	adminSrv := &http.Server{
 		Addr: envOr("SWITCHYARD_ADMIN_ADDR", defaultAdminAddr),
-		Handler: admin.NewRouter(isReady, store, budgetTracker, store, healthMonitor, newReloader(store, providersPath, teamsPath), log,
+		Handler: admin.NewRouter(isReady, store, budgetTracker, store, healthMonitor, breakerRegistry, chaosAdapter{chaos}, newReloader(store, providersPath, teamsPath), log,
 			proxy.Recoverer(log),
 			proxy.RequestID,
 			proxy.Logger(log),
@@ -362,6 +432,21 @@ func floatOr(key string, fallback float64) float64 {
 		return fallback
 	}
 	return f
+}
+
+// boolOr reads a boolean env var. Anything unparseable falls back rather than
+// failing the boot — and for the one flag that uses it, the fallback is
+// "off," so a typo can only ever disable chaos, never enable it.
+func boolOr(key string, fallback bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return fallback
+	}
+	return b
 }
 
 func intOr(key string, fallback int) int {

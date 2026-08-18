@@ -3,8 +3,10 @@ package proxy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 
 	"github.com/Harshalsharma05/switchyard/internal/health"
 	"github.com/Harshalsharma05/switchyard/internal/provider"
@@ -21,6 +23,27 @@ import (
 type HealthOracle interface {
 	Status(providerName string) health.Status
 }
+
+// Breakers is the slice of resilience.BreakerRegistry this package needs:
+// look up the breaker guarding one provider+model. Declared by the consumer,
+// like Resolver and HealthOracle above.
+//
+// It hands back the concrete *resilience.Breaker rather than an interface of
+// its own three methods, because a Go interface returning an interface would
+// not be satisfied structurally by the registry's concrete return type. Tests
+// build real Breakers over fake stores, which is the better fake anyway —
+// the state machine under test is the one that ships.
+type Breakers interface {
+	For(labels resilience.Labels) *resilience.Breaker
+}
+
+// errBreakerOpen marks a candidate that was skipped without being called.
+//
+// It is a plain sentinel rather than a *provider.Error because no provider
+// was involved: inventing a provider failure here would put a fabricated
+// upstream status into the chain breakdown and into Phase 5's passive health
+// window, both of which are supposed to record what providers actually did.
+var errBreakerOpen = errors.New("circuit breaker is open for this provider and model")
 
 // chainFailure is one candidate's outcome after its retries were exhausted.
 // Step 6.3 turns a slice of these into the 503 body that says what was tried
@@ -108,6 +131,31 @@ func runChain[T any](
 			}
 		}
 
+		// Step 7.4: an open breaker skips this candidate outright — before the
+		// budget re-check, before resolution, and above all before any
+		// provider call. That ordering is the point of the bullet: the win is
+		// not just avoiding a request that would fail, it is avoiding the
+		// timeout the caller would otherwise wait out first. A dead provider
+		// costs the full request timeout per attempt; an open breaker costs a
+		// cached state read.
+		//
+		// A claimed HalfOpen probe is admitted here and reported below, once,
+		// after resilience.Do has finished with this candidate. Note that Do
+		// may retry inside a single probe, so one probe can be more than one
+		// upstream call — bounded by MaxAttempts and still gated by the single
+		// probe slot, but worth knowing when reading a recovering provider's
+		// access log.
+		breaker := h.breakerFor(cand)
+		if breaker != nil && !breaker.Allow(ctx) {
+			h.log.LogAttrs(ctx, slog.LevelInfo, "skipping candidate on open circuit breaker",
+				slog.String("request_id", RequestIDFrom(ctx)),
+				slog.String("provider", cand.Provider),
+				slog.String("model", cand.Model),
+			)
+			failures = append(failures, chainFailure{candidate: cand, err: errBreakerOpen})
+			continue
+		}
+
 		// Step 6.4's re-check, before any call is made: a candidate the team
 		// cannot afford is recorded and skipped, not attempted. The next
 		// entry is often a cheaper one, so a denial here is a reason to keep
@@ -159,6 +207,20 @@ func runChain[T any](
 			},
 		)
 		spent += attempts
+
+		// The breaker hears one verdict per candidate, not one per retry.
+		// Reporting each retry separately would let a single client request
+		// contribute a whole threshold's worth of failures on its own, and in
+		// HalfOpen it would report several outcomes for a probe that was
+		// claimed once.
+		if breaker != nil {
+			if attemptErr == nil {
+				breaker.RecordSuccess(ctx)
+			} else {
+				breaker.RecordFailure(ctx)
+			}
+		}
+
 		if attemptErr == nil {
 			return value, cand, failures, nil
 		}
@@ -207,11 +269,24 @@ func logFallback(ctx context.Context, log *slog.Logger, requested, next resilien
 // line says "rate_limited" rather than repeating a full error string that is
 // already logged by the retry loop.
 func failureKind(err error) string {
+	if errors.Is(err, errBreakerOpen) {
+		return "circuit_breaker_open"
+	}
 	var provErr *provider.Error
 	if errors.As(err, &provErr) {
 		return string(provErr.Kind)
 	}
 	return "unknown"
+}
+
+// breakerFor returns the breaker guarding one candidate, or nil when this
+// handler was built without a registry — the same optional-dependency shape
+// h.health uses, so tests predating Phase 7 need not grow one.
+func (h *Handler) breakerFor(cand resilience.Candidate) *resilience.Breaker {
+	if h.breakers == nil {
+		return nil
+	}
+	return h.breakers.For(resilience.Labels{Provider: cand.Provider, Model: cand.Model})
 }
 
 // writeChainError picks how a failed chain is reported.
@@ -241,6 +316,20 @@ func (h *Handler) writeChainError(w http.ResponseWriter, requestedModel string, 
 		writeChainExhaustedError(w, h.log, requestedModel, failures)
 		return
 	}
+
+	// One candidate, and its breaker was open. There is no upstream status to
+	// report because nothing upstream was contacted, and writeProviderError's
+	// fallback for an unclassified error is a 500 — which would blame the
+	// gateway for an internal fault when this is in fact the gateway working
+	// exactly as designed. 503 is the honest answer: no capacity right now,
+	// try later.
+	if errors.Is(err, errBreakerOpen) {
+		writeError(w, h.log, http.StatusServiceUnavailable, "circuit_breaker_open",
+			fmt.Sprintf("the circuit breaker for model %s is open after repeated upstream failures; no request was sent",
+				strconv.Quote(requestedModel)))
+		return
+	}
+
 	writeProviderError(w, h.log, err)
 }
 

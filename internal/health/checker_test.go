@@ -33,7 +33,7 @@ func testMonitorConfig() MonitorConfig {
 // wiring, not Redis persistence.
 func newTestMonitor(t *testing.T, providers []provider.Provider, log *slog.Logger) *Monitor {
 	t.Helper()
-	m, err := NewMonitor(providers, NewRecorder(providers), nil, log, testMonitorConfig())
+	m, err := NewMonitor(providers, NewRecorder(providers), nil, nil, log, testMonitorConfig())
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}

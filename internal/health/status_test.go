@@ -43,7 +43,7 @@ func TestMonitorConfigValidation(t *testing.T) {
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			providers := []provider.Provider{&provider.Mock{ProviderName: "p"}}
-			_, err := NewMonitor(providers, NewRecorder(providers), nil, log, tt.cfg)
+			_, err := NewMonitor(providers, NewRecorder(providers), nil, nil, log, tt.cfg)
 			if tt.wantErr && err == nil {
 				t.Fatalf("NewMonitor() error = nil, want error")
 			}
@@ -60,7 +60,7 @@ func TestMonitorConfigValidation(t *testing.T) {
 func TestMonitorStartsHealthy(t *testing.T) {
 	log, _ := newTestLogger()
 	providers := []provider.Provider{&provider.Mock{ProviderName: "p"}}
-	m, err := NewMonitor(providers, NewRecorder(providers), nil, log, testMonitorConfig())
+	m, err := NewMonitor(providers, NewRecorder(providers), nil, nil, log, testMonitorConfig())
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestMonitorConsecutivePingFailuresGoDown(t *testing.T) {
 	log, _ := newTestLogger()
 	providers := []provider.Provider{&provider.Mock{ProviderName: "p"}}
 	cfg := testMonitorConfig()
-	m, err := NewMonitor(providers, NewRecorder(providers), nil, log, cfg)
+	m, err := NewMonitor(providers, NewRecorder(providers), nil, nil, log, cfg)
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestMonitorErrorRateThresholdsAreImmediate(t *testing.T) {
 	log, _ := newTestLogger()
 	providers := []provider.Provider{&provider.Mock{ProviderName: "p"}}
 	recorder := NewRecorder(providers)
-	m, err := NewMonitor(providers, recorder, nil, log, testMonitorConfig())
+	m, err := NewMonitor(providers, recorder, nil, nil, log, testMonitorConfig())
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestMonitorHardErrorRateGoesDownImmediately(t *testing.T) {
 	log, _ := newTestLogger()
 	providers := []provider.Provider{&provider.Mock{ProviderName: "p"}}
 	recorder := NewRecorder(providers)
-	m, err := NewMonitor(providers, recorder, nil, log, testMonitorConfig())
+	m, err := NewMonitor(providers, recorder, nil, nil, log, testMonitorConfig())
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestMonitorRecoveryRequiresConsecutiveHealthySignals(t *testing.T) {
 	log, _ := newTestLogger()
 	providers := []provider.Provider{&provider.Mock{ProviderName: "p"}}
 	cfg := testMonitorConfig()
-	m, err := NewMonitor(providers, NewRecorder(providers), nil, log, cfg)
+	m, err := NewMonitor(providers, NewRecorder(providers), nil, nil, log, cfg)
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestMonitorRecoveryStreakResetsOnABadSignal(t *testing.T) {
 	log, _ := newTestLogger()
 	providers := []provider.Provider{&provider.Mock{ProviderName: "p"}}
 	cfg := testMonitorConfig()
-	m, err := NewMonitor(providers, NewRecorder(providers), nil, log, cfg)
+	m, err := NewMonitor(providers, NewRecorder(providers), nil, nil, log, cfg)
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -231,7 +231,7 @@ func TestMonitorP99AboveBaselineDegrades(t *testing.T) {
 	log, _ := newTestLogger()
 	providers := []provider.Provider{&provider.Mock{ProviderName: "p"}}
 	recorder := NewRecorder(providers)
-	m, err := NewMonitor(providers, recorder, nil, log, testMonitorConfig())
+	m, err := NewMonitor(providers, recorder, nil, nil, log, testMonitorConfig())
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -256,7 +256,7 @@ func TestMonitorP99AboveBaselineDegrades(t *testing.T) {
 func TestMonitorUnknownProviderIsFailOpenHealthy(t *testing.T) {
 	log, _ := newTestLogger()
 	providers := []provider.Provider{&provider.Mock{ProviderName: "known"}}
-	m, err := NewMonitor(providers, NewRecorder(providers), nil, log, testMonitorConfig())
+	m, err := NewMonitor(providers, NewRecorder(providers), nil, nil, log, testMonitorConfig())
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestMonitorSnapshotReportsCurrentSignal(t *testing.T) {
 	log, _ := newTestLogger()
 	providers := []provider.Provider{&provider.Mock{ProviderName: "p"}}
 	recorder := NewRecorder(providers)
-	m, err := NewMonitor(providers, recorder, nil, log, testMonitorConfig())
+	m, err := NewMonitor(providers, recorder, nil, nil, log, testMonitorConfig())
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -316,7 +316,7 @@ func TestMonitorSnapshotHistoryTracksTransitions(t *testing.T) {
 	log, _ := newTestLogger()
 	providers := []provider.Provider{&provider.Mock{ProviderName: "p"}}
 	cfg := testMonitorConfig()
-	m, err := NewMonitor(providers, NewRecorder(providers), nil, log, cfg)
+	m, err := NewMonitor(providers, NewRecorder(providers), nil, nil, log, cfg)
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -384,7 +384,7 @@ func TestMonitorSnapshotsPreservesRegistryOrder(t *testing.T) {
 		&provider.Mock{ProviderName: "second"},
 		&provider.Mock{ProviderName: "third"},
 	}
-	m, err := NewMonitor(providers, NewRecorder(providers), nil, log, testMonitorConfig())
+	m, err := NewMonitor(providers, NewRecorder(providers), nil, nil, log, testMonitorConfig())
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -409,7 +409,7 @@ func TestMonitorAllDown(t *testing.T) {
 		&provider.Mock{ProviderName: "b"},
 	}
 	cfg := testMonitorConfig()
-	m, err := NewMonitor(providers, NewRecorder(providers), nil, log, cfg)
+	m, err := NewMonitor(providers, NewRecorder(providers), nil, nil, log, cfg)
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -437,3 +437,121 @@ func TestMonitorAllDown(t *testing.T) {
 // Monitor only cares whether it's nil, not its concrete type, for the
 // consecutive-failure signal.
 var errPingFailed = context.DeadlineExceeded
+
+// --- Step 7.4: breaker state feeds health status ----------------------------
+
+// stubBreakerOracle is the fake behind BreakerOracle.
+type stubBreakerOracle struct {
+	open map[string]bool
+}
+
+func (s stubBreakerOracle) AnyOpen(providerName string) bool { return s.open[providerName] }
+
+// TestMonitorOpenBreakerDegradesAProvider is Step 7.4's health integration:
+// the gateway is already refusing to send this provider traffic, so reporting
+// it healthy would contradict the gateway's own behaviour.
+func TestMonitorOpenBreakerDegradesAProvider(t *testing.T) {
+	ctx := context.Background()
+	log, _ := newTestLogger()
+	providers := []provider.Provider{&provider.Mock{ProviderName: "p"}}
+	breakers := stubBreakerOracle{open: map[string]bool{"p": true}}
+
+	m, err := NewMonitor(providers, NewRecorder(providers), breakers, nil, log, testMonitorConfig())
+	if err != nil {
+		t.Fatalf("NewMonitor() error: %v", err)
+	}
+
+	// A clean ping and an empty passive window: without the breaker signal
+	// this provider would be unambiguously healthy.
+	m.Observe(ctx, "p", nil)
+
+	if got := m.Status("p"); got != StatusDegraded {
+		t.Fatalf("Status() = %v, want %v with an open breaker", got, StatusDegraded)
+	}
+
+	snap, ok := m.Snapshot("p")
+	if !ok {
+		t.Fatalf("Snapshot() reported an untracked provider")
+	}
+	if snap.LastTransition == nil || snap.LastTransition.Reason != "circuit_breaker_open" {
+		t.Errorf("last transition = %+v, want reason circuit_breaker_open", snap.LastTransition)
+	}
+}
+
+// TestMonitorOpenBreakerIsNeverDown proves the breaker only ever contributes
+// Degraded. A breaker is a decision to stop trying, not evidence the provider
+// is unreachable, and conflating the two would mislead an operator reading
+// status during an incident — it would also fail /readyz through AllDown on
+// what may be a perfectly healthy fleet.
+func TestMonitorOpenBreakerIsNeverDown(t *testing.T) {
+	ctx := context.Background()
+	log, _ := newTestLogger()
+	providers := []provider.Provider{&provider.Mock{ProviderName: "p"}}
+	breakers := stubBreakerOracle{open: map[string]bool{"p": true}}
+
+	m, err := NewMonitor(providers, NewRecorder(providers), breakers, nil, log, testMonitorConfig())
+	if err != nil {
+		t.Fatalf("NewMonitor() error: %v", err)
+	}
+
+	for i := 0; i < 10; i++ {
+		m.Observe(ctx, "p", nil)
+	}
+
+	if got := m.Status("p"); got != StatusDegraded {
+		t.Errorf("Status() = %v, want %v — an open breaker must never escalate to Down", got, StatusDegraded)
+	}
+	if m.AllDown() {
+		t.Errorf("AllDown() = true with only an open breaker, want false")
+	}
+}
+
+// TestMonitorClosedBreakerLeavesStatusAlone is the control: the signal only
+// fires when a breaker is actually open.
+func TestMonitorClosedBreakerLeavesStatusAlone(t *testing.T) {
+	ctx := context.Background()
+	log, _ := newTestLogger()
+	providers := []provider.Provider{&provider.Mock{ProviderName: "p"}}
+	breakers := stubBreakerOracle{open: map[string]bool{"other": true}}
+
+	m, err := NewMonitor(providers, NewRecorder(providers), breakers, nil, log, testMonitorConfig())
+	if err != nil {
+		t.Fatalf("NewMonitor() error: %v", err)
+	}
+
+	m.Observe(ctx, "p", nil)
+
+	if got := m.Status("p"); got != StatusHealthy {
+		t.Errorf("Status() = %v, want %v — another provider's open breaker must not degrade this one", got, StatusHealthy)
+	}
+}
+
+// TestMonitorBreakerClosingAllowsRecovery proves the signal is not sticky:
+// once the breaker closes, the provider recovers through the normal
+// hysteresis path rather than staying degraded forever.
+func TestMonitorBreakerClosingAllowsRecovery(t *testing.T) {
+	ctx := context.Background()
+	log, _ := newTestLogger()
+	providers := []provider.Provider{&provider.Mock{ProviderName: "p"}}
+	breakers := stubBreakerOracle{open: map[string]bool{"p": true}}
+	cfg := testMonitorConfig()
+
+	m, err := NewMonitor(providers, NewRecorder(providers), breakers, nil, log, cfg)
+	if err != nil {
+		t.Fatalf("NewMonitor() error: %v", err)
+	}
+
+	m.Observe(ctx, "p", nil)
+	if got := m.Status("p"); got != StatusDegraded {
+		t.Fatalf("Status() = %v, want %v", got, StatusDegraded)
+	}
+
+	breakers.open["p"] = false
+	for i := 0; i < cfg.RecoveryStreak; i++ {
+		m.Observe(ctx, "p", nil)
+	}
+
+	if got := m.Status("p"); got != StatusHealthy {
+		t.Errorf("Status() = %v after the breaker closed and the recovery streak was met, want %v", got, StatusHealthy)
+	}
+}
