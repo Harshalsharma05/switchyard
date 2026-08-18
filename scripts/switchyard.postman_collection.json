@@ -2,8 +2,12 @@
   "info": {
     "_postman_id": "b3f2a6b0-2e7e-4c1a-9c1e-switchyard0001",
     "name": "SwitchYard Gateway",
-    "description": "Manual/automated coverage for everything SwitchYard supports through Phase 4 (Provider Abstraction, Core Proxy, Streaming Passthrough, Auth & Rate Limiting, Budget Enforcement & Admin API): non-streaming and streaming /v1/chat/completions across all three configured providers, the request-validation error paths, streaming error semantics, the liveness/readiness probes on both listeners, and the admin API for team/provider introspection and live limit/budget management.\n\nBefore running:\n1. Start the gateway with real provider keys loaded (`GROQ_API_KEY`, `GEMINI_API_KEY` in `.env`) and Redis reachable — rate limiting and budget enforcement both depend on it.\n2. Ollama requests need a local `ollama serve` with the configured model pulled (`ollama pull llama3.2:3b`) — otherwise skip that folder.\n3. Adjust the `*_model` collection variables if your `configs/providers.yaml` lists different model names, and `team_id` if your `configs/teams.yaml` uses different IDs.\n\nStreaming requests: Postman buffers the full SSE body before showing it (it is not a progressive SSE viewer), so you will see every `data: ...` event at once in the response body. For a literal token-by-token demo, use `curl -N` instead — this collection is for correctness checks, not the visual demo.\n\nAdmin API requests target `{{admin_url}}` (port 9090), never `{{base_url}}` — the admin API is deliberately unreachable from the public listener. Running the \"Patch Team\" folder mutates the running gateway's in-memory team registry (not `configs/teams.yaml` on disk); the last request in that folder restores the original values so the collection is safe to re-run.",
+    "description": "Manual/automated coverage for everything SwitchYard supports through Phase 6 (Provider Abstraction, Core Proxy, Streaming Passthrough, Auth & Rate Limiting, Budget Enforcement & Admin API, Health Checking, Retry & Fallback Routing): non-streaming and streaming /v1/chat/completions across all three configured providers, the request-validation error paths, streaming error semantics, the liveness/readiness probes on both listeners, the admin API for team/provider introspection and live limit/budget management, provider health, and the fallback chain.\n\nAuthentication: the collection sends `Authorization: Bearer {{acme_key}}` on every request via collection-level auth. The admin listener has no auth of its own (Part 1 scopes auth to the public API), so the header is simply ignored there. Requests that must run as a different team override it per-request — see the Phase 6 folder.\n\nBefore running:\n1. Start the gateway with real provider keys loaded (`GROQ_API_KEY`, `GEMINI_API_KEY` in `.env`) and Redis reachable — rate limiting and budget enforcement both depend on it.\n2. Ollama requests need a local `ollama serve` with the configured model pulled (`ollama pull llama3.2:3b`) — otherwise skip that folder.\n3. Adjust the `*_model` collection variables if your `configs/providers.yaml` lists different model names, and `team_id`/`*_key` if your `configs/teams.yaml` uses different IDs or keys.\n4. The Phase 6 folder is the only one that needs the gateway put into a deliberate failure state first; that folder's own description spells out the two setups.\n\nStreaming requests: Postman buffers the full SSE body before showing it (it is not a progressive SSE viewer), so you will see every `data: ...` event at once in the response body. For a literal token-by-token demo, use `curl -N` instead — this collection is for correctness checks, not the visual demo.\n\nAdmin API requests target `{{admin_url}}` (port 9090), never `{{base_url}}` — the admin API is deliberately unreachable from the public listener. Running the \"Patch Team\" folder mutates the running gateway's in-memory team registry (not `configs/teams.yaml` on disk); the last request in that folder restores the original values so the collection is safe to re-run.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{acme_key}}", "type": "string" }]
   },
   "variable": [
     { "key": "base_url", "value": "http://localhost:8080", "type": "string" },
@@ -11,7 +15,10 @@
     { "key": "groq_model", "value": "openai/gpt-oss-20b", "type": "string" },
     { "key": "gemini_model", "value": "gemini-3.5-flash-lite", "type": "string" },
     { "key": "ollama_model", "value": "llama3.2:3b", "type": "string" },
-    { "key": "team_id", "value": "acme", "type": "string" }
+    { "key": "team_id", "value": "acme", "type": "string" },
+    { "key": "acme_key", "value": "sk-switchyard-dev-acme-9f2b1c", "type": "string" },
+    { "key": "globex_key", "value": "sk-switchyard-dev-globex-7a4e0d", "type": "string" },
+    { "key": "globex_team_id", "value": "globex", "type": "string" }
   ],
   "item": [
     {
@@ -936,7 +943,44 @@
             "method": "GET",
             "header": [],
             "url": { "raw": "{{admin_url}}/admin/providers", "host": ["{{admin_url}}"], "path": ["admin", "providers"] },
-            "description": "Static provider configuration only — no credentials, no health status (health arrives in Phase 5). Confirms the API key resolved from the environment at boot never reaches this response."
+            "description": "Static provider configuration only — no credentials, no health status (that is the separate endpoint below). Confirms the API key resolved from the environment at boot never reaches this response."
+          }
+        },
+        {
+          "name": "GET /admin/providers/health",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"response is an array\", () => pm.expect(body).to.be.an(\"array\"));",
+                  "pm.test(\"every provider reports a known status\", () => {",
+                  "  body.forEach(p => pm.expect([\"healthy\", \"degraded\", \"down\"]).to.include(p.status));",
+                  "});",
+                  "pm.test(\"every provider carries error rate, p99 and last check\", () => {",
+                  "  body.forEach(p => {",
+                  "    pm.expect(p.error_rate).to.be.a(\"number\");",
+                  "    pm.expect(p).to.have.property(\"p99_latency_ms\");",
+                  "    pm.expect(p).to.have.property(\"last_check_at\");",
+                  "  });",
+                  "});",
+                  "console.log(body.map(p => `${p.provider}: ${p.status}`).join(\", \"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{admin_url}}/admin/providers/health",
+              "host": ["{{admin_url}}"],
+              "path": ["admin", "providers", "health"]
+            },
+            "description": "Phase 5's live health picture: per provider status, error rate, p99, last check, and the retained transition history. This is the setup check for the Phase 6 fallback folder — run it after stopping Ollama to confirm the gateway has actually noticed before asserting on fallback ordering. Statuses are echoed to the Postman console."
           }
         },
         {
@@ -961,6 +1005,222 @@
             "header": [],
             "url": { "raw": "{{admin_url}}/admin/reload", "host": ["{{admin_url}}"], "path": ["admin", "reload"] },
             "description": "Re-reads configs/providers.yaml and configs/teams.yaml from disk, validates both fully, and only then atomically swaps them in — a valid reload here is what re-picks-up any hand edits made to either file since boot (including undoing a PATCH from the folder above, since a reload always reflects what's on disk, not prior runtime overrides). The rejected-reload path (a bad YAML file must leave the gateway running on its old config) is intentionally not exercised here — it would mean this collection corrupting your local configs/providers.yaml mid-run. That path is covered by cmd/gateway's own `go test -race ./cmd/gateway/...` (TestReloadRejectedLeavesStoreOnOldConfig), which is safe to run because it never touches the real config files."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Retry & Fallback (Phase 6)",
+      "description": "Step 6.2–6.4 verification. Three of these need the gateway put into a specific failure state first; each request's own description says which.\n\nSETUP A — \"Ollama stopped\": run `ollama stop llama3.2:3b` (or kill `ollama serve`). Wait for GET /admin/providers/health to show ollama `down` if you want to prove the chain *skips* it; run immediately if you want to prove the chain *retries then falls back off* it. Both are valid paths and the fallback header is `true` either way.\n\nSETUP B — \"Groq unreachable\": in configs/providers.yaml change the groq entry's `base_url` to `http://127.0.0.1:9/v1`, then POST {{admin_url}}/admin/reload. Nothing restarts; the running gateway picks it up atomically. Undo by restoring the URL and reloading again.\n\nWith SETUP A and SETUP B both applied, the `fast` tier is: ollama (down) → groq (unreachable) → gemini (healthy). acme may use gemini and gets served; globex may not and gets a 503 that names only the two it was allowed to try. That single state is what proves both the fallback path and the allowlist-over-availability rule.",
+      "item": [
+        {
+          "name": "Fallback Headers on a Normal Request (no setup)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));",
+                  "const requested = pm.response.headers.get(\"X-Switchyard-Requested-Model\");",
+                  "const served = pm.response.headers.get(\"X-Switchyard-Served-Model\");",
+                  "pm.test(\"requested model header echoes what was asked for\", () => pm.expect(requested).to.eql(pm.collectionVariables.get(\"groq_model\")));",
+                  "pm.test(\"served model header is present\", () => pm.expect(served).to.be.a(\"string\").and.not.empty);",
+                  "pm.test(\"fallback header says false, not absent\", () => pm.expect(pm.response.headers.get(\"X-Switchyard-Fallback\")).to.eql(\"false\"));",
+                  "pm.test(\"served by the requested provider\", () => pm.expect(pm.response.headers.get(\"X-Switchyard-Provider\")).to.eql(\"groq\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{groq_model}}\",\n  \"messages\": [ { \"role\": \"user\", \"content\": \"Say hi in three words.\" } ],\n  \"max_tokens\": 32\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/chat/completions",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "chat", "completions"]
+            },
+            "description": "The happy path, run with everything healthy. X-Switchyard-Fallback is explicitly \"false\" rather than omitted — a caller scripting against it should never have to read an absent header as a negative. Note the served model can differ from the requested one even here if the provider reports a dated model ID (e.g. ...-0125); that is not a fallback, which is why the boolean exists separately from comparing the two strings."
+          }
+        },
+        {
+          "name": "Fast Tier Fallback (SETUP A)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200 — the chain found another option\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"fallback header is true\", () => pm.expect(pm.response.headers.get(\"X-Switchyard-Fallback\")).to.eql(\"true\"));",
+                  "pm.test(\"requested model is the ollama one\", () => pm.expect(pm.response.headers.get(\"X-Switchyard-Requested-Model\")).to.eql(pm.collectionVariables.get(\"ollama_model\")));",
+                  "pm.test(\"served model is not the requested one\", () => pm.expect(pm.response.headers.get(\"X-Switchyard-Served-Model\")).to.not.eql(pm.collectionVariables.get(\"ollama_model\")));",
+                  "pm.test(\"not served by the stopped provider\", () => pm.expect(pm.response.headers.get(\"X-Switchyard-Provider\")).to.not.eql(\"ollama\"));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"the response body is a real completion\", () => pm.expect(body.choices[0].message.content).to.be.a(\"string\").and.not.empty);",
+                  "console.log(`served by ${pm.response.headers.get(\"X-Switchyard-Provider\")} / ${pm.response.headers.get(\"X-Switchyard-Served-Model\")}`);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{ollama_model}}\",\n  \"messages\": [ { \"role\": \"user\", \"content\": \"Say hi in three words.\" } ],\n  \"max_tokens\": 32\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/chat/completions",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "chat", "completions"]
+            },
+            "description": "Needs SETUP A (Ollama stopped). The requested model's provider is gone, so the chain walks the rest of the `fast` tier and something else answers. Check the gateway log for the `falling back to next candidate` line — it names from/to, the attempts spent, the reason kind, and Step 6.4's estimated_cost_delta_micros."
+          }
+        },
+        {
+          "name": "Allowlist Beats Availability (SETUP A + B, globex)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 503 — the chain ran out of permitted options\", () => pm.response.to.have.status(503));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"error type is chain_exhausted\", () => pm.expect(body.error.type).to.eql(\"chain_exhausted\"));",
+                  "const attempts = body.error.switchyard_attempts;",
+                  "pm.test(\"breakdown lists what was attempted\", () => pm.expect(attempts).to.be.an(\"array\").with.length.of.at.least(1));",
+                  "pm.test(\"gemini is never attempted — globex may not use it, healthy or not\", () => {",
+                  "  attempts.forEach(a => pm.expect(a.provider).to.not.eql(\"gemini\"));",
+                  "});",
+                  "pm.test(\"every attempt says provider, model, attempt count and reason\", () => {",
+                  "  attempts.forEach(a => {",
+                  "    pm.expect(a.provider).to.be.a(\"string\").and.not.empty;",
+                  "    pm.expect(a.model).to.be.a(\"string\").and.not.empty;",
+                  "    pm.expect(a.attempts).to.be.a(\"number\");",
+                  "    pm.expect(a.type).to.be.a(\"string\").and.not.empty;",
+                  "  });",
+                  "});",
+                  "console.log(attempts.map(a => `${a.provider}/${a.model} x${a.attempts}: ${a.type}`).join(\" | \"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{globex_key}}", "type": "string" }]
+            },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{ollama_model}}\",\n  \"messages\": [ { \"role\": \"user\", \"content\": \"Say hi in three words.\" } ],\n  \"max_tokens\": 32\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/chat/completions",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "chat", "completions"]
+            },
+            "description": "Needs SETUP A + SETUP B, and authenticates as globex (whose configs/teams.yaml entry allows groq and ollama, never gemini). Both providers globex may use are broken; gemini is healthy and would have answered. It gets an error instead, and the breakdown proves gemini was never in the chain at all. Run the request below as acme against the identical gateway state to see gemini serve it — same failure, different team, different answer. That contrast is the whole compliance point."
+          }
+        },
+        {
+          "name": "Same State, Allowed Team Gets Served (SETUP A + B, acme)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"fallback header is true\", () => pm.expect(pm.response.headers.get(\"X-Switchyard-Fallback\")).to.eql(\"true\"));",
+                  "pm.test(\"served by gemini — the option globex was denied\", () => pm.expect(pm.response.headers.get(\"X-Switchyard-Provider\")).to.eql(\"gemini\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{ollama_model}}\",\n  \"messages\": [ { \"role\": \"user\", \"content\": \"Say hi in three words.\" } ],\n  \"max_tokens\": 32\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/chat/completions",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "chat", "completions"]
+            },
+            "description": "Needs SETUP A + SETUP B, authenticated as acme. Identical request and identical gateway state as the globex one above — the only difference is the team's allowed_providers, and that alone decides whether this is a 200 or a 503."
+          }
+        },
+        {
+          "name": "Caller-Fault Error Is Not Failed Over (no setup)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 4xx, never 503\", () => pm.expect(pm.response.code).to.be.within(400, 499));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"error is the provider's own classification, not chain_exhausted\", () => pm.expect(body.error.type).to.not.eql(\"chain_exhausted\"));",
+                  "pm.test(\"no per-candidate breakdown — the chain was never walked\", () => pm.expect(body.error.switchyard_attempts).to.be.undefined);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{groq_model}}\",\n  \"messages\": [ { \"role\": \"user\", \"content\": \"hi\" } ],\n  \"max_tokens\": 99999999\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/chat/completions",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "chat", "completions"]
+            },
+            "description": "A max_tokens far beyond the model's ceiling is a request the provider will never accept. It is classified invalid_request, which is neither retryable nor fallback-eligible, so the caller gets the 4xx immediately instead of the same answer three providers and several round trips later. Confirm in the log that exactly one attempt was made and no `falling back` line was emitted.\n\nCaveat: some providers clamp an oversized max_tokens instead of rejecting it. If this returns 200, that provider clamped — check the log for a single attempt rather than treating it as a gateway bug."
+          }
+        },
+        {
+          "name": "Spend After a Fallback (SETUP A)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"spend is recorded, not skipped because the model changed\", () => pm.expect(body.spent_usd).to.be.a(\"number\").and.to.be.above(0));",
+                  "console.log(`spent_usd after fallback: ${body.spent_usd}`);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{admin_url}}/admin/teams/{{team_id}}",
+              "host": ["{{admin_url}}"],
+              "path": ["admin", "teams", "{{team_id}}"]
+            },
+            "description": "Step 6.4's billing check, run right after \"Fast Tier Fallback\". The requested model was Ollama's (free, $0.00 in configs/providers.yaml) and a paid provider actually served it — so a nonzero spend here proves the request was billed at the *served* model's price, not the requested one's. For a clean reading, POST /admin/teams/{{team_id}}/reset-budget first, then run the fallback request, then this."
           }
         }
       ]

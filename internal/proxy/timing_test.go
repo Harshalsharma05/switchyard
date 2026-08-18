@@ -69,8 +69,8 @@ func TestSwitchyardHeadersOnSuccess(t *testing.T) {
 	resp := post(t, srv, `{"model":"openai/gpt-oss-120b","messages":[{"role":"user","content":"hi"}]}`)
 
 	tests := map[string]string{
-		HeaderProvider: "groq",
-		HeaderModel:    "openai/gpt-oss-120b-0125",
+		HeaderProvider:    "groq",
+		HeaderServedModel: "openai/gpt-oss-120b-0125",
 	}
 	for header, want := range tests {
 		if got := resp.Header.Get(header); got != want {

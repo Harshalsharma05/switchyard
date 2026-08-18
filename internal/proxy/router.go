@@ -5,6 +5,8 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/Harshalsharma05/switchyard/internal/resilience"
 )
 
 // NewRouter builds the public listener's handler.
@@ -44,8 +46,8 @@ import (
 // inside ChatCompletions too (see reserveBudget in handler.go), right after
 // the TPM reservation succeeds. Phase 8's tracing inserts alongside Auth and
 // RateLimit, inside Logger, for the same reasons those two do.
-func NewRouter(resolver Resolver, authr Authenticator, limiter RateLimiter, budgetTracker BudgetTracker, calc CostCalculator, healthRecorder HealthRecorder, log *slog.Logger, ready func() bool) http.Handler {
-	h := NewHandler(resolver, limiter, budgetTracker, calc, healthRecorder, log)
+func NewRouter(resolver Resolver, authr Authenticator, limiter RateLimiter, budgetTracker BudgetTracker, calc CostCalculator, healthRecorder HealthRecorder, healthOracle HealthOracle, retryConfig resilience.Config, log *slog.Logger, ready func() bool) http.Handler {
+	h := NewHandler(resolver, limiter, budgetTracker, calc, healthRecorder, healthOracle, retryConfig, log)
 
 	r := chi.NewRouter()
 

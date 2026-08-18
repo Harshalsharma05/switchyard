@@ -16,6 +16,7 @@ import (
 	"github.com/Harshalsharma05/switchyard/internal/budget"
 	"github.com/Harshalsharma05/switchyard/internal/provider"
 	"github.com/Harshalsharma05/switchyard/internal/ratelimit"
+	"github.com/Harshalsharma05/switchyard/internal/resilience"
 )
 
 // discardLogger keeps test output readable while still exercising every logging
@@ -24,18 +25,55 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewJSONHandler(io.Discard, nil))
 }
 
+// noRetryConfig is MaxAttempts: 1 — no retries at all. It's the default for
+// every test in this package that isn't specifically about Step 6.1's retry
+// behavior (that lives in retry_test.go), so a Mock provider's call count
+// keeps meaning exactly what it always has: one call per request.
+//
+// The chain-wide budget is deliberately larger than the per-provider cap:
+// Step 6.3's ceiling must not be what stops a fallback test from reaching
+// its second candidate, or a chain assertion would be measuring the budget
+// instead of the chain.
+func noRetryConfig(t *testing.T) resilience.Config {
+	t.Helper()
+	cfg, err := resilience.NewConfig(1, time.Millisecond, 5)
+	if err != nil {
+		t.Fatalf("resilience.NewConfig() error: %v", err)
+	}
+	return cfg
+}
+
 // stubResolver is the fake behind the consumer-defined Resolver interface. It is
 // what lets these tests run without a real registry.
 type stubResolver struct {
 	prov provider.Provider
 	err  error
+
+	// byModel and tier are Step 6.2's additions, used only by the fallback
+	// tests: byModel gives each candidate its own mock so a chain walk is
+	// observable, and tier is what TierFor hands to resilience.BuildChain.
+	// Left nil, this resolver behaves exactly as it did before Phase 6 —
+	// one provider for every model, no tier, no fallback.
+	byModel map[string]provider.Provider
+	tier    []resilience.Candidate
 }
 
-func (s stubResolver) ForModel(string) (provider.Provider, error) {
+func (s stubResolver) ForModel(model string) (provider.Provider, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
+	if s.byModel != nil {
+		p, ok := s.byModel[model]
+		if !ok {
+			return nil, fmt.Errorf("resolving model %q: %w", model, provider.ErrModelNotSupported)
+		}
+		return p, nil
+	}
 	return s.prov, nil
+}
+
+func (s stubResolver) TierFor(string) []resilience.Candidate {
+	return s.tier
 }
 
 // DefaultMaxTokensFor is fixed rather than configurable per test: every test
@@ -157,7 +195,7 @@ const testAPIKey = "sk-test-key"
 func defaultTestTeam() *auth.Team {
 	return &auth.Team{
 		ID:               "test-team",
-		AllowedProviders: []string{"groq"},
+		AllowedProviders: []string{"groq", "mock"},
 		AllowedModels:    []string{"openai/gpt-oss-120b", "gpt-4o", "nope", "m"},
 	}
 }
@@ -175,7 +213,7 @@ func newTestServerWithAuth(t *testing.T, resolver Resolver, authr Authenticator)
 func newTestServerFull(t *testing.T, resolver Resolver, authr Authenticator, limiter RateLimiter) *httptest.Server {
 	t.Helper()
 
-	srv := httptest.NewServer(NewRouter(resolver, authr, limiter, stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, discardLogger(), func() bool { return true }))
+	srv := httptest.NewServer(NewRouter(resolver, authr, limiter, stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, nil, noRetryConfig(t), discardLogger(), func() bool { return true }))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -326,7 +364,7 @@ func TestAuthUnknownKeyIs401(t *testing.T) {
 // bad credential gets rejected: authorizeModel's real branch, not its
 // nil-team wiring-bug branch, is what has to run for this to succeed.
 func TestAuthTeamReachesHandler(t *testing.T) {
-	restrictedTeam := &auth.Team{ID: "restricted", AllowedModels: []string{"only-this-model"}}
+	restrictedTeam := &auth.Team{ID: "restricted", AllowedProviders: []string{"groq", "mock"}, AllowedModels: []string{"only-this-model"}}
 	srv := newTestServerWithAuth(t, stubResolver{prov: &provider.Mock{}}, stubAuthenticator{team: restrictedTeam})
 
 	resp := post(t, srv, `{"model":"only-this-model","messages":[{"role":"user","content":"hi"}]}`)
@@ -339,7 +377,7 @@ func TestAuthTeamReachesHandler(t *testing.T) {
 // errors if called is what proves that, rather than merely asserting the
 // final status code.
 func TestChatCompletionsModelNotAllowedIs403(t *testing.T) {
-	restrictedTeam := &auth.Team{ID: "restricted", AllowedModels: []string{"only-this-model"}}
+	restrictedTeam := &auth.Team{ID: "restricted", AllowedProviders: []string{"groq", "mock"}, AllowedModels: []string{"only-this-model"}}
 	mustNotResolve := stubResolver{err: fmt.Errorf("resolve must not run once the allowlist check has rejected the request")}
 	srv := newTestServerWithAuth(t, mustNotResolve, stubAuthenticator{team: restrictedTeam})
 
@@ -795,7 +833,7 @@ func TestRoutingEdges(t *testing.T) {
 
 func TestProbes(t *testing.T) {
 	t.Run("healthz is always ok", func(t *testing.T) {
-		srv := httptest.NewServer(NewRouter(stubResolver{}, stubAuthenticator{}, stubRateLimiter{}, stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, discardLogger(), func() bool { return false }))
+		srv := httptest.NewServer(NewRouter(stubResolver{}, stubAuthenticator{}, stubRateLimiter{}, stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, nil, noRetryConfig(t), discardLogger(), func() bool { return false }))
 		defer srv.Close()
 
 		resp, err := http.Get(srv.URL + "/healthz")
@@ -815,7 +853,7 @@ func TestProbes(t *testing.T) {
 		tests := map[bool]int{true: http.StatusOK, false: http.StatusServiceUnavailable}
 
 		for ready, want := range tests {
-			srv := httptest.NewServer(NewRouter(stubResolver{}, stubAuthenticator{}, stubRateLimiter{}, stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, discardLogger(), func() bool { return ready }))
+			srv := httptest.NewServer(NewRouter(stubResolver{}, stubAuthenticator{}, stubRateLimiter{}, stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, nil, noRetryConfig(t), discardLogger(), func() bool { return ready }))
 
 			resp, err := http.Get(srv.URL + "/readyz")
 			if err != nil {

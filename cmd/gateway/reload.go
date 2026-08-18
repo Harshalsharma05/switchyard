@@ -18,6 +18,7 @@ import (
 	"github.com/Harshalsharma05/switchyard/internal/config"
 	"github.com/Harshalsharma05/switchyard/internal/provider"
 	"github.com/Harshalsharma05/switchyard/internal/proxy"
+	"github.com/Harshalsharma05/switchyard/internal/resilience"
 )
 
 // liveConfig bundles everything one reload replaces together. Grouping
@@ -30,6 +31,13 @@ type liveConfig struct {
 	registry     *provider.Registry
 	authRegistry *auth.Registry
 	calc         *budget.Calculator
+
+	// tiers is Step 6.2's fallback chains, pre-indexed by model: given the
+	// model a caller asked for, the other candidates in its tier. Built once
+	// per reload rather than searched on every request, since the request
+	// path only ever asks this one question and a linear scan of every tier
+	// would put configs/providers.yaml's size on the hot path.
+	tiers map[string][]resilience.Candidate
 }
 
 // configStore is the atomic swap point behind every hot-reloadable
@@ -75,6 +83,14 @@ func (s *configStore) ForModel(model string) (provider.Provider, error) {
 
 func (s *configStore) DefaultMaxTokensFor(model string) (int, bool) {
 	return s.current.Load().registry.DefaultMaxTokensFor(model)
+}
+
+// TierFor returns model's fallback tier. The returned slice is shared with
+// every other caller and must never be mutated — resilience.BuildChain only
+// reads it, and copying per request would allocate on the hot path for no
+// benefit.
+func (s *configStore) TierFor(model string) []resilience.Candidate {
+	return s.current.Load().tiers[model]
 }
 
 func (s *configStore) Authenticate(rawKey string) (*auth.Team, error) {
@@ -133,7 +149,36 @@ func loadLiveConfig(providersPath, teamsPath string) (*liveConfig, int, int, err
 		registry:     registry,
 		authRegistry: authRegistry,
 		calc:         budget.NewCalculator(pricing),
+		tiers:        indexTiers(providers.Tiers),
 	}, len(providers.Configs), len(teams), nil
+}
+
+// indexTiers flips config's tier-name-keyed map into the model-keyed one the
+// request path wants: every model in a tier maps to that whole tier, in
+// declared order. The requested model is left in its own list because
+// resilience.BuildChain dedupes it against the chain head anyway, and
+// removing it here would mean building one slice per model instead of
+// sharing one per tier.
+//
+// The conversion happens in cmd/gateway rather than internal/config for the
+// same reason the pricing conversion above does: config's job is to validate
+// the file, and mapping its output onto another package's types is wiring.
+func indexTiers(tiers map[string][]config.TierEntry) map[string][]resilience.Candidate {
+	if len(tiers) == 0 {
+		return nil
+	}
+
+	out := make(map[string][]resilience.Candidate)
+	for _, entries := range tiers {
+		candidates := make([]resilience.Candidate, 0, len(entries))
+		for _, e := range entries {
+			candidates = append(candidates, resilience.Candidate{Provider: e.Provider, Model: e.Model})
+		}
+		for _, c := range candidates {
+			out[c.Model] = candidates
+		}
+	}
+	return out
 }
 
 // newReloader returns the closure admin.NewRouter calls for POST

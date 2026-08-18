@@ -19,6 +19,7 @@ providers:
     type: openai-compatible
     enabled: true
     base_url: https://api.groq.com/openai/v1
+    # base_url: http://127.0.0.1:9/v1
     api_key_env: GROQ_API_KEY
     timeout: 30s
     default_max_tokens: 1024
@@ -96,3 +97,37 @@ providers:
       - name: llama3.2:3b
         input_per_1m_usd: 0.0
         output_per_1m_usd: 0.0
+
+# --- Fallback tiers (Phase 6) 
+# A tier is an ordered chain of interchangeable-enough options. A request for
+# any model below resolves to that model first, then walks the rest of its own
+# tier: down providers are skipped, degraded ones sink below healthy ones, and
+# anything the calling team's allowlist forbids is dropped outright — even when
+# it is the only option left.
+#
+# `provider` is redundant with `model` (a model maps to exactly one provider)
+# and required anyway: it documents intent and turns a moved or misspelled model
+# into a startup error instead of a chain that quietly resolves elsewhere.
+#
+# Entries naming a disabled provider are dropped at load, not rejected, so the
+# intended chain stays documented while a paid slot is switched off. Every
+# openai/anthropic line below is inert today for exactly that reason.
+#
+# A model may belong to at most one tier — "its tier" has to be unambiguous.
+# A model in no tier simply has no fallback.
+
+tiers:
+  frontier:
+    - { provider: groq, model: openai/gpt-oss-120b }
+    - { provider: gemini, model: gemini-3.5-flash }
+    - { provider: openai, model: gpt-4o }
+    - { provider: anthropic, model: claude-sonnet-4-5 }
+
+  fast:
+    - { provider: groq, model: openai/gpt-oss-20b }
+    - { provider: gemini, model: gemini-3.5-flash-lite }
+    - { provider: openai, model: gpt-4o-mini }
+    - { provider: anthropic, model: claude-haiku-4-5 }
+    # Local, free, and last: a chain that reaches here still answers when every
+    # paid provider is down.
+    - { provider: ollama, model: llama3.2:3b }

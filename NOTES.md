@@ -34,3 +34,17 @@ The tricky implementation detail: you're running this in Redis, and multiple cop
 
 You've got two separate buckets per team — one for requests-per-minute, one for tokens-per-minute (an AI response with 4000 tokens should count differently than one with 40).
 
+Step 7.1 — The three-state light switch
+
+Think of a circuit breaker like an actual electrical circuit breaker in your house — it exists to stop a small problem (one faulty appliance) from becoming a big one (the whole house catching fire). Three states:
+
+Closed = normal, electricity flows, requests go through as usual. ("Closed" is confusing at first — it means the circuit is complete, so current is flowing. Don't read it as "closed for business.")
+Open = tripped, the breaker is open, no current flows — every request gets rejected instantly, without even attempting to call the provider. You already know it's broken; why wait through another timeout to confirm what you already know?
+HalfOpen = "let's cautiously test if it's safe again" — allow a small trickle of traffic through to check.
+
+The transitions:
+
+Closed → Open: too many failures happened recently (you're counting failures in a rolling recent window, not all-time — a provider that failed a lot yesterday but is fine now shouldn't still be penalized)
+Open → HalfOpen: after waiting some cooldown period, automatically try being a bit more optimistic
+HalfOpen → Closed: if a handful of test requests in a row succeed, trust it's actually recovered
+HalfOpen → Open: if even one test request fails, nope — go straight back to fully blocking, and (smart addition) make the next cooldown even longer than before, so a provider that keeps failing gets tested less and less frequently instead of you hammering it every 30 seconds forever

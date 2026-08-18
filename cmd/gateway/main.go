@@ -25,6 +25,7 @@ import (
 	"github.com/Harshalsharma05/switchyard/internal/health"
 	"github.com/Harshalsharma05/switchyard/internal/proxy"
 	"github.com/Harshalsharma05/switchyard/internal/ratelimit"
+	"github.com/Harshalsharma05/switchyard/internal/resilience"
 )
 
 // Server settings come from the environment rather than configs/, because they
@@ -52,6 +53,20 @@ const (
 	defaultDownErrorRate           = 0.50
 	defaultDownConsecutiveFailures = 3
 	defaultRecoveryStreak          = 3
+
+	// Step 6.1 retry policy. MaxAttempts: 3 is the plan's own example
+	// ("cap at 3 attempts"); BaseDelay has no example in the plan — 50ms is
+	// enough to absorb a brief provider hiccup without noticeably slowing a
+	// request that only needs one retry.
+	defaultRetryMaxAttempts = 3
+	defaultRetryBaseDelay   = 50 * time.Millisecond
+
+	// Step 6.3's chain-wide ceiling on provider calls per client request.
+	// Five leaves the primary its full three attempts and two more for the
+	// tier behind it — enough for a real failover, far short of the fifteen
+	// calls an unbounded 3-attempt policy would make against a five-entry
+	// tier.
+	defaultRetryMaxTotalAttempts = 5
 
 	// readHeaderTimeout bounds how long a client may take to send its headers,
 	// which is the Slowloris defence. Note that WriteTimeout is deliberately
@@ -160,6 +175,19 @@ func run() error {
 		return fmt.Errorf("building health checker: %w", err)
 	}
 
+	// Step 6.1's retry policy: same-provider retry with full-jitter backoff,
+	// applied inside internal/proxy before Step 6.2's fallback chains ever
+	// consider a different provider, and bounded across the whole chain by
+	// Step 6.3's total-attempt ceiling.
+	retryConfig, err := resilience.NewConfig(
+		intOr("SWITCHYARD_RETRY_MAX_ATTEMPTS", defaultRetryMaxAttempts),
+		durationOr("SWITCHYARD_RETRY_BASE_DELAY", defaultRetryBaseDelay),
+		intOr("SWITCHYARD_RETRY_MAX_TOTAL_ATTEMPTS", defaultRetryMaxTotalAttempts),
+	)
+	if err != nil {
+		return fmt.Errorf("building retry policy: %w", err)
+	}
+
 	// ready gates /readyz. It flips true once wiring is complete and false again
 	// the moment shutdown begins, so a load balancer stops sending new traffic
 	// while in-flight requests drain.
@@ -173,8 +201,12 @@ func run() error {
 	}
 
 	publicSrv := &http.Server{
-		Addr:              envOr("SWITCHYARD_ADDR", defaultPublicAddr),
-		Handler:           proxy.NewRouter(store, store, limiter, budgetTracker, store, healthRecorder, log, isReady),
+		Addr: envOr("SWITCHYARD_ADDR", defaultPublicAddr),
+		// healthMonitor appears twice over: healthRecorder is the write side
+		// (Step 5.2's passive samples), healthMonitor the read side Step 6.2's
+		// chain ordering consults to skip a down provider and sink a degraded
+		// one.
+		Handler:           proxy.NewRouter(store, store, limiter, budgetTracker, store, healthRecorder, healthMonitor, retryConfig, log, isReady),
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
 

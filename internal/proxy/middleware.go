@@ -22,9 +22,16 @@ const (
 	HeaderRequestID = "X-Switchyard-Request-Id"
 	// HeaderProvider names the provider instance that served the request.
 	HeaderProvider = "X-Switchyard-Provider"
-	// HeaderModel names the model actually served, which can differ from the
-	// one requested.
-	HeaderModel = "X-Switchyard-Model"
+	// HeaderRequestedModel names the model the caller asked for.
+	HeaderRequestedModel = "X-Switchyard-Requested-Model"
+	// HeaderServedModel names the model actually served, which differs from
+	// the requested one whenever Step 6.2's fallback chain moved the request.
+	HeaderServedModel = "X-Switchyard-Served-Model"
+	// HeaderFallback reports whether the request was served by something
+	// other than what the caller asked for. It is present on every response
+	// that reached a provider, "false" included: a caller scripting against
+	// it should not have to treat an absent header as a negative.
+	HeaderFallback = "X-Switchyard-Fallback"
 	// HeaderOverhead is the gateway's own latency in milliseconds: everything
 	// the request spent inside SwitchYard, excluding the provider call.
 	HeaderOverhead = "X-Switchyard-Overhead-Ms"
@@ -63,6 +70,16 @@ type requestMetrics struct {
 	// an unknown model or a request rejected during validation.
 	providerName string
 	servedModel  string
+
+	// requestedModel is what the caller asked for. It is set as soon as the
+	// body decodes, so it survives a request that never reached a provider,
+	// unlike servedModel above.
+	requestedModel string
+
+	// fellBack is true when servedModel came from somewhere other than the
+	// head of Step 6.2's chain — that is, when the request was served by a
+	// provider or model the caller did not ask for.
+	fellBack bool
 
 	// providerTime is what the request spent waiting on the upstream. Gateway
 	// overhead is everything else.
@@ -106,8 +123,15 @@ func (m *requestMetrics) applyHeaders(h http.Header) {
 	if m.providerName != "" {
 		h.Set(HeaderProvider, m.providerName)
 	}
+	if m.requestedModel != "" {
+		h.Set(HeaderRequestedModel, m.requestedModel)
+	}
 	if m.servedModel != "" {
-		h.Set(HeaderModel, m.servedModel)
+		h.Set(HeaderServedModel, m.servedModel)
+		// Only alongside a served model: a request that never reached a
+		// provider has no fallback outcome to report, and "false" there would
+		// claim more than the gateway knows.
+		h.Set(HeaderFallback, strconv.FormatBool(m.fellBack))
 	}
 	h.Set(HeaderOverhead, formatMillis(m.overhead()))
 }

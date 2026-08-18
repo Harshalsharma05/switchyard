@@ -82,7 +82,7 @@ func TestShouldShedForPriority(t *testing.T) {
 }
 
 func TestRateLimitShedsBatchPriorityNearLimit(t *testing.T) {
-	team := &auth.Team{ID: "batch-team", Priority: auth.PriorityBatch, AllowedModels: []string{"m"}, RateLimits: auth.RateLimits{RPM: 100}}
+	team := &auth.Team{ID: "batch-team", Priority: auth.PriorityBatch, AllowedProviders: []string{"groq", "mock"}, AllowedModels: []string{"m"}, RateLimits: auth.RateLimits{RPM: 100}}
 	// Bucket admitted the request (Allowed: true) but is already at 5%
 	// remaining — well past the 20% shed floor.
 	allowedButLow := &ratelimit.Result{Allowed: true, Remaining: 5}
@@ -103,7 +103,7 @@ func TestRateLimitShedsBatchPriorityNearLimit(t *testing.T) {
 }
 
 func TestRateLimitDoesNotShedRealtimeNearLimit(t *testing.T) {
-	team := &auth.Team{ID: "realtime-team", Priority: auth.PriorityRealtime, AllowedModels: []string{"m"}, RateLimits: auth.RateLimits{RPM: 100}}
+	team := &auth.Team{ID: "realtime-team", Priority: auth.PriorityRealtime, AllowedProviders: []string{"groq", "mock"}, AllowedModels: []string{"m"}, RateLimits: auth.RateLimits{RPM: 100}}
 	// Same 5% remaining that gets a batch team shed above — realtime must
 	// still go through, since the bucket itself allowed it.
 	allowedButLow := &ratelimit.Result{Allowed: true, Remaining: 5}
@@ -119,7 +119,7 @@ func TestRateLimitDoesNotShedRealtimeNearLimit(t *testing.T) {
 }
 
 func TestRateLimitDoesNotShedBatchAboveFloor(t *testing.T) {
-	team := &auth.Team{ID: "batch-team", Priority: auth.PriorityBatch, AllowedModels: []string{"m"}, RateLimits: auth.RateLimits{RPM: 100}}
+	team := &auth.Team{ID: "batch-team", Priority: auth.PriorityBatch, AllowedProviders: []string{"groq", "mock"}, AllowedModels: []string{"m"}, RateLimits: auth.RateLimits{RPM: 100}}
 	// 50% remaining is comfortably above the 20% floor.
 	allowedAndHealthy := &ratelimit.Result{Allowed: true, Remaining: 50}
 
@@ -134,7 +134,7 @@ func TestRateLimitDoesNotShedBatchAboveFloor(t *testing.T) {
 }
 
 func TestTPMShedsBatchPriorityNearLimitAndNeverCallsProvider(t *testing.T) {
-	team := &auth.Team{ID: "batch-team", Priority: auth.PriorityBatch, AllowedModels: []string{"m"}, RateLimits: auth.RateLimits{TPM: 1000}}
+	team := &auth.Team{ID: "batch-team", Priority: auth.PriorityBatch, AllowedProviders: []string{"groq", "mock"}, AllowedModels: []string{"m"}, RateLimits: auth.RateLimits{TPM: 1000}}
 	allowedButLow := &ratelimit.Result{Allowed: true, Remaining: 50} // 5% of 1000
 
 	mock := &provider.Mock{ProviderName: "groq"}
@@ -465,11 +465,11 @@ func TestLargeMaxTokensExceedsTPMAndIsDenied(t *testing.T) {
 	limiter, rdb := newLiveLimiter(t)
 
 	smallTeam := &auth.Team{
-		ID: "proxy-large-max-tokens-small", AllowedProviders: []string{"groq"}, AllowedModels: []string{"m"},
+		ID: "proxy-large-max-tokens-small", AllowedProviders: []string{"groq", "mock"}, AllowedModels: []string{"m"},
 		RateLimits: auth.RateLimits{RPM: 1000, TPM: 50},
 	}
 	largeTeam := &auth.Team{
-		ID: "proxy-large-max-tokens-large", AllowedProviders: []string{"groq"}, AllowedModels: []string{"m"},
+		ID: "proxy-large-max-tokens-large", AllowedProviders: []string{"groq", "mock"}, AllowedModels: []string{"m"},
 		RateLimits: auth.RateLimits{RPM: 1000, TPM: 50},
 	}
 	cleanupTeamBuckets(t, rdb, smallTeam.ID)
@@ -512,7 +512,7 @@ func TestConcurrentRequestsThroughHTTPRespectSharedRPMBucket(t *testing.T) {
 	const attempts = 200
 
 	team := &auth.Team{
-		ID: "proxy-concurrent-rpm-test", AllowedProviders: []string{"groq"}, AllowedModels: []string{"m"},
+		ID: "proxy-concurrent-rpm-test", AllowedProviders: []string{"groq", "mock"}, AllowedModels: []string{"m"},
 		RateLimits: auth.RateLimits{RPM: capacity, TPM: 1_000_000},
 	}
 	cleanupTeamBuckets(t, rdb, team.ID)

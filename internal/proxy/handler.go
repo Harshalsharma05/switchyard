@@ -15,6 +15,7 @@ import (
 	"github.com/Harshalsharma05/switchyard/internal/budget"
 	"github.com/Harshalsharma05/switchyard/internal/provider"
 	"github.com/Harshalsharma05/switchyard/internal/ratelimit"
+	"github.com/Harshalsharma05/switchyard/internal/resilience"
 )
 
 // maxRequestBytes bounds an inbound body. A gateway accepting unbounded JSON is
@@ -24,10 +25,10 @@ const maxRequestBytes = 1 << 20 // 1 MiB
 // Resolver is the slice of the provider registry this handler needs.
 //
 // It is declared here, by the consumer, rather than taken as a *provider.Registry:
-// the handler needs these two methods, and depending on the interface rather
-// than the concrete type is what lets tests inject a fake and what will let
-// Phase 6 slot a fallback-aware resolver in front of the registry without
-// touching this file.
+// the handler needs these methods, and depending on the interface rather than
+// the concrete type is what lets tests inject a fake and what lets Step 6.2's
+// tiers reach the handler from configs/providers.yaml without this package
+// importing internal/config.
 type Resolver interface {
 	ForModel(model string) (provider.Provider, error)
 
@@ -36,6 +37,14 @@ type Resolver interface {
 	// Step 3.3's TPM reservation needs it to estimate a request's cost before
 	// the provider is ever called.
 	DefaultMaxTokensFor(model string) (int, bool)
+
+	// TierFor returns the other candidates in model's fallback tier, in
+	// configs/providers.yaml order, or nil for a model that belongs to no
+	// tier. It sits on Resolver rather than on an interface of its own
+	// because both halves answer the same question — where can this model be
+	// served — and one hot-reloadable source (cmd/gateway's configStore)
+	// already answers both.
+	TierFor(model string) []resilience.Candidate
 }
 
 // CostCalculator is the slice of budget.Calculator this package needs.
@@ -69,13 +78,29 @@ type Handler struct {
 	budgetTracker  BudgetTracker
 	calc           CostCalculator
 	healthRecorder HealthRecorder
+	health         HealthOracle
+	retryConfig    resilience.Config
 	log            *slog.Logger
 }
 
 // NewHandler wires the handler with its dependencies. Nothing here reads
 // package-level state.
-func NewHandler(resolver Resolver, limiter RateLimiter, budgetTracker BudgetTracker, calc CostCalculator, healthRecorder HealthRecorder, log *slog.Logger) *Handler {
-	return &Handler{resolver: resolver, limiter: limiter, budgetTracker: budgetTracker, calc: calc, healthRecorder: healthRecorder, log: log}
+//
+// health may be nil, and chainFor treats that as "every provider is healthy"
+// — the same optimistic default CLAUDE.md mandates for a stale health
+// checker, and what keeps every pre-Phase-6 test from having to grow a
+// monitor it does not care about.
+func NewHandler(resolver Resolver, limiter RateLimiter, budgetTracker BudgetTracker, calc CostCalculator, healthRecorder HealthRecorder, health HealthOracle, retryConfig resilience.Config, log *slog.Logger) *Handler {
+	return &Handler{
+		resolver:       resolver,
+		limiter:        limiter,
+		budgetTracker:  budgetTracker,
+		calc:           calc,
+		healthRecorder: healthRecorder,
+		health:         health,
+		retryConfig:    retryConfig,
+		log:            log,
+	}
 }
 
 // recordCost prices a finished request and stores it on metrics for Logger to
@@ -108,12 +133,34 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Recorded before anything can reject the request, so
+	// X-Switchyard-Requested-Model is present on a 403 or a 429 too — the
+	// responses where a caller most needs to know which model the gateway
+	// thought it was being asked for.
+	if m := metricsFrom(r.Context()); m != nil {
+		m.requestedModel = req.Model
+	}
+
 	if !h.authorizeModel(w, r, req.Model) {
 		return
 	}
 
 	prov, ok := h.resolve(w, r, req.Model)
 	if !ok {
+		return
+	}
+
+	requested := resilience.Candidate{Provider: prov.Name(), Model: req.Model}
+	chain := h.chainFor(r.Context(), requested)
+	if len(chain) == 0 {
+		// BuildChain returns nothing only when the team's allowlist forbids
+		// every option, the requested model's own provider included — which
+		// authorizeModel cannot catch, since it checks allowed_models and this
+		// is allowed_providers. Availability never produces an empty chain, so
+		// this is always an authorization answer, never a capacity one.
+		writeError(w, h.log, http.StatusForbidden, "provider_not_allowed",
+			fmt.Sprintf("team %q is not permitted to use any provider that serves model %q",
+				teamID(r.Context()), req.Model))
 		return
 	}
 
@@ -143,7 +190,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	budgetReservation, ok := h.reserveBudget(w, r, req)
+	budgetReservation, estimatedMicros, ok := h.reserveBudget(w, r, req)
 	if !ok {
 		// The TPM defer above still fires with actual left at zero — a full
 		// refund, correct here since no provider was ever called. Nothing
@@ -151,6 +198,12 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		// returns a non-nil handle when it succeeded.
 		return
 	}
+
+	// Step 6.4: the reservation above is sized for the requested model's
+	// price, and a fallback can serve a costlier one. chainBudget re-checks
+	// the cap for each candidate that costs more, reserving only the
+	// difference.
+	chainBudget := &chainBudget{h: h, team: TeamFrom(r.Context()), req: req, baseMicros: estimatedMicros}
 
 	// Mirrors the TPM defer immediately above: registered right after a
 	// successful reservation, so it settles on every exit path, and reads
@@ -168,50 +221,88 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 			h.log.ErrorContext(r.Context(), "reconciling budget reservation",
 				slog.String("request_id", RequestIDFrom(r.Context())), slog.Any("error", err))
 		}
+		// The base reservation above settles the whole real cost, so every
+		// fallback top-up settles against zero and is given back in full.
+		chainBudget.reconcileExtras(ctx, h.log)
 	}()
 
 	if req.Stream {
-		actual = h.streamChatCompletions(w, r, prov, req)
+		actual = h.streamChatCompletions(w, r, chain, requested, chainBudget, req)
 		return
 	}
 
 	metrics := metricsFrom(r.Context())
 
-	callStart := time.Now()
-	resp, err := prov.Complete(r.Context(), req.toProviderRequest())
-	callElapsed := time.Since(callStart)
+	// totalProviderTime sums every attempt's own measured latency — every
+	// failed candidate's wall-clock call time plus the eventual success's
+	// resp.Latency — but never the backoff sleep resilience.Do inserts
+	// between them. That sleep is SwitchYard's own retry policy running, not
+	// time spent waiting on a provider, so it falls where the existing
+	// overhead formula (handler time minus providerTime) already puts
+	// anything not explicitly counted as provider time: gateway overhead.
+	// A fallback's failed attempts are counted the same way, for the same
+	// reason: the gateway really did spend that time upstream.
+	var totalProviderTime time.Duration
+
+	baseReq := req.toProviderRequest()
+
+	resp, served, failures, err := runChain(r.Context(), h, chain, chainBudget,
+		func(ctx context.Context, prov provider.Provider, cand resilience.Candidate) (*provider.Response, error) {
+			// The outbound request carries the candidate's model, not the
+			// caller's: a fallback still asking for the original model would
+			// be rejected by a provider that does not serve it. Copying the
+			// struct is enough — Messages is shared, and no attempt mutates it.
+			attemptReq := baseReq
+			attemptReq.Model = cand.Model
+
+			callStart := time.Now()
+			resp, err := prov.Complete(ctx, attemptReq)
+			callElapsed := time.Since(callStart)
+
+			if err != nil {
+				// No Response means no measured round trip, so the wall time
+				// around the call stands in. On a failure path the adapter's
+				// translation work is negligible, so this is close enough not
+				// to distort the overhead number.
+				totalProviderTime += callElapsed
+				h.healthRecorder.Record(cand.Provider, callElapsed, err)
+				return nil, err
+			}
+
+			// resp.Latency is the HTTP round trip alone, measured inside the
+			// adapter. Using it rather than callElapsed means the adapter's
+			// own request and response translation counts as gateway
+			// overhead — which it is.
+			totalProviderTime += resp.Latency
+			h.healthRecorder.Record(resp.Provider, resp.Latency, nil)
+			return resp, nil
+		},
+	)
 
 	if err != nil {
+		lastTried := lastAttempted(failures)
 		if metrics != nil {
-			metrics.providerName = prov.Name()
-			// No Response means no measured round trip, so the wall time around
-			// the call stands in. On a failure path the adapter's translation
-			// work is negligible, so this is close enough not to distort the
-			// overhead number.
-			metrics.providerTime = callElapsed
+			metrics.providerName = lastTried.Provider
+			metrics.providerTime = totalProviderTime
 		}
-		h.healthRecorder.Record(prov.Name(), callElapsed, err)
 
 		h.log.LogAttrs(r.Context(), slog.LevelWarn, "provider call failed",
 			slog.String("request_id", RequestIDFrom(r.Context())),
-			slog.String("provider", prov.Name()),
+			slog.String("provider", lastTried.Provider),
 			slog.String("model", req.Model),
+			slog.Int("candidates_tried", len(failures)),
+			slog.Int("attempts", totalAttempts(failures)),
 			slog.Any("error", err),
 		)
-		writeProviderError(w, h.log, err)
+		h.writeChainError(w, req.Model, failures, err)
 		return
 	}
-
-	h.healthRecorder.Record(resp.Provider, resp.Latency, nil)
 
 	if metrics != nil {
 		metrics.providerName = resp.Provider
 		metrics.servedModel = resp.Model
-		// resp.Latency is the HTTP round trip alone, measured inside the
-		// adapter. Using it rather than callElapsed means the adapter's own
-		// request and response translation counts as gateway overhead — which
-		// it is. That makes the headline number larger, and honest.
-		metrics.providerTime = resp.Latency
+		metrics.fellBack = served != requested
+		metrics.providerTime = totalProviderTime
 		metrics.usage = resp.Usage
 		h.recordCost(r.Context(), metrics, resp.Model, resp.Usage)
 	}
@@ -308,13 +399,13 @@ func (h *Handler) reserveTokens(w http.ResponseWriter, r *http.Request, req chat
 // because an unrecoverable dollar is a different class of problem than a
 // delayed request — the one dependency in this gateway where "never be the
 // reason a request fails" is deliberately overridden.
-func (h *Handler) reserveBudget(w http.ResponseWriter, r *http.Request, req chatRequest) (*budget.Reservation, bool) {
+func (h *Handler) reserveBudget(w http.ResponseWriter, r *http.Request, req chatRequest) (*budget.Reservation, int64, bool) {
 	team := TeamFrom(r.Context())
 	if team == nil {
 		h.log.ErrorContext(r.Context(), "chat completions reached without an authenticated team")
 		writeError(w, h.log, http.StatusInternalServerError, "internal_error",
 			"the gateway could not resolve the caller's team")
-		return nil, false
+		return nil, 0, false
 	}
 
 	defaultMaxTokens, ok := h.resolver.DefaultMaxTokensFor(req.Model)
@@ -326,7 +417,7 @@ func (h *Handler) reserveBudget(w http.ResponseWriter, r *http.Request, req chat
 			slog.String("model", req.Model))
 		writeError(w, h.log, http.StatusInternalServerError, "internal_error",
 			"the gateway could not size this request's budget reservation")
-		return nil, false
+		return nil, 0, false
 	}
 
 	estimatedMicros, err := h.calc.Cost(req.Model, req.estimateInputTokens(), req.estimateOutputCeiling(defaultMaxTokens))
@@ -338,7 +429,7 @@ func (h *Handler) reserveBudget(w http.ResponseWriter, r *http.Request, req chat
 			slog.String("model", req.Model), slog.Any("error", err))
 		writeError(w, h.log, http.StatusInternalServerError, "internal_error",
 			"the gateway could not price this request")
-		return nil, false
+		return nil, 0, false
 	}
 
 	// checkTimeout, not r.Context() directly: same reasoning as
@@ -353,12 +444,12 @@ func (h *Handler) reserveBudget(w http.ResponseWriter, r *http.Request, req chat
 		h.log.ErrorContext(r.Context(), "budget check failed; failing closed",
 			slog.String("team", team.ID), slog.Any("error", err))
 		writeBudgetUnavailableError(w, h.log)
-		return nil, false
+		return nil, 0, false
 	}
 
 	if !res.Allowed {
 		writeBudgetExceededError(w, h.log, team.ID, res.SpentMicros, team.MonthlyBudgetMicros)
-		return nil, false
+		return nil, 0, false
 	}
 
 	// res.SpentMicros is the total *after* admitting this request, the same
@@ -374,7 +465,7 @@ func (h *Handler) reserveBudget(w http.ResponseWriter, r *http.Request, req chat
 		)
 	}
 
-	return reservation, true
+	return reservation, estimatedMicros, true
 }
 
 // authorizeModel checks the authenticated team's model allowlist.
@@ -475,7 +566,7 @@ func (h *Handler) decode(w http.ResponseWriter, r *http.Request) (chatRequest, b
 // reservation against. It is set by the deferred closure below rather than
 // at each individual return, since this function has several exit points and
 // every one of them needs the same fallback logic applied.
-func (h *Handler) streamChatCompletions(w http.ResponseWriter, r *http.Request, prov provider.Provider, req chatRequest) (actualTokens int) {
+func (h *Handler) streamChatCompletions(w http.ResponseWriter, r *http.Request, chain []resilience.Candidate, requested resilience.Candidate, chainBudget *chainBudget, req chatRequest) (actualTokens int) {
 	metrics := metricsFrom(r.Context())
 	requestID := RequestIDFrom(r.Context())
 
@@ -490,37 +581,72 @@ func (h *Handler) streamChatCompletions(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Passing r.Context() straight through is what makes a client disconnect
-	// cancel the upstream call: net/http cancels a request's Context when the
+	// Passing ctx straight through is what makes a client disconnect cancel
+	// the upstream call: net/http cancels a request's Context when the
 	// client's connection closes, and that context is what Stream used to
 	// build the outbound request. No extra wiring is needed for Step 2.3's
 	// "client disconnect cancels the upstream provider request."
-	callStart := time.Now()
-	stream, err := prov.Stream(r.Context(), req.toProviderRequest())
+	//
+	// Retry and fallback both wrap this initial connection attempt and
+	// nothing past it. Once Stream succeeds, bytes can start reaching the
+	// client at any moment — per Step 2.4/6.3, a mid-stream failure gets an
+	// SSE error event and neither a retry nor a fallback, because either
+	// would duplicate content the client already received.
+	//
+	// failedAttemptsTime accumulates only the attempts that errored, across
+	// every candidate tried; the eventual successful attempt's own
+	// connect-to-first-byte time is measured separately below (callStart,
+	// reset to that attempt's start), the same "sum real provider time,
+	// exclude backoff sleep" rule the non-streaming path applies.
+	var failedAttemptsTime time.Duration
+	var callStart time.Time
+
+	baseReq := req.toProviderRequest()
+
+	stream, served, failures, err := runChain(r.Context(), h, chain, chainBudget,
+		func(ctx context.Context, prov provider.Provider, cand resilience.Candidate) (provider.StreamReader, error) {
+			// Same substitution as the non-streaming path: the outbound
+			// request names the candidate's model, not the caller's.
+			attemptReq := baseReq
+			attemptReq.Model = cand.Model
+
+			callStart = time.Now()
+			s, err := prov.Stream(ctx, attemptReq)
+			if err != nil {
+				elapsed := time.Since(callStart)
+				failedAttemptsTime += elapsed
+				h.healthRecorder.Record(cand.Provider, elapsed, err)
+				return nil, err
+			}
+			return s, nil
+		},
+	)
 	if err != nil {
-		callElapsed := time.Since(callStart)
+		lastTried := lastAttempted(failures)
 		if metrics != nil {
-			metrics.providerName = prov.Name()
-			metrics.providerTime = callElapsed
+			metrics.providerName = lastTried.Provider
+			metrics.providerTime = failedAttemptsTime
 		}
-		h.healthRecorder.Record(prov.Name(), callElapsed, err)
 
 		h.log.LogAttrs(r.Context(), slog.LevelWarn, "provider stream call failed",
 			slog.String("request_id", requestID),
-			slog.String("provider", prov.Name()),
+			slog.String("provider", lastTried.Provider),
 			slog.String("model", req.Model),
+			slog.Int("candidates_tried", len(failures)),
+			slog.Int("attempts", totalAttempts(failures)),
 			slog.Any("error", err),
 		)
 		// Nothing has reached the client yet, so — per Step 2.4 — this is a
 		// normal HTTP error response, exactly like the non-streaming path.
-		writeProviderError(w, h.log, err)
+		h.writeChainError(w, req.Model, failures, err)
 		return
 	}
 	defer stream.Close()
 
 	if metrics != nil {
-		metrics.providerName = prov.Name()
-		metrics.servedModel = req.Model
+		metrics.providerName = served.Provider
+		metrics.servedModel = served.Model
+		metrics.fellBack = served != requested
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -572,9 +698,10 @@ func (h *Handler) streamChatCompletions(w http.ResponseWriter, r *http.Request, 
 		// a time-to-first-byte figure and, per middleware.go's headerHook
 		// comment, the overhead this request reports is a time-to-first-token
 		// measurement: the right boundary for a stream, where total duration is
-		// dominated by generation, not by the gateway.
+		// dominated by generation, not by the gateway. failedAttemptsTime folds
+		// in any retried connection attempts that preceded this successful one.
 		if !gotFirstByte {
-			firstByteLatency = time.Since(callStart)
+			firstByteLatency = failedAttemptsTime + time.Since(callStart)
 			gotFirstByte = true
 			if metrics != nil {
 				metrics.providerTime = firstByteLatency
@@ -599,10 +726,10 @@ func (h *Handler) streamChatCompletions(w http.ResponseWriter, r *http.Request, 
 				// Nothing has reached the client yet — this is functionally a
 				// Stream() failure that just happened to surface on a later Recv
 				// instead, so it gets the same normal-error treatment.
-				h.healthRecorder.Record(prov.Name(), firstByteLatency, err)
+				h.healthRecorder.Record(served.Provider, firstByteLatency, err)
 				h.log.LogAttrs(r.Context(), slog.LevelWarn, "provider stream failed before any chunk",
 					slog.String("request_id", requestID),
-					slog.String("provider", prov.Name()),
+					slog.String("provider", served.Provider),
 					slog.Any("error", err),
 				)
 				writeProviderError(w, h.log, err)
@@ -614,10 +741,10 @@ func (h *Handler) streamChatCompletions(w http.ResponseWriter, r *http.Request, 
 			// only way left to tell the client this failed, and the stream ends
 			// here — no [DONE], and no fallback: partial content already
 			// reached the client, so retrying would duplicate it.
-			h.healthRecorder.Record(prov.Name(), firstByteLatency, err)
+			h.healthRecorder.Record(served.Provider, firstByteLatency, err)
 			h.log.LogAttrs(r.Context(), slog.LevelWarn, "provider stream failed mid-stream",
 				slog.String("request_id", requestID),
-				slog.String("provider", prov.Name()),
+				slog.String("provider", served.Provider),
 				slog.Any("error", err),
 			)
 			if err := writeSSEError(w, err); err != nil {
@@ -647,7 +774,7 @@ func (h *Handler) streamChatCompletions(w http.ResponseWriter, r *http.Request, 
 			continue
 		}
 
-		if err := writeSSEJSON(w, toChatChunk(id, created, req.Model, chunk, !sentAny)); err != nil {
+		if err := writeSSEJSON(w, toChatChunk(id, created, served.Model, chunk, !sentAny)); err != nil {
 			// A write failure here almost always means the connection is gone —
 			// the same condition the ctx.Done() check above exists for, just
 			// observed a different way. Stop rather than keep paying for a
@@ -662,7 +789,7 @@ func (h *Handler) streamChatCompletions(w http.ResponseWriter, r *http.Request, 
 
 	// Only reached on a clean stream completion — every mid-stream failure
 	// return above already recorded its own outcome and returned before here.
-	h.healthRecorder.Record(prov.Name(), firstByteLatency, nil)
+	h.healthRecorder.Record(served.Provider, firstByteLatency, nil)
 
 	if metrics != nil {
 		metrics.usage = usage
@@ -671,7 +798,7 @@ func (h *Handler) streamChatCompletions(w http.ResponseWriter, r *http.Request, 
 		// to. That is a known gap (see DECISIONS.md): real generation happened
 		// and cost something, but Step 4.1 only has the provider's own usage
 		// figures to price from, and this one never arrived.
-		h.recordCost(r.Context(), metrics, req.Model, usage)
+		h.recordCost(r.Context(), metrics, served.Model, usage)
 	}
 
 	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
@@ -683,7 +810,7 @@ func (h *Handler) streamChatCompletions(w http.ResponseWriter, r *http.Request, 
 
 	h.log.LogAttrs(r.Context(), slog.LevelInfo, "stream completed",
 		slog.String("request_id", requestID),
-		slog.String("provider", prov.Name()),
+		slog.String("provider", served.Provider),
 		slog.String("finish_reason", string(finish)),
 		slog.Int("input_tokens", usage.InputTokens),
 		slog.Int("output_tokens", usage.OutputTokens),

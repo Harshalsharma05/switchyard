@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/goccy/go-yaml"
@@ -41,6 +42,27 @@ type Providers struct {
 	// Pricing is keyed by model name, which is unambiguous because a model may
 	// be served by exactly one instance.
 	Pricing map[string]ModelPricing
+
+	// Tiers maps a tier name to its candidates, in declared order — Step 6.2's
+	// fallback chains. Entries naming a disabled provider are dropped here, so
+	// a chain never contains something the registry cannot resolve.
+	//
+	// Nil when the file declares no tiers, which is the pre-Phase-6 behaviour:
+	// no fallback, every request served by the one provider that owns the
+	// requested model.
+	Tiers map[string][]TierEntry
+}
+
+// TierEntry is one candidate in a fallback tier.
+//
+// Provider is redundant with Model — this package already enforces that a model
+// maps to exactly one provider — but it is required in the YAML anyway. It
+// documents intent at the point of use and turns a typo'd or moved model into a
+// startup error naming both halves, rather than a chain that silently resolves
+// somewhere the author did not mean.
+type TierEntry struct {
+	Provider string
+	Model    string
 }
 
 // --- on-disk shape ----------------------------------------------------------
@@ -50,6 +72,15 @@ type Providers struct {
 
 type providersFile struct {
 	Providers []providerEntry `yaml:"providers"`
+
+	// Tiers is optional. Absent means no fallback anywhere, which is exactly
+	// how the gateway behaved through Phase 5.
+	Tiers map[string][]tierEntry `yaml:"tiers"`
+}
+
+type tierEntry struct {
+	Provider string `yaml:"provider"`
+	Model    string `yaml:"model"`
 }
 
 type providerEntry struct {
@@ -113,6 +144,13 @@ func LoadProviders(path string) (*Providers, error) {
 	seenNames := make(map[string]struct{}, len(file.Providers))
 	modelOwner := make(map[string]string)
 
+	// modelProvider and providerEnabled are what tier validation resolves
+	// against. Both cover every entry, enabled or not, for the same reason
+	// modelOwner does: a tier naming a temporarily disabled provider is a
+	// dropped candidate, not a typo, and the two must stay distinguishable.
+	modelProvider := make(map[string]string)
+	providerEnabled := make(map[string]bool, len(file.Providers))
+
 	for i, entry := range file.Providers {
 		// Identify the entry by name where possible, by index where the name is
 		// what is missing.
@@ -142,7 +180,9 @@ func LoadProviders(path string) (*Providers, error) {
 				)
 			}
 			modelOwner[model] = label
+			modelProvider[model] = entry.Name
 		}
+		providerEnabled[entry.Name] = entry.enabled()
 
 		if !entry.enabled() {
 			// Validated but not constructed. Its models stay reserved above so a
@@ -158,6 +198,96 @@ func LoadProviders(path string) (*Providers, error) {
 
 	if len(out.Configs) == 0 {
 		return nil, fmt.Errorf("%s: every provider is disabled; the gateway would have nothing to route to", path)
+	}
+
+	tiers, err := resolveTiers(path, file.Tiers, modelProvider, providerEnabled)
+	if err != nil {
+		return nil, err
+	}
+	out.Tiers = tiers
+
+	return out, nil
+}
+
+// resolveTiers validates the tiers block against the providers already parsed
+// above and drops candidates whose provider is disabled.
+//
+// Every failure is fatal, matching LoadProviders' rule: a fallback chain
+// pointing at a model nobody serves is a routing bug that would surface as a
+// mystery 404 on the day the primary went down, which is the worst possible
+// moment to discover it.
+func resolveTiers(path string, raw map[string][]tierEntry, modelProvider map[string]string, providerEnabled map[string]bool) (map[string][]TierEntry, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+
+	// Tier names are iterated in sorted order so that a file with two separate
+	// mistakes reports the same one every run. Map iteration order in Go is
+	// deliberately randomised, and a validation error that moves between runs
+	// is genuinely hard to act on.
+	names := make([]string, 0, len(raw))
+	for name := range raw {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	// tierOfModel enforces that a model belongs to at most one tier. Step 6.2
+	// resolves a request as "requested model -> its tier", and a model in two
+	// tiers makes "its tier" ambiguous with no defensible tiebreak.
+	tierOfModel := make(map[string]string)
+	out := make(map[string][]TierEntry, len(raw))
+
+	for _, name := range names {
+		entries := raw[name]
+		if name == "" {
+			return nil, fmt.Errorf("%s: a tier has an empty name", path)
+		}
+		if len(entries) == 0 {
+			return nil, fmt.Errorf("%s: tier %q has no entries", path, name)
+		}
+
+		resolved := make([]TierEntry, 0, len(entries))
+		for i, e := range entries {
+			if e.Provider == "" || e.Model == "" {
+				return nil, fmt.Errorf("%s: tier %q entry %d needs both a provider and a model", path, name, i)
+			}
+
+			owner, known := modelProvider[e.Model]
+			if !known {
+				return nil, fmt.Errorf(
+					"%s: tier %q lists model %q, which no provider defines",
+					path, name, e.Model,
+				)
+			}
+			if owner != e.Provider {
+				return nil, fmt.Errorf(
+					"%s: tier %q lists model %q under provider %q, but it is served by %q",
+					path, name, e.Model, e.Provider, owner,
+				)
+			}
+
+			if other, dup := tierOfModel[e.Model]; dup {
+				if other == name {
+					return nil, fmt.Errorf("%s: tier %q lists model %q twice", path, name, e.Model)
+				}
+				return nil, fmt.Errorf(
+					"%s: model %q appears in both tier %q and tier %q; a model must belong to exactly one tier",
+					path, e.Model, other, name,
+				)
+			}
+			tierOfModel[e.Model] = name
+
+			// Dropped, not rejected: `enabled: false` is the documented state of
+			// a provider waiting on a paid account (see the Phase 1 decision on
+			// the enabled flag), and a tier should keep documenting the intended
+			// chain while one of its links is switched off.
+			if !providerEnabled[e.Provider] {
+				continue
+			}
+			resolved = append(resolved, TierEntry{Provider: e.Provider, Model: e.Model})
+		}
+
+		out[name] = resolved
 	}
 
 	return out, nil

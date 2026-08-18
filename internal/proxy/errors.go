@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -18,6 +19,25 @@ type errorDetail struct {
 	Message string `json:"message"`
 	Type    string `json:"type"`
 	Code    string `json:"code,omitempty"`
+
+	// Attempts is Step 6.3's per-candidate breakdown, present only on a
+	// chain-exhausted 503. It is an extension to OpenAI's envelope rather
+	// than a replacement for it: a client's existing error handling reads
+	// message and type exactly as before and ignores this, while an operator
+	// debugging a failover gets the whole story out of the response instead
+	// of having to correlate it against the gateway's logs. omitempty keeps
+	// every other error response byte-identical to what it was.
+	Attempts []attemptDetail `json:"switchyard_attempts,omitempty"`
+}
+
+// attemptDetail is one candidate's outcome in a chain-exhausted response:
+// what was tried, how many times, and why it failed.
+type attemptDetail struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	Attempts int    `json:"attempts"`
+	Type     string `json:"type"`
+	Message  string `json:"message"`
 }
 
 type errorBody struct {
@@ -93,6 +113,49 @@ func writeProviderError(w http.ResponseWriter, log *slog.Logger, err error) {
 	}
 
 	writeError(w, log, statusForKind(provErr.Kind), string(provErr.Kind), message)
+}
+
+// writeChainExhaustedError is Step 6.3's answer to a fallback chain that ran
+// out of options: a 503 whose body names every candidate that was tried and
+// why each one failed.
+//
+// 503 rather than each provider's own mapped status, because by this point
+// there is no single upstream failure to report — the gateway genuinely has
+// no capacity left for this request, which is what 503 means. The individual
+// statuses are not lost; they are in the breakdown, one per candidate.
+func writeChainExhaustedError(w http.ResponseWriter, log *slog.Logger, requestedModel string, failures []chainFailure) {
+	attempts := make([]attemptDetail, 0, len(failures))
+	for _, f := range failures {
+		detail := attemptDetail{
+			Provider: f.candidate.Provider,
+			Model:    f.candidate.Model,
+			Attempts: f.attempts,
+			Type:     "unknown",
+			Message:  f.err.Error(),
+		}
+
+		var provErr *provider.Error
+		if errors.As(f.err, &provErr) {
+			detail.Type = string(provErr.Kind)
+			if provErr.Message != "" {
+				detail.Message = provErr.Message
+			}
+		}
+		attempts = append(attempts, detail)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+
+	body := errorBody{Error: errorDetail{
+		Message: fmt.Sprintf("every provider able to serve model %s failed; %d were tried",
+			strconv.Quote(requestedModel), len(failures)),
+		Type:     "chain_exhausted",
+		Attempts: attempts,
+	}}
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		log.Warn("writing chain exhausted response body", slog.Any("error", err))
+	}
 }
 
 // writeSSEError is writeProviderError's counterpart for a stream that has
