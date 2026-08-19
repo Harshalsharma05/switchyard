@@ -1,0 +1,19 @@
+# Provisions Grafana's only datasource on boot. Editable in the UI is
+# deliberately off — CLAUDE.md's stack table is explicit that dashboards
+# (and, by the same logic, the datasource they depend on) are "provisioned
+# from files, never clicked together."
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    # Container-to-container DNS on the compose network — Grafana and
+    # Prometheus are both services in deploy/docker-compose.yml, so this is
+    # Prometheus's own container port (9090), not the 9091 host mapping
+    # docker-compose.yml uses to avoid colliding with the gateway's admin
+    # port on the host.
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

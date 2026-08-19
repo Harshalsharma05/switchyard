@@ -1,0 +1,17 @@
+# Slack contact point every provisioned alert rule routes to.
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: switchyard-slack
+    receivers:
+      - uid: switchyard-slack-webhook
+        type: slack
+        settings:
+          url: $__env{SWITCHYARD_SLACK_WEBHOOK_URL}
+          title: '{{ .CommonLabels.alertname }}'
+          text: |
+            {{ range .Alerts }}
+            *{{ .Labels.alertname }}* ({{ .Status }})
+            {{ .Annotations.summary }}
+            {{ end }}

@@ -1,0 +1,7 @@
+# Routes every alert to the Slack contact point; no per-rule routing needed.
+apiVersion: 1
+
+policies:
+  - orgId: 1
+    receiver: switchyard-slack
+    group_by: ['alertname']

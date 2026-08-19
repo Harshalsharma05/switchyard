@@ -1,0 +1,224 @@
+# The five Step 10.5 alert rules, evaluated against the Prometheus datasource.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: switchyard-alerts
+    folder: SwitchYard
+    interval: 1m
+    rules:
+      - uid: switchyard-error-rate
+        title: Provider error rate above 10%
+        condition: B
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $labels.provider }} error rate is {{ $values.A }}'
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              editorMode: code
+              instant: true
+              expr: sum by (provider) (rate(switchyard_errors_total[5m])) / sum by (provider) (rate(switchyard_requests_total[5m]))
+          - refId: B
+            relativeTimeRange: { from: 0, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              datasource: { type: __expr__, uid: __expr__ }
+              conditions:
+                - evaluator: { type: gt, params: [0.1] }
+                  operator: { type: and }
+                  query: { params: ['B'] }
+                  reducer: { type: last }
+                  type: query
+
+      - uid: switchyard-breaker-open
+        title: Circuit breaker opened
+        condition: B
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: 'breaker for {{ $labels.provider }}/{{ $labels.model }} is open'
+        data:
+          - refId: A
+            relativeTimeRange: { from: 60, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              editorMode: code
+              instant: true
+              expr: switchyard_breaker_state
+          - refId: B
+            relativeTimeRange: { from: 0, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              datasource: { type: __expr__, uid: __expr__ }
+              conditions:
+                - evaluator: { type: gt, params: [1.5] }
+                  operator: { type: and }
+                  query: { params: ['B'] }
+                  reducer: { type: last }
+                  type: query
+
+      - uid: switchyard-budget-90
+        title: Team above 90% budget
+        condition: B
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $labels.team }} budget utilization is {{ $values.A }}'
+        data:
+          - refId: A
+            relativeTimeRange: { from: 60, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              editorMode: code
+              instant: true
+              expr: switchyard_budget_utilization_ratio
+          - refId: B
+            relativeTimeRange: { from: 0, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              datasource: { type: __expr__, uid: __expr__ }
+              conditions:
+                - evaluator: { type: gt, params: [0.9] }
+                  operator: { type: and }
+                  query: { params: ['B'] }
+                  reducer: { type: last }
+                  type: query
+
+      - uid: switchyard-overhead-p99
+        title: Gateway overhead p99 above 25ms
+        condition: B
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: 'gateway overhead p99 is {{ $values.A }}s'
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              editorMode: code
+              instant: true
+              expr: histogram_quantile(0.99, sum by (le) (rate(switchyard_gateway_overhead_seconds_bucket[5m])))
+          - refId: B
+            relativeTimeRange: { from: 0, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              datasource: { type: __expr__, uid: __expr__ }
+              conditions:
+                - evaluator: { type: gt, params: [0.025] }
+                  operator: { type: and }
+                  query: { params: ['B'] }
+                  reducer: { type: last }
+                  type: query
+
+      # Tiers aren't a Prometheus label (internal/health tracks providers, not
+      # tiers), so the enabled providers per tier are inlined from
+      # configs/providers.yaml's `tiers:` section. A tiers.yaml edit needs this
+      # rule updated by hand to match.
+      - uid: switchyard-tier-frontier-down
+        title: All frontier-tier providers unhealthy
+        condition: B
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: critical
+          tier: frontier
+        annotations:
+          summary: 'every enabled frontier-tier provider (groq, gemini) is down'
+        data:
+          - refId: A
+            relativeTimeRange: { from: 60, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              editorMode: code
+              instant: true
+              # count(...) rather than max(...): a provider with no series at
+              # all (never scraped, not just unhealthy) must not count as
+              # "down" -- only a series that explicitly reports 0 does. The
+              # threshold requires all 2 enabled frontier providers present
+              # and reporting 0, so a provider missing its own data point
+              # can't silently satisfy "all down".
+              expr: count(switchyard_provider_health{provider=~"groq|gemini"} == 0)
+          - refId: B
+            relativeTimeRange: { from: 0, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              datasource: { type: __expr__, uid: __expr__ }
+              conditions:
+                - evaluator: { type: gte, params: [2] }
+                  operator: { type: and }
+                  query: { params: ['B'] }
+                  reducer: { type: last }
+                  type: query
+
+      - uid: switchyard-tier-fast-down
+        title: All fast-tier providers unhealthy
+        condition: B
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: critical
+          tier: fast
+        annotations:
+          summary: 'every enabled fast-tier provider (groq, gemini, ollama) is down'
+        data:
+          - refId: A
+            relativeTimeRange: { from: 60, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              editorMode: code
+              instant: true
+              expr: count(switchyard_provider_health{provider=~"groq|gemini|ollama"} == 0)
+          - refId: B
+            relativeTimeRange: { from: 0, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              datasource: { type: __expr__, uid: __expr__ }
+              conditions:
+                - evaluator: { type: gte, params: [3] }
+                  operator: { type: and }
+                  query: { params: ['B'] }
+                  reducer: { type: last }
+                  type: query

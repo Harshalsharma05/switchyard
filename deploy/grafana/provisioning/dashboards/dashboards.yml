@@ -1,0 +1,20 @@
+# Tells Grafana to load every dashboard JSON file it finds under
+# /var/lib/grafana/dashboards (mounted from deploy/grafana/dashboards/ in
+# docker-compose.yml) instead of requiring them to be imported by hand.
+# Steps 10.2-10.4 add the actual dashboard JSON; this file is what makes
+# them appear automatically the moment they land in that directory.
+apiVersion: 1
+
+providers:
+  - name: switchyard
+    orgId: 1
+    folder: SwitchYard
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    # No UI edits persisted back to a provisioned dashboard — same reasoning
+    # as the datasource's editable: false. A reviewer's dashboard always
+    # matches what's committed to the repo.
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards

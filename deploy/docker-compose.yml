@@ -1,7 +1,7 @@
 # SwitchYard local dev/deploy stack.
 #
 # Filled in incrementally, one phase at a time — Redis (Phase 3), Jaeger
-# (Phase 8), Prometheus (Phase 9) now; Grafana arrives with Phase 10.
+# (Phase 8), Prometheus (Phase 9), Grafana (Phase 10) now.
 # `docker compose up` is meant to bring up everything by the end of Part 1;
 # until then, bring up only what the current phase needs.
 
@@ -52,6 +52,23 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
+  # Dashboards + alerting for Phase 9's metrics, file-provisioned on boot.
+  grafana:
+    image: grafana/grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    environment:
+      # Placeholder default so a missing webhook never blocks provisioning;
+      # see .env.example for how to set a real one.
+      - SWITCHYARD_SLACK_WEBHOOK_URL=${SWITCHYARD_SLACK_WEBHOOK_URL:-https://hooks.slack.com/services/PLACEHOLDER}
+    depends_on:
+      - prometheus
+
 volumes:
   redis-data:
   prometheus-data:
+  grafana-data:
