@@ -1,0 +1,39 @@
+# Provider config for scripts/loadtest.js — points at two local
+# scripts/mockprovider instances, never a real API, so the load test can
+# throw 5,000+ requests without spending provider money. Kept out of
+# configs/ so it never gets mistaken for the dev/demo registry.
+
+providers:
+  - name: mock-primary
+    type: openai-compatible
+    enabled: true
+    base_url: http://127.0.0.1:9501
+    api_key_env: SWITCHYARD_LOADTEST_KEY
+    timeout: 5s
+    default_max_tokens: 64
+    ping_model: mock-fast
+    models:
+      - name: mock-fast
+        input_per_1m_usd: 0.50
+        output_per_1m_usd: 1.50
+      - name: mock-frontier
+        input_per_1m_usd: 2.00
+        output_per_1m_usd: 6.00
+
+  - name: mock-fallback
+    type: openai-compatible
+    enabled: true
+    base_url: http://127.0.0.1:9502
+    api_key_env: SWITCHYARD_LOADTEST_KEY
+    timeout: 5s
+    default_max_tokens: 64
+    ping_model: mock-fast-b
+    models:
+      - name: mock-fast-b
+        input_per_1m_usd: 0.50
+        output_per_1m_usd: 1.50
+
+tiers:
+  fast:
+    - { provider: mock-primary, model: mock-fast }
+    - { provider: mock-fallback, model: mock-fast-b }

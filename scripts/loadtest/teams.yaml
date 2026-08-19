@@ -1,0 +1,55 @@
+# Team config for scripts/loadtest.js. Three teams, each exercising a
+# different limit on purpose:
+#   team-realtime      generous limits — the steady, mostly-200 baseline
+#   team-batch         RPM/TPM sized to be blown through in seconds, so the
+#                      run produces real 429s under real concurrency
+#   team-budget-capped a monthly cap sized to exhaust after a few dozen
+#                      requests, so the run produces real 402s
+#
+# Dev keys (plaintext, never committed elsewhere): sk-loadtest-realtime-9f2b1c,
+# sk-loadtest-batch-7a4e0d, sk-loadtest-budgetcapped-3c1d8f.
+
+teams:
+  - id: loadtest-realtime
+    name: Load Test Realtime
+    api_key_hash: df61f3af3268373f651a9c54356e1d4c364302a899362457447fe1199cef5cbd
+    allowed_providers:
+      - mock-primary
+      - mock-fallback
+    allowed_models:
+      - mock-fast
+      - mock-fast-b
+      - mock-frontier
+    rate_limits:
+      rpm: 6000
+      tpm: 5000000
+    monthly_budget_usd: 1000.00
+    priority: realtime
+
+  - id: loadtest-batch
+    name: Load Test Batch
+    api_key_hash: 219a5ddc44fc4b776cde59ab7b1039f1cbd36f22e23e5c36b00840e3e8f61a5a
+    allowed_providers:
+      - mock-primary
+      - mock-fallback
+    allowed_models:
+      - mock-fast
+      - mock-fast-b
+    rate_limits:
+      rpm: 60
+      tpm: 5000
+    monthly_budget_usd: 1000.00
+    priority: batch
+
+  - id: loadtest-budget-capped
+    name: Load Test Budget Capped
+    api_key_hash: e82523dc5c1c4a585433b271b55605f631a1038ce917b5d87e35ae28f9abcd28
+    allowed_providers:
+      - mock-primary
+    allowed_models:
+      - mock-frontier
+    rate_limits:
+      rpm: 6000
+      tpm: 5000000
+    monthly_budget_usd: 0.02
+    priority: realtime

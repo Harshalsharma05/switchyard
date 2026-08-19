@@ -42,6 +42,7 @@ go.work.sum
 # belong in docs/, per the rule that every published number comes from a
 # rerunnable script.
 /scripts/results/
+/scripts/loadtest/logs/
 k6-summary.json
 
 # --- Editors and OS ----------------------------------------------------------
