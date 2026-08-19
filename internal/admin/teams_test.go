@@ -12,10 +12,20 @@ import (
 	"testing"
 
 	"github.com/Harshalsharma05/switchyard/internal/auth"
+	"github.com/Harshalsharma05/switchyard/internal/telemetry"
 )
 
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewJSONHandler(io.Discard, nil))
+}
+
+func testMetrics(t *testing.T) *telemetry.Metrics {
+	t.Helper()
+	m, err := telemetry.NewMetrics()
+	if err != nil {
+		t.Fatalf("NewMetrics: %v", err)
+	}
+	return m
 }
 
 // testTeamStore builds a real *auth.Registry rather than a hand-rolled fake:
@@ -87,7 +97,7 @@ func newTestAdminServer(t *testing.T, teams TeamStore, spend SpendReader, provid
 
 func newTestAdminServerWithReload(t *testing.T, teams TeamStore, spend SpendReader, providers ProviderLister, reload Reloader) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(NewRouter(func() bool { return true }, teams, spend, providers, fakeHealthReader{}, &fakeBreakerResetter{}, nil, reload, discardLogger()))
+	srv := httptest.NewServer(NewRouter(func() bool { return true }, teams, spend, providers, fakeHealthReader{}, &fakeBreakerResetter{}, nil, reload, testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)
 	return srv
 }

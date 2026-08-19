@@ -56,3 +56,15 @@ HalfOpen → Open: if even one test request fails, nope — go straight back to 
 ## One limitation worth knowing before Phase 11
 
 Chaos does not affect Provider.Ping. Health checks call the adapter directly, bypassing the proxy, so active checks keep succeeding while chaos is breaking real requests. The consequence for the 11.4 demo: a chaos'd provider goes degraded (via the passive error-rate signal) and its breaker opens and fallback engages — but it won't reach down via consecutive_ping_failures. That's arguably more realistic than the alternative, but it's a deliberate gap, not an oversight. Making Ping chaos-able would mean wrapping provider.Provider, which is a bigger structural change than 7.5 warrants — flag it if you'd rather have it.
+
+## Phase 8 checklist
+Not yet exercised live: a retried/fallen-back request showing multiple sibling provider.call spans. The mechanism is correct by construction (verified by reading resilience.Do's call pattern), but I haven't actually forced a failure to watch it happen — that needs the Phase 7 chaos harness turned on.
+⚠️ Deferred to Phase 11: "tracing overhead, p95 still under 10ms." Same reasoning as Phase 1's overhead number — this Windows dev box's clock granularity makes single-digit-ms measurements unreliable here (several spans showed Jaeger's own "negative duration" warning during testing), so it needs the real load test on Linux/Docker to mean anything.
+
+## What Phase 9 is actually building
+
+Phase 8 gave you the ability to zoom into one specific request and see exactly what happened to it. Phase 9 gives you the opposite view: aggregate numbers across all requests over time — "what's my error rate right now," "how much has team X spent this hour," "is the p99 latency creeping up." Tracing answers "what happened to this one request." Metrics answer "what's the overall health of the system." You need both — a doctor checking one patient's chart (trace) versus a hospital's dashboard of vitals across every patient right now (metrics).
+
+Prometheus is the tool that stores these numbers over time and lets you query trends; Phase 10 puts a dashboard on top of it. Phase 9 is just: emit the right numbers, in the right shape, without accidentally creating a mess.
+
+Step 9.1 done. internal/telemetry/metrics.go defines all 18 metrics from the plan — 9 counters, 4 histograms, 5 gauges — with exactly the label sets specified (no extras; the plan's own cardinality warning about not adding request ID or anything unbounded was already the discipline, so I stuck to it literally).

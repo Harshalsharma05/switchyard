@@ -7,6 +7,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/Harshalsharma05/switchyard/internal/resilience"
+	"github.com/Harshalsharma05/switchyard/internal/telemetry"
 )
 
 // NewRouter builds the public listener's handler.
@@ -25,17 +26,33 @@ import (
 //     below it. Anything inserted after this point is counted as
 //     gateway overhead, which is the honest accounting: work the
 //     gateway does is the gateway's cost.
-//  4. Logger     — outside Auth (and, from Phase 4, rate limiting and budget),
+//  4. Tracing    — opens switchyard.request, Step 8.2's root span, and wraps
+//     the whole router (probes included) for the same reason Timing
+//     and Logger do: switchyard.auth and switchyard.ratelimit must be
+//     children of it, which only holds if the span exists before Auth
+//     runs. (An earlier version of this comment placed tracing inside
+//     Auth's route group; that would have made the root span start
+//     after Auth already ran, which cannot produce the child spans
+//     Step 8.2 asks for. Corrected here rather than left to rot.)
+//  5. Logger     — outside Auth (and, from Phase 4, rate limiting and budget),
 //     so every request gets exactly one log line, including a 401 or
 //     a 429 — those middlewares reject by returning without calling
 //     next, which would make a Logger placed *inside* them silently
 //     skip logging the very requests it matters most to see.
-//  5. Auth       — mounted only on the API route group below, not on the
+//  6. Metrics    — Phase 9, mounted on the API route group only, not the
+//     whole router: switchyard_requests_total's {team, provider, model}
+//     labels mean nothing for a load balancer's liveness probe, and
+//     giving that traffic its own always-empty label combination would
+//     just be noise. Outside Auth within the group for the same reason
+//     Logger is outside it at the router level — a 401 or 429 rejection
+//     must still be counted, not silently skipped because the middleware
+//     that would have recorded it never got called.
+//  7. Auth       — mounted only on the API route group below, not on the
 //     probes: a load balancer's health check carries no API key, and
 //     Auth would 401 every one of them if it wrapped the whole router.
 //     Auth's own latency still lands inside Timing's overhead number,
 //     since Timing wraps Logger which wraps Auth.
-//  6. RateLimit   — inside Auth, since it needs the *auth.Team Auth attaches
+//  8. RateLimit   — inside Auth, since it needs the *auth.Team Auth attaches
 //     to the context. This only enforces RPM; TPM needs the decoded
 //     body, which nothing before the handler has parsed, so it is
 //     checked inside ChatCompletions instead (see reserveTokens in
@@ -44,25 +61,26 @@ import (
 // Step 4.2's budget check is not a middleware layer either, for the same
 // reason TPM isn't: it needs the decoded body to estimate a cost, so it runs
 // inside ChatCompletions too (see reserveBudget in handler.go), right after
-// the TPM reservation succeeds. Phase 8's tracing inserts alongside Auth and
-// RateLimit, inside Logger, for the same reasons those two do.
+// the TPM reservation succeeds.
 // chaos is the Step 7.5 harness, and may be nil. Note that it is injected on
 // the request path here but exposed nowhere on this router: its controls are
 // mounted on the admin listener only, so nothing reachable from the public
 // port can turn fault injection on.
-func NewRouter(resolver Resolver, authr Authenticator, limiter RateLimiter, budgetTracker BudgetTracker, calc CostCalculator, healthRecorder HealthRecorder, healthOracle HealthOracle, breakers Breakers, chaos *Chaos, retryConfig resilience.Config, log *slog.Logger, ready func() bool) http.Handler {
-	h := NewHandler(resolver, limiter, budgetTracker, calc, healthRecorder, healthOracle, breakers, chaos, retryConfig, log)
+func NewRouter(resolver Resolver, authr Authenticator, limiter RateLimiter, budgetTracker BudgetTracker, calc CostCalculator, healthRecorder HealthRecorder, healthOracle HealthOracle, breakers Breakers, chaos *Chaos, retryConfig resilience.Config, promMetrics *telemetry.Metrics, log *slog.Logger, ready func() bool) http.Handler {
+	h := NewHandler(resolver, limiter, budgetTracker, calc, healthRecorder, healthOracle, breakers, chaos, retryConfig, promMetrics, log)
 
 	r := chi.NewRouter()
 
 	r.Use(Recoverer(log))
 	r.Use(RequestID)
 	r.Use(Timing)
+	r.Use(Tracing)
 	r.Use(Logger(log))
 
 	r.Group(func(r chi.Router) {
+		r.Use(Metrics(promMetrics))
 		r.Use(Auth(authr, log))
-		r.Use(RateLimit(limiter, log))
+		r.Use(RateLimit(limiter, promMetrics, log))
 		r.Post("/v1/chat/completions", h.ChatCompletions)
 	})
 

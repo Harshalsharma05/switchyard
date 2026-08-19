@@ -12,10 +12,14 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/Harshalsharma05/switchyard/internal/budget"
 	"github.com/Harshalsharma05/switchyard/internal/provider"
 	"github.com/Harshalsharma05/switchyard/internal/ratelimit"
 	"github.com/Harshalsharma05/switchyard/internal/resilience"
+	"github.com/Harshalsharma05/switchyard/internal/telemetry"
 )
 
 // maxRequestBytes bounds an inbound body. A gateway accepting unbounded JSON is
@@ -82,6 +86,7 @@ type Handler struct {
 	breakers       Breakers
 	chaos          *Chaos
 	retryConfig    resilience.Config
+	promMetrics    *telemetry.Metrics
 	log            *slog.Logger
 }
 
@@ -97,7 +102,7 @@ type Handler struct {
 // candidate is ever skipped, which is exactly how the chain behaved before
 // Step 7.4. chaos may be nil as well — Chaos.Apply is a no-op on a nil
 // receiver, so no harness means no injected faults.
-func NewHandler(resolver Resolver, limiter RateLimiter, budgetTracker BudgetTracker, calc CostCalculator, healthRecorder HealthRecorder, health HealthOracle, breakers Breakers, chaos *Chaos, retryConfig resilience.Config, log *slog.Logger) *Handler {
+func NewHandler(resolver Resolver, limiter RateLimiter, budgetTracker BudgetTracker, calc CostCalculator, healthRecorder HealthRecorder, health HealthOracle, breakers Breakers, chaos *Chaos, retryConfig resilience.Config, promMetrics *telemetry.Metrics, log *slog.Logger) *Handler {
 	return &Handler{
 		resolver:       resolver,
 		limiter:        limiter,
@@ -108,6 +113,7 @@ func NewHandler(resolver Resolver, limiter RateLimiter, budgetTracker BudgetTrac
 		breakers:       breakers,
 		chaos:          chaos,
 		retryConfig:    retryConfig,
+		promMetrics:    promMetrics,
 		log:            log,
 	}
 }
@@ -148,19 +154,24 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// thought it was being asked for.
 	if m := metricsFrom(r.Context()); m != nil {
 		m.requestedModel = req.Model
+		m.stream = req.Stream
 	}
 
 	if !h.authorizeModel(w, r, req.Model) {
 		return
 	}
 
+	resolveCtx, resolveSpan := telemetry.Tracer().Start(r.Context(), "switchyard.route.resolve")
+
 	prov, ok := h.resolve(w, r, req.Model)
 	if !ok {
+		resolveSpan.End()
 		return
 	}
 
 	requested := resilience.Candidate{Provider: prov.Name(), Model: req.Model}
-	chain := h.chainFor(r.Context(), requested)
+	chain := h.chainFor(resolveCtx, requested)
+	resolveSpan.End()
 	if len(chain) == 0 {
 		// BuildChain returns nothing only when the team's allowlist forbids
 		// every option, the requested model's own provider included — which
@@ -178,25 +189,18 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// actual is set right before every return below it, so the deferred
-	// Reconcile — which runs after streamChatCompletions has already
-	// returned, since it is called synchronously — always settles against
-	// real usage. It starts at zero on purpose: an error return that never
-	// reassigns it means "nothing was generated," which is the correct
-	// reservation to give back in full.
+	rootSpan := trace.SpanFromContext(r.Context())
+
 	var actual int
 	defer func() {
-		// Not r.Context(): a client disconnect or a request that already hit
-		// its deadline both cancel that context, and Reconcile running on it
-		// would fail before the Redis call could even happen — silently
-		// leaking the reservation until its bucket TTL expired. See Step
-		// 3.3's DECISIONS.md entry on why the defer has to survive that.
-		ctx, cancel := context.WithTimeout(context.Background(), reconcileTimeout)
+		ctx, cancel := context.WithTimeout(trace.ContextWithSpan(context.Background(), rootSpan), reconcileTimeout)
 		defer cancel()
-		if err := reservation.Reconcile(ctx, actual); err != nil {
+		reconcileCtx, reconcileSpan := telemetry.Tracer().Start(ctx, "switchyard.ratelimit.tpm.reconcile")
+		if err := reservation.Reconcile(reconcileCtx, actual); err != nil {
 			h.log.ErrorContext(r.Context(), "reconciling TPM reservation",
 				slog.String("request_id", RequestIDFrom(r.Context())), slog.Any("error", err))
 		}
+		reconcileSpan.End()
 	}()
 
 	budgetReservation, estimatedMicros, ok := h.reserveBudget(w, r, req)
@@ -214,25 +218,20 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// difference.
 	chainBudget := &chainBudget{h: h, team: TeamFrom(r.Context()), req: req, baseMicros: estimatedMicros}
 
-	// Mirrors the TPM defer immediately above: registered right after a
-	// successful reservation, so it settles on every exit path, and reads
-	// costMicros from metrics rather than a local variable because
-	// recordCost — called from both the streaming and non-streaming paths
-	// below — is what actually knows the real cost once usage is final.
 	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), reconcileTimeout)
+		ctx, cancel := context.WithTimeout(trace.ContextWithSpan(context.Background(), rootSpan), reconcileTimeout)
 		defer cancel()
+		reconcileCtx, reconcileSpan := telemetry.Tracer().Start(ctx, "switchyard.budget.reconcile")
 		var actualCostMicros int64
 		if m := metricsFrom(r.Context()); m != nil {
 			actualCostMicros = m.costMicros
 		}
-		if err := budgetReservation.Reconcile(ctx, actualCostMicros); err != nil {
+		if err := budgetReservation.Reconcile(reconcileCtx, actualCostMicros); err != nil {
 			h.log.ErrorContext(r.Context(), "reconciling budget reservation",
 				slog.String("request_id", RequestIDFrom(r.Context())), slog.Any("error", err))
 		}
-		// The base reservation above settles the whole real cost, so every
-		// fallback top-up settles against zero and is given back in full.
-		chainBudget.reconcileExtras(ctx, h.log)
+		chainBudget.reconcileExtras(reconcileCtx, h.log)
+		reconcileSpan.End()
 	}()
 
 	if req.Stream {
@@ -327,7 +326,9 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	actual = resp.Usage.InputTokens + resp.Usage.OutputTokens
 
+	_, writeSpan := telemetry.Tracer().Start(r.Context(), "switchyard.response.write")
 	h.writeSuccess(w, r, resp)
+	writeSpan.End()
 }
 
 // reserveTokens checks and reserves the team's TPM bucket ahead of a
@@ -360,14 +361,16 @@ func (h *Handler) reserveTokens(w http.ResponseWriter, r *http.Request, req chat
 
 	amount := req.estimateTokens(defaultMaxTokens)
 
-	// checkTimeout, not r.Context() directly: bounds how long a Redis problem
-	// can add to this request before failing open, independent of the
-	// underlying client's own retry behavior. See ratelimit.go's doc comment
-	// on checkTimeout for the 3.5-second failure this measured against.
-	checkCtx, cancel := context.WithTimeout(r.Context(), checkTimeout)
+	spanCtx, span := telemetry.Tracer().Start(r.Context(), "switchyard.ratelimit.tpm")
+	checkCtx, cancel := context.WithTimeout(spanCtx, checkTimeout)
 	defer cancel()
 
 	reservation, res, err := h.limiter.Reserve(checkCtx, team.ID, ratelimit.TPM, team.RateLimits.TPM, amount, bucketTTL)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	span.End()
 	if err != nil {
 		// Fail open, same as the RPM middleware: Redis being unreachable must
 		// never be the reason a request fails.
@@ -375,8 +378,13 @@ func (h *Handler) reserveTokens(w http.ResponseWriter, r *http.Request, req chat
 			slog.String("team", team.ID), slog.Any("error", err))
 		return nil, true
 	}
+
+	if h.promMetrics != nil {
+		h.promMetrics.RatelimitTokensRemaining.WithLabelValues(team.ID, string(ratelimit.TPM)).Set(res.Remaining)
+	}
+
 	if !res.Allowed {
-		writeRateLimitError(w, h.log, ratelimit.TPM, team.RateLimits.TPM, res)
+		writeRateLimitError(w, h.log, h.promMetrics, team.ID, ratelimit.TPM, team.RateLimits.TPM, res)
 		return nil, false
 	}
 
@@ -403,7 +411,7 @@ func (h *Handler) reserveTokens(w http.ResponseWriter, r *http.Request, req chat
 		}
 		cancel()
 
-		writePriorityShedError(w, h.log, ratelimit.TPM, team.RateLimits.TPM, res)
+		writePriorityShedError(w, h.log, h.promMetrics, team.ID, ratelimit.TPM, team.RateLimits.TPM, res)
 		return nil, false
 	}
 
@@ -451,14 +459,16 @@ func (h *Handler) reserveBudget(w http.ResponseWriter, r *http.Request, req chat
 		return nil, 0, false
 	}
 
-	// checkTimeout, not r.Context() directly: same reasoning as
-	// reserveTokens's identical use of it — bounds how long a Redis problem
-	// can add to this request, independent of the underlying client's own
-	// retry behavior.
-	checkCtx, cancel := context.WithTimeout(r.Context(), checkTimeout)
+	spanCtx, span := telemetry.Tracer().Start(r.Context(), "switchyard.budget.check")
+	checkCtx, cancel := context.WithTimeout(spanCtx, checkTimeout)
 	defer cancel()
 
 	reservation, res, err := h.budgetTracker.Reserve(checkCtx, team.ID, team.MonthlyBudgetMicros, estimatedMicros)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	span.End()
 	if err != nil {
 		h.log.ErrorContext(r.Context(), "budget check failed; failing closed",
 			slog.String("team", team.ID), slog.Any("error", err))
@@ -467,15 +477,23 @@ func (h *Handler) reserveBudget(w http.ResponseWriter, r *http.Request, req chat
 	}
 
 	if !res.Allowed {
-		writeBudgetExceededError(w, h.log, team.ID, res.SpentMicros, team.MonthlyBudgetMicros)
+		if h.promMetrics != nil {
+			h.promMetrics.BudgetUtilizationRatio.WithLabelValues(team.ID).Set(utilization(res.SpentMicros, team.MonthlyBudgetMicros))
+		}
+		writeBudgetExceededError(w, h.log, h.promMetrics, team.ID, res.SpentMicros, team.MonthlyBudgetMicros)
 		return nil, 0, false
+	}
+
+	spentRatio := utilization(res.SpentMicros, team.MonthlyBudgetMicros)
+	if h.promMetrics != nil {
+		h.promMetrics.BudgetUtilizationRatio.WithLabelValues(team.ID).Set(spentRatio)
 	}
 
 	// res.SpentMicros is the total *after* admitting this request, the same
 	// "after, not reconstructed to before" reading Step 3.5 already uses for
 	// its own threshold check — the request that crosses the 80% line is the
 	// one that gets the warning.
-	if utilization(res.SpentMicros, team.MonthlyBudgetMicros) >= budgetWarnThreshold {
+	if spentRatio >= budgetWarnThreshold {
 		w.Header().Set(HeaderBudgetWarning, "true")
 		h.log.LogAttrs(r.Context(), slog.LevelWarn, "team approaching monthly budget",
 			slog.String("team", team.ID),

@@ -7,7 +7,10 @@ import (
 	"net/http"
 	"strings"
 
+	"go.opentelemetry.io/otel/codes"
+
 	"github.com/Harshalsharma05/switchyard/internal/auth"
+	"github.com/Harshalsharma05/switchyard/internal/telemetry"
 )
 
 // Authenticator is the slice of internal/auth.Registry this package needs.
@@ -37,14 +40,29 @@ func TeamFrom(ctx context.Context) *auth.Team {
 func Auth(authr Authenticator, log *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// The span's own ctx is deliberately discarded (_): nothing this
+			// middleware calls needs to nest a child span under
+			// switchyard.auth, and everything after it -- RateLimit, the
+			// handler -- must attach as a *sibling* under switchyard.request,
+			// per Step 8.2's tree. Passing r.Context() (unchanged) onward
+			// rather than the span's ctx is what keeps that true; see
+			// Tracing's doc comment in middleware.go for the same pattern.
+			_, span := telemetry.Tracer().Start(r.Context(), "switchyard.auth")
+
 			key, ok := bearerToken(r)
 			if !ok {
+				span.End()
 				writeError(w, log, http.StatusUnauthorized, "invalid_api_key",
 					`missing or malformed Authorization header; expected "Bearer <key>"`)
 				return
 			}
 
 			team, err := authr.Authenticate(key)
+			if err != nil && !errors.Is(err, auth.ErrUnknownKey) {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+			}
+			span.End()
 			if err != nil {
 				if errors.Is(err, auth.ErrUnknownKey) {
 					writeError(w, log, http.StatusUnauthorized, "invalid_api_key",
@@ -55,6 +73,10 @@ func Auth(authr Authenticator, log *slog.Logger) func(http.Handler) http.Handler
 				writeError(w, log, http.StatusInternalServerError, "internal_error",
 					"the gateway could not authenticate this request")
 				return
+			}
+
+			if m := metricsFrom(r.Context()); m != nil {
+				m.teamID = team.ID
 			}
 
 			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), teamKey, team)))

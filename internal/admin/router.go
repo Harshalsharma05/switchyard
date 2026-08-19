@@ -12,6 +12,9 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/Harshalsharma05/switchyard/internal/telemetry"
 )
 
 // Middleware is the standard net/http decorator shape.
@@ -28,7 +31,7 @@ type Middleware func(http.Handler) http.Handler
 // Route paths carry an explicit /admin prefix even though the whole listener
 // is already the admin port, leaving room for /metrics and future operator
 // endpoints to live at the root without colliding with this namespace.
-func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers ProviderLister, healthReader HealthReader, breakers BreakerResetter, chaos ChaosController, reload Reloader, log *slog.Logger, middleware ...Middleware) http.Handler {
+func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers ProviderLister, healthReader HealthReader, breakers BreakerResetter, chaos ChaosController, reload Reloader, metrics *telemetry.Metrics, log *slog.Logger, middleware ...Middleware) http.Handler {
 	r := chi.NewRouter()
 
 	for _, mw := range middleware {
@@ -37,6 +40,7 @@ func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers 
 
 	r.Get("/healthz", healthz)
 	r.Get("/readyz", readyz(ready))
+	r.Handle("/metrics", promhttp.HandlerFor(metrics.Registry(), promhttp.HandlerOpts{}))
 
 	r.Route("/admin/teams", func(r chi.Router) {
 		r.Get("/", listTeams(teams, spend, log))

@@ -10,6 +10,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
+
+	"github.com/Harshalsharma05/switchyard/internal/telemetry"
 )
 
 const (
@@ -74,7 +80,11 @@ func postJSON(ctx context.Context, cfg Config, client *http.Client, url, model s
 	ctx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buf))
+	spanCtx, span := telemetry.Tracer().Start(ctx, "switchyard.provider.http")
+	defer span.End()
+	span.SetAttributes(semconv.GenAIRequestModel(model))
+
+	req, err := http.NewRequestWithContext(spanCtx, http.MethodPost, url, bytes.NewReader(buf))
 	if err != nil {
 		return nil, fmt.Errorf("building request for %s: %w", cfg.Name, err)
 	}
@@ -82,10 +92,13 @@ func postJSON(ctx context.Context, cfg Config, client *http.Client, url, model s
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
+	telemetry.Propagator().Inject(spanCtx, propagation.HeaderCarrier(req.Header))
 
 	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, NewTransportError(cfg.Name, model, err)
 	}
 	defer resp.Body.Close()
@@ -95,7 +108,14 @@ func postJSON(ctx context.Context, cfg Config, client *http.Client, url, model s
 	// that is what the caller actually waited for.
 	latency := time.Since(start)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, NewTransportError(cfg.Name, model, err)
+	}
+
+	span.SetAttributes(semconv.HTTPResponseStatusCode(resp.StatusCode))
+	if resp.StatusCode >= 400 {
+		span.SetStatus(codes.Error, fmt.Sprintf("http %d", resp.StatusCode))
 	}
 
 	return &httpResult{
@@ -124,7 +144,11 @@ func openStream(ctx context.Context, cfg Config, client *http.Client, url, model
 		return nil, fmt.Errorf("encoding request for %s: %w", cfg.Name, err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buf))
+	spanCtx, span := telemetry.Tracer().Start(ctx, "switchyard.provider.http")
+	defer span.End()
+	span.SetAttributes(semconv.GenAIRequestModel(model))
+
+	req, err := http.NewRequestWithContext(spanCtx, http.MethodPost, url, bytes.NewReader(buf))
 	if err != nil {
 		return nil, fmt.Errorf("building request for %s: %w", cfg.Name, err)
 	}
@@ -133,11 +157,20 @@ func openStream(ctx context.Context, cfg Config, client *http.Client, url, model
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
+	telemetry.Propagator().Inject(spanCtx, propagation.HeaderCarrier(req.Header))
 
 	resp, err := client.Do(req)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, NewTransportError(cfg.Name, model, err)
 	}
+
+	span.SetAttributes(semconv.HTTPResponseStatusCode(resp.StatusCode))
+	if resp.StatusCode >= 400 {
+		span.SetStatus(codes.Error, fmt.Sprintf("http %d", resp.StatusCode))
+	}
+
 	return resp, nil
 }
 

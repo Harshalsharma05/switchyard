@@ -1,0 +1,10 @@
+# Recording rules for SwitchYard dashboards.
+groups:
+  - name: switchyard
+    interval: 15s
+    rules:
+      - record: switchyard:cost_microdollars:increase1h
+        expr: sum by (team) (increase(switchyard_cost_microdollars_total[1h]))
+
+      - record: switchyard:error_rate:ratio5m
+        expr: sum by (provider) (rate(switchyard_errors_total[5m])) / sum by (provider) (rate(switchyard_requests_total[5m]))

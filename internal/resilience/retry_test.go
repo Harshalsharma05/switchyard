@@ -76,7 +76,7 @@ func TestDoSucceedsOnFirstAttempt(t *testing.T) {
 	cfg := testConfig(t, 3, time.Millisecond)
 	calls := 0
 
-	result, err, attempts := Do(ctx, cfg, discardLog(), Labels{Provider: "p"}, func(ctx context.Context, n int) (string, error) {
+	result, err, attempts := Do(ctx, cfg, discardLog(), nil, Labels{Provider: "p"}, func(ctx context.Context, n int) (string, error) {
 		calls++
 		return "ok", nil
 	})
@@ -100,7 +100,7 @@ func TestDoNeverRetriesAPermanentFailure(t *testing.T) {
 	cfg := testConfig(t, 3, time.Millisecond)
 	calls := 0
 
-	_, err, attempts := Do(ctx, cfg, discardLog(), Labels{Provider: "p"}, func(ctx context.Context, n int) (string, error) {
+	_, err, attempts := Do(ctx, cfg, discardLog(), nil, Labels{Provider: "p"}, func(ctx context.Context, n int) (string, error) {
 		calls++
 		return "", permanentErr(provider.KindAuthFailed)
 	})
@@ -121,7 +121,7 @@ func TestDoRetriesUntilSuccess(t *testing.T) {
 	cfg := testConfig(t, 3, time.Millisecond)
 	calls := 0
 
-	result, err, attempts := Do(ctx, cfg, discardLog(), Labels{Provider: "p"}, func(ctx context.Context, n int) (string, error) {
+	result, err, attempts := Do(ctx, cfg, discardLog(), nil, Labels{Provider: "p"}, func(ctx context.Context, n int) (string, error) {
 		calls++
 		if n < 3 {
 			return "", retryableErr(provider.KindRateLimited)
@@ -148,7 +148,7 @@ func TestDoCapsAtMaxAttempts(t *testing.T) {
 	cfg := testConfig(t, 3, time.Millisecond)
 	calls := 0
 
-	_, err, attempts := Do(ctx, cfg, discardLog(), Labels{Provider: "p"}, func(ctx context.Context, n int) (string, error) {
+	_, err, attempts := Do(ctx, cfg, discardLog(), nil, Labels{Provider: "p"}, func(ctx context.Context, n int) (string, error) {
 		calls++
 		return "", retryableErr(provider.KindServerError)
 	})
@@ -175,7 +175,7 @@ func TestDoHonoursRetryAfterOverComputedBackoff(t *testing.T) {
 	retryAfter := 40 * time.Millisecond
 
 	start := time.Now()
-	_, _, attempts := Do(ctx, cfg, discardLog(), Labels{Provider: "p"}, func(ctx context.Context, n int) (string, error) {
+	_, _, attempts := Do(ctx, cfg, discardLog(), nil, Labels{Provider: "p"}, func(ctx context.Context, n int) (string, error) {
 		if n == 1 {
 			return "", &provider.Error{Kind: provider.KindRateLimited, Retryable: true, RetryAfter: retryAfter}
 		}
@@ -205,7 +205,7 @@ func TestDoStopsAtContextDeadlineDuringBackoff(t *testing.T) {
 	calls := 0
 
 	start := time.Now()
-	_, err, attempts := Do(ctx, cfg, discardLog(), Labels{Provider: "p"}, func(ctx context.Context, n int) (string, error) {
+	_, err, attempts := Do(ctx, cfg, discardLog(), nil, Labels{Provider: "p"}, func(ctx context.Context, n int) (string, error) {
 		calls++
 		return "", retryableErr(provider.KindServerError)
 	})
@@ -232,7 +232,7 @@ func TestDoUnclassifiedErrorIsNotRetried(t *testing.T) {
 	cfg := testConfig(t, 3, time.Millisecond)
 	calls := 0
 
-	_, err, attempts := Do(ctx, cfg, discardLog(), Labels{Provider: "p"}, func(ctx context.Context, n int) (string, error) {
+	_, err, attempts := Do(ctx, cfg, discardLog(), nil, Labels{Provider: "p"}, func(ctx context.Context, n int) (string, error) {
 		calls++
 		return "", errors.New("not a provider error")
 	})

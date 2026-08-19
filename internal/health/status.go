@@ -10,6 +10,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/Harshalsharma05/switchyard/internal/provider"
+	"github.com/Harshalsharma05/switchyard/internal/telemetry"
 )
 
 // Status is a provider's overall health as Step 5.3 computes it: the active
@@ -215,11 +216,12 @@ type BreakerOracle interface {
 // keeps this phase compatible with the project's <10ms gateway overhead
 // budget.
 type Monitor struct {
-	cfg      MonitorConfig
-	recorder *Recorder
-	breakers BreakerOracle
-	rdb      *redis.Client
-	log      *slog.Logger
+	cfg         MonitorConfig
+	recorder    *Recorder
+	breakers    BreakerOracle
+	rdb         *redis.Client
+	promMetrics *telemetry.Metrics
+	log         *slog.Logger
 
 	// states is built once, in NewMonitor, and never mutated afterward — the
 	// same reasoning as Recorder.windows — so concurrent Observe/Status calls
@@ -242,7 +244,7 @@ type Monitor struct {
 // leaves the optimistic Healthy default in place.
 // breakers may be nil, which simply removes that signal from classify — the
 // shape every optional dependency in this project takes.
-func NewMonitor(providers []provider.Provider, recorder *Recorder, breakers BreakerOracle, rdb *redis.Client, log *slog.Logger, cfg MonitorConfig) (*Monitor, error) {
+func NewMonitor(providers []provider.Provider, recorder *Recorder, breakers BreakerOracle, rdb *redis.Client, promMetrics *telemetry.Metrics, log *slog.Logger, cfg MonitorConfig) (*Monitor, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -254,8 +256,13 @@ func NewMonitor(providers []provider.Provider, recorder *Recorder, breakers Brea
 		order = append(order, p.Name())
 	}
 
-	m := &Monitor{cfg: cfg, recorder: recorder, breakers: breakers, rdb: rdb, log: log, states: states, order: order}
+	m := &Monitor{cfg: cfg, recorder: recorder, breakers: breakers, rdb: rdb, promMetrics: promMetrics, log: log, states: states, order: order}
 	m.restoreFromRedis(context.Background(), providers)
+	if m.promMetrics != nil {
+		for _, name := range order {
+			m.promMetrics.ProviderHealth.WithLabelValues(name, "").Set(healthStatusValue(states[name].status))
+		}
+	}
 	return m, nil
 }
 
@@ -442,7 +449,24 @@ func (m *Monitor) setStatus(ctx context.Context, providerName string, st *provid
 
 	st.history.append(Transition{At: time.Now(), From: old, To: newStatus, Reason: reason})
 
+	if m.promMetrics != nil {
+		m.promMetrics.ProviderHealth.WithLabelValues(providerName, "").Set(healthStatusValue(newStatus))
+	}
+
 	m.persist(ctx, providerName, newStatus)
+}
+
+func healthStatusValue(s Status) float64 {
+	switch s {
+	case StatusDown:
+		return 0
+	case StatusDegraded:
+		return 1
+	case StatusHealthy:
+		return 2
+	default:
+		return -1
+	}
 }
 
 // persist writes the new status to Redis, best-effort. A failure here is

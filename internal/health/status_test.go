@@ -43,7 +43,7 @@ func TestMonitorConfigValidation(t *testing.T) {
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			providers := []provider.Provider{&provider.Mock{ProviderName: "p"}}
-			_, err := NewMonitor(providers, NewRecorder(providers), nil, nil, log, tt.cfg)
+			_, err := NewMonitor(providers, NewRecorder(providers), nil, nil, nil, log, tt.cfg)
 			if tt.wantErr && err == nil {
 				t.Fatalf("NewMonitor() error = nil, want error")
 			}
@@ -60,7 +60,7 @@ func TestMonitorConfigValidation(t *testing.T) {
 func TestMonitorStartsHealthy(t *testing.T) {
 	log, _ := newTestLogger()
 	providers := []provider.Provider{&provider.Mock{ProviderName: "p"}}
-	m, err := NewMonitor(providers, NewRecorder(providers), nil, nil, log, testMonitorConfig())
+	m, err := NewMonitor(providers, NewRecorder(providers), nil, nil, nil, log, testMonitorConfig())
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestMonitorConsecutivePingFailuresGoDown(t *testing.T) {
 	log, _ := newTestLogger()
 	providers := []provider.Provider{&provider.Mock{ProviderName: "p"}}
 	cfg := testMonitorConfig()
-	m, err := NewMonitor(providers, NewRecorder(providers), nil, nil, log, cfg)
+	m, err := NewMonitor(providers, NewRecorder(providers), nil, nil, nil, log, cfg)
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestMonitorErrorRateThresholdsAreImmediate(t *testing.T) {
 	log, _ := newTestLogger()
 	providers := []provider.Provider{&provider.Mock{ProviderName: "p"}}
 	recorder := NewRecorder(providers)
-	m, err := NewMonitor(providers, recorder, nil, nil, log, testMonitorConfig())
+	m, err := NewMonitor(providers, recorder, nil, nil, nil, log, testMonitorConfig())
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestMonitorHardErrorRateGoesDownImmediately(t *testing.T) {
 	log, _ := newTestLogger()
 	providers := []provider.Provider{&provider.Mock{ProviderName: "p"}}
 	recorder := NewRecorder(providers)
-	m, err := NewMonitor(providers, recorder, nil, nil, log, testMonitorConfig())
+	m, err := NewMonitor(providers, recorder, nil, nil, nil, log, testMonitorConfig())
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestMonitorRecoveryRequiresConsecutiveHealthySignals(t *testing.T) {
 	log, _ := newTestLogger()
 	providers := []provider.Provider{&provider.Mock{ProviderName: "p"}}
 	cfg := testMonitorConfig()
-	m, err := NewMonitor(providers, NewRecorder(providers), nil, nil, log, cfg)
+	m, err := NewMonitor(providers, NewRecorder(providers), nil, nil, nil, log, cfg)
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestMonitorRecoveryStreakResetsOnABadSignal(t *testing.T) {
 	log, _ := newTestLogger()
 	providers := []provider.Provider{&provider.Mock{ProviderName: "p"}}
 	cfg := testMonitorConfig()
-	m, err := NewMonitor(providers, NewRecorder(providers), nil, nil, log, cfg)
+	m, err := NewMonitor(providers, NewRecorder(providers), nil, nil, nil, log, cfg)
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -231,7 +231,7 @@ func TestMonitorP99AboveBaselineDegrades(t *testing.T) {
 	log, _ := newTestLogger()
 	providers := []provider.Provider{&provider.Mock{ProviderName: "p"}}
 	recorder := NewRecorder(providers)
-	m, err := NewMonitor(providers, recorder, nil, nil, log, testMonitorConfig())
+	m, err := NewMonitor(providers, recorder, nil, nil, nil, log, testMonitorConfig())
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -256,7 +256,7 @@ func TestMonitorP99AboveBaselineDegrades(t *testing.T) {
 func TestMonitorUnknownProviderIsFailOpenHealthy(t *testing.T) {
 	log, _ := newTestLogger()
 	providers := []provider.Provider{&provider.Mock{ProviderName: "known"}}
-	m, err := NewMonitor(providers, NewRecorder(providers), nil, nil, log, testMonitorConfig())
+	m, err := NewMonitor(providers, NewRecorder(providers), nil, nil, nil, log, testMonitorConfig())
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestMonitorSnapshotReportsCurrentSignal(t *testing.T) {
 	log, _ := newTestLogger()
 	providers := []provider.Provider{&provider.Mock{ProviderName: "p"}}
 	recorder := NewRecorder(providers)
-	m, err := NewMonitor(providers, recorder, nil, nil, log, testMonitorConfig())
+	m, err := NewMonitor(providers, recorder, nil, nil, nil, log, testMonitorConfig())
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -316,7 +316,7 @@ func TestMonitorSnapshotHistoryTracksTransitions(t *testing.T) {
 	log, _ := newTestLogger()
 	providers := []provider.Provider{&provider.Mock{ProviderName: "p"}}
 	cfg := testMonitorConfig()
-	m, err := NewMonitor(providers, NewRecorder(providers), nil, nil, log, cfg)
+	m, err := NewMonitor(providers, NewRecorder(providers), nil, nil, nil, log, cfg)
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -384,7 +384,7 @@ func TestMonitorSnapshotsPreservesRegistryOrder(t *testing.T) {
 		&provider.Mock{ProviderName: "second"},
 		&provider.Mock{ProviderName: "third"},
 	}
-	m, err := NewMonitor(providers, NewRecorder(providers), nil, nil, log, testMonitorConfig())
+	m, err := NewMonitor(providers, NewRecorder(providers), nil, nil, nil, log, testMonitorConfig())
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -409,7 +409,7 @@ func TestMonitorAllDown(t *testing.T) {
 		&provider.Mock{ProviderName: "b"},
 	}
 	cfg := testMonitorConfig()
-	m, err := NewMonitor(providers, NewRecorder(providers), nil, nil, log, cfg)
+	m, err := NewMonitor(providers, NewRecorder(providers), nil, nil, nil, log, cfg)
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -456,7 +456,7 @@ func TestMonitorOpenBreakerDegradesAProvider(t *testing.T) {
 	providers := []provider.Provider{&provider.Mock{ProviderName: "p"}}
 	breakers := stubBreakerOracle{open: map[string]bool{"p": true}}
 
-	m, err := NewMonitor(providers, NewRecorder(providers), breakers, nil, log, testMonitorConfig())
+	m, err := NewMonitor(providers, NewRecorder(providers), breakers, nil, nil, log, testMonitorConfig())
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -489,7 +489,7 @@ func TestMonitorOpenBreakerIsNeverDown(t *testing.T) {
 	providers := []provider.Provider{&provider.Mock{ProviderName: "p"}}
 	breakers := stubBreakerOracle{open: map[string]bool{"p": true}}
 
-	m, err := NewMonitor(providers, NewRecorder(providers), breakers, nil, log, testMonitorConfig())
+	m, err := NewMonitor(providers, NewRecorder(providers), breakers, nil, nil, log, testMonitorConfig())
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -514,7 +514,7 @@ func TestMonitorClosedBreakerLeavesStatusAlone(t *testing.T) {
 	providers := []provider.Provider{&provider.Mock{ProviderName: "p"}}
 	breakers := stubBreakerOracle{open: map[string]bool{"other": true}}
 
-	m, err := NewMonitor(providers, NewRecorder(providers), breakers, nil, log, testMonitorConfig())
+	m, err := NewMonitor(providers, NewRecorder(providers), breakers, nil, nil, log, testMonitorConfig())
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}
@@ -536,7 +536,7 @@ func TestMonitorBreakerClosingAllowsRecovery(t *testing.T) {
 	breakers := stubBreakerOracle{open: map[string]bool{"p": true}}
 	cfg := testMonitorConfig()
 
-	m, err := NewMonitor(providers, NewRecorder(providers), breakers, nil, log, cfg)
+	m, err := NewMonitor(providers, NewRecorder(providers), breakers, nil, nil, log, cfg)
 	if err != nil {
 		t.Fatalf("NewMonitor() error: %v", err)
 	}

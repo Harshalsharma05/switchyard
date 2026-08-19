@@ -10,7 +10,12 @@ import (
 	"strconv"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
+	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
+
 	"github.com/Harshalsharma05/switchyard/internal/provider"
+	"github.com/Harshalsharma05/switchyard/internal/telemetry"
 )
 
 // Response headers SwitchYard adds to every reply. They exist so a caller can
@@ -65,6 +70,9 @@ func RequestIDFrom(ctx context.Context) string {
 // attributes from the same struct on the same goroutine.
 type requestMetrics struct {
 	start time.Time
+
+	teamID string
+	stream bool
 
 	// providerName and servedModel stay empty when no provider was reached —
 	// an unknown model or a request rejected during validation.
@@ -253,6 +261,100 @@ func newRequestID() string {
 	var b [16]byte
 	rand.Read(b[:])
 	return hex.EncodeToString(b[:])
+}
+
+// Tracing opens the Phase 8 root span, switchyard.request, and attaches it
+// to the request's context so every step below -- middleware and handler
+// alike -- can start a child span from ctx.
+//
+// It is mounted outermost on the router, alongside Timing and Logger,
+// rather than only inside the authenticated route group. The span tree Step
+// 8.2 specifies makes switchyard.auth and switchyard.ratelimit children of
+// switchyard.request, which is only possible if this span already exists by
+// the time Auth runs -- so it has to wrap the whole router, /healthz and
+// /readyz included, the same reach Timing and Logger already have.
+//
+// The span ends when next.ServeHTTP returns, which for a streaming request
+// is after the whole stream has been written -- ChatCompletions calls
+// streamChatCompletions synchronously and only returns once it's done -- so
+// switchyard.request's duration is genuinely the full request lifecycle,
+// not time-to-first-byte the way the overhead header is.
+func Tracing(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		extracted := telemetry.Propagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+		ctx, span := telemetry.Tracer().Start(extracted, "switchyard.request")
+
+		next.ServeHTTP(w, r.WithContext(ctx))
+
+		if m := metricsFrom(ctx); m != nil {
+			attrs := []attribute.KeyValue{
+				attribute.String("switchyard.team.id", m.teamID),
+				attribute.String("switchyard.request.id", RequestIDFrom(ctx)),
+				attribute.Int("switchyard.tokens.total", m.usage.InputTokens+m.usage.OutputTokens),
+				attribute.Int64("switchyard.cost.micros", m.costMicros),
+				attribute.Bool("switchyard.fallback", m.fellBack),
+				attribute.String("switchyard.cache.status", "disabled"),
+			}
+			if m.requestedModel != "" {
+				attrs = append(attrs, semconv.GenAIRequestModel(m.requestedModel))
+			}
+			if m.servedModel != "" {
+				attrs = append(attrs, semconv.GenAIResponseModel(m.servedModel))
+			}
+			span.SetAttributes(attrs...)
+		}
+
+		span.End()
+	})
+}
+
+func Metrics(m *telemetry.Metrics) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		if m == nil {
+			return next
+		}
+
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			rec := &recorder{ResponseWriter: w}
+			next.ServeHTTP(rec, r)
+
+			metrics := metricsFrom(r.Context())
+			if metrics == nil {
+				return
+			}
+
+			status := rec.status
+			if status == 0 {
+				status = http.StatusOK
+			}
+
+			team := metrics.teamID
+			provider := metrics.providerName
+			model := metrics.servedModel
+
+			m.RequestsTotal.WithLabelValues(team, provider, model, strconv.Itoa(status)).Inc()
+			m.RequestDuration.WithLabelValues(provider, model).Observe(time.Since(metrics.start).Seconds())
+			m.GatewayOverhead.Observe(metrics.overhead().Seconds())
+
+			if provider != "" {
+				if metrics.stream {
+					m.TimeToFirstToken.WithLabelValues(provider, model).Observe(metrics.providerTime.Seconds())
+				} else {
+					m.ProviderDuration.WithLabelValues(provider, model).Observe(metrics.providerTime.Seconds())
+				}
+			}
+
+			if metrics.usage.InputTokens != 0 {
+				m.TokensTotal.WithLabelValues(team, provider, model, "input").Add(float64(metrics.usage.InputTokens))
+			}
+			if metrics.usage.OutputTokens != 0 {
+				m.TokensTotal.WithLabelValues(team, provider, model, "output").Add(float64(metrics.usage.OutputTokens))
+			}
+			if metrics.costMicros != 0 {
+				m.CostMicrodollarsTotal.WithLabelValues(team, provider, model).Add(float64(metrics.costMicros))
+			}
+		})
+	}
 }
 
 // recorder wraps a ResponseWriter to capture what was sent.

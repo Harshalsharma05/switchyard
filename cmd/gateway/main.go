@@ -26,6 +26,7 @@ import (
 	"github.com/Harshalsharma05/switchyard/internal/proxy"
 	"github.com/Harshalsharma05/switchyard/internal/ratelimit"
 	"github.com/Harshalsharma05/switchyard/internal/resilience"
+	"github.com/Harshalsharma05/switchyard/internal/telemetry"
 )
 
 // Server settings come from the environment rather than configs/, because they
@@ -100,6 +101,23 @@ const (
 	// fault injection: the safe value is the one you get by forgetting.
 	defaultEnvironment = "production"
 
+	// Phase 8 tracing. defaultOTLPEndpoint is Jaeger's OTLP/HTTP receiver,
+	// reached over the docker-compose network or localhost in dev.
+	// defaultTraceSampleRatio: the plan asks for 100% in dev, so that is the
+	// fallback here; a "production" deployment turns it down with
+	// SWITCHYARD_TRACE_SAMPLE_RATIO. SWITCHYARD_ENV -- already read below
+	// for the chaos harness -- doubles as the trace resource's
+	// deployment.environment.name, rather than inventing a second
+	// environment variable to say the same thing.
+	defaultOTLPEndpoint     = "localhost:4318"
+	defaultServiceVersion   = "dev"
+	defaultTraceSampleRatio = 1.0
+
+	// Bounds the final flush on shutdown, same reasoning as
+	// defaultDrainTimeout: a slow exporter gets a fair window to deliver
+	// whatever it's still holding, not an unbounded wait on process exit.
+	defaultTracingShutdownTimeout = 5 * time.Second
+
 	// readHeaderTimeout bounds how long a client may take to send its headers,
 	// which is the Slowloris defence. Note that WriteTimeout is deliberately
 	// left unset: a provider call can legitimately take 30 seconds and a Phase 2
@@ -135,6 +153,41 @@ func run() error {
 
 	for _, p := range initial.registry.Providers() {
 		log.Info("provider registered", slog.String("provider", p.Name()))
+	}
+
+	// Phase 8: tracing setup, ahead of Redis. It has no dependency on
+	// anything wired below and nothing below it depends on tracing to
+	// function -- Step 8.2's spans are additive to a request that already
+	// works without them. Setup itself never dials Jaeger (see its doc
+	// comment), so a Jaeger that is not running yet cannot delay or fail
+	// boot -- the same "must never be the reason a request fails" guarantee
+	// CLAUDE.md states for telemetry, applied here to startup as well.
+	shutdownTracing, err := telemetry.Setup(context.Background(), telemetry.Config{
+		ServiceName:    "switchyard",
+		ServiceVersion: envOr("SWITCHYARD_SERVICE_VERSION", defaultServiceVersion),
+		Environment:    envOr("SWITCHYARD_ENV", defaultEnvironment),
+		OTLPEndpoint:   envOr("SWITCHYARD_OTLP_ENDPOINT", defaultOTLPEndpoint),
+		SampleRatio:    floatOr("SWITCHYARD_TRACE_SAMPLE_RATIO", defaultTraceSampleRatio),
+	}, log)
+	if err != nil {
+		return fmt.Errorf("setting up tracing: %w", err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), defaultTracingShutdownTimeout)
+		defer cancel()
+		if err := shutdownTracing(ctx); err != nil {
+			// Logged, not returned: a slow or failed final flush on the way
+			// out is not a reason to report the shutdown itself as failed.
+			log.Warn("tracing shutdown", slog.Any("error", err))
+		}
+	}()
+
+	promMetrics, err := telemetry.NewMetrics()
+	if err != nil {
+		return fmt.Errorf("building metrics registry: %w", err)
+	}
+	if err := promMetrics.RegisterRuntimeCollectors(); err != nil {
+		return fmt.Errorf("registering runtime collectors: %w", err)
 	}
 
 	// redis.NewClient never dials eagerly — the connection is opened lazily on
@@ -207,6 +260,7 @@ func run() error {
 		healthRecorder,
 		breakerRegistry,
 		redisClient,
+		promMetrics,
 		log,
 		health.MonitorConfig{
 			DegradedErrorRate:       floatOr("SWITCHYARD_HEALTH_DEGRADED_ERROR_RATE", defaultDegradedErrorRate),
@@ -276,13 +330,13 @@ func run() error {
 		// (Step 5.2's passive samples), healthMonitor the read side Step 6.2's
 		// chain ordering consults to skip a down provider and sink a degraded
 		// one.
-		Handler:           proxy.NewRouter(store, store, limiter, budgetTracker, store, healthRecorder, healthMonitor, breakerRegistry, chaos, retryConfig, log, isReady),
+		Handler:           proxy.NewRouter(store, store, limiter, budgetTracker, store, healthRecorder, healthMonitor, breakerRegistry, chaos, retryConfig, promMetrics, log, isReady),
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
 
 	adminSrv := &http.Server{
 		Addr: envOr("SWITCHYARD_ADMIN_ADDR", defaultAdminAddr),
-		Handler: admin.NewRouter(isReady, store, budgetTracker, store, healthMonitor, breakerRegistry, chaosAdapter{chaos}, newReloader(store, providersPath, teamsPath), log,
+		Handler: admin.NewRouter(isReady, store, budgetTracker, store, healthMonitor, breakerRegistry, chaosAdapter{chaos}, newReloader(store, providersPath, teamsPath), promMetrics, log,
 			proxy.Recoverer(log),
 			proxy.RequestID,
 			proxy.Logger(log),
@@ -400,7 +454,7 @@ func newLogger() *slog.Logger {
 		level = slog.LevelInfo
 	}
 
-	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
+	return slog.New(telemetry.NewLogHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
 }
 
 func envOr(key, fallback string) string {

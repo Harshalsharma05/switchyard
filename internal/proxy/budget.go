@@ -8,6 +8,7 @@ import (
 
 	"github.com/Harshalsharma05/switchyard/internal/auth"
 	"github.com/Harshalsharma05/switchyard/internal/budget"
+	"github.com/Harshalsharma05/switchyard/internal/telemetry"
 )
 
 // HeaderBudgetWarning is set on an otherwise-successful response once a
@@ -54,7 +55,10 @@ func formatUSD(micros int64) string {
 
 // writeBudgetExceededError sends a 402 for a request denied because it would
 // push the team's spend for the current period over its monthly cap.
-func writeBudgetExceededError(w http.ResponseWriter, log *slog.Logger, teamID string, spentMicros, capMicros int64) {
+func writeBudgetExceededError(w http.ResponseWriter, log *slog.Logger, metrics *telemetry.Metrics, teamID string, spentMicros, capMicros int64) {
+	if metrics != nil {
+		metrics.BudgetRejectionsTotal.WithLabelValues(teamID).Inc()
+	}
 	writeError(w, log, http.StatusPaymentRequired, "budget_exceeded",
 		fmt.Sprintf("team %q has spent %s of its %s monthly budget; this request was not made",
 			teamID, formatUSD(spentMicros), formatUSD(capMicros)))

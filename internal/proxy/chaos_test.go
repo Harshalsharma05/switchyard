@@ -346,7 +346,7 @@ func TestChaosDrivesFallbackEndToEnd(t *testing.T) {
 	}
 	srv := httptest.NewServer(NewRouter(resolver, stubAuthenticator{team: tieredTeam()}, stubRateLimiter{},
 		stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, nil, nil, chaos,
-		noRetryConfig(t), discardLogger(), func() bool { return true }))
+		noRetryConfig(t), nil, discardLogger(), func() bool { return true }))
 	t.Cleanup(srv.Close)
 
 	resp := post(t, srv, `{"model":"fast-a","messages":[{"role":"user","content":"hi"}]}`)
@@ -386,7 +386,7 @@ func TestChaosFeedsTheHealthRecorder(t *testing.T) {
 	}
 	srv := httptest.NewServer(NewRouter(resolver, stubAuthenticator{team: tieredTeam()}, stubRateLimiter{},
 		stubBudgetTracker{}, stubCostCalculator{}, recorder, nil, nil, chaos,
-		noRetryConfig(t), discardLogger(), func() bool { return true }))
+		noRetryConfig(t), nil, discardLogger(), func() bool { return true }))
 	t.Cleanup(srv.Close)
 
 	resp := post(t, srv, `{"model":"fast-a","messages":[{"role":"user","content":"hi"}]}`)
@@ -405,7 +405,7 @@ func TestChaosIsNotReachableFromThePublicRouter(t *testing.T) {
 	chaos := devChaos(t)
 	srv := httptest.NewServer(NewRouter(stubResolver{}, stubAuthenticator{team: &auth.Team{ID: "t"}}, stubRateLimiter{},
 		stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, nil, nil, chaos,
-		noRetryConfig(t), discardLogger(), func() bool { return true }))
+		noRetryConfig(t), nil, discardLogger(), func() bool { return true }))
 	t.Cleanup(srv.Close)
 
 	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodDelete} {

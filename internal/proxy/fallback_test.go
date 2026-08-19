@@ -60,7 +60,7 @@ func newTieredServer(t *testing.T, team *auth.Team, oracle HealthOracle, groq, o
 	}
 	srv := httptest.NewServer(NewRouter(resolver, stubAuthenticator{team: team}, stubRateLimiter{},
 		stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, oracle, nil, nil,
-		noRetryConfig(t), discardLogger(), func() bool { return true }))
+		noRetryConfig(t), nil, discardLogger(), func() bool { return true }))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -205,7 +205,7 @@ func TestNoTierMeansNoFallback(t *testing.T) {
 	resolver := stubResolver{byModel: map[string]provider.Provider{"fast-a": groq, "fast-b": ollama}}
 	srv := httptest.NewServer(NewRouter(resolver, stubAuthenticator{team: tieredTeam()}, stubRateLimiter{},
 		stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, nil, nil, nil,
-		noRetryConfig(t), discardLogger(), func() bool { return true }))
+		noRetryConfig(t), nil, discardLogger(), func() bool { return true }))
 	t.Cleanup(srv.Close)
 
 	resp := post(t, srv, `{"model":"fast-a","messages":[{"role":"user","content":"hi"}]}`)
@@ -244,7 +244,7 @@ func newTieredServerWithRetry(t *testing.T, cfg resilience.Config, groq, ollama 
 	}
 	srv := httptest.NewServer(NewRouter(resolver, stubAuthenticator{team: tieredTeam()}, stubRateLimiter{},
 		stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, nil, nil, nil,
-		cfg, discardLogger(), func() bool { return true }))
+		cfg, nil, discardLogger(), func() bool { return true }))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -293,7 +293,7 @@ func TestSingleCandidateFailureKeepsItsOwnStatus(t *testing.T) {
 	resolver := stubResolver{byModel: map[string]provider.Provider{"fast-a": groq}}
 	srv := httptest.NewServer(NewRouter(resolver, stubAuthenticator{team: tieredTeam()}, stubRateLimiter{},
 		stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, nil, nil, nil,
-		noRetryConfig(t), discardLogger(), func() bool { return true }))
+		noRetryConfig(t), nil, discardLogger(), func() bool { return true }))
 	t.Cleanup(srv.Close)
 
 	resp := post(t, srv, `{"model":"fast-a","messages":[{"role":"user","content":"hi"}]}`)
@@ -420,7 +420,7 @@ func newCostAwareServer(t *testing.T, tracker BudgetTracker, calc CostCalculator
 
 	srv := httptest.NewServer(NewRouter(resolver, stubAuthenticator{team: team}, stubRateLimiter{},
 		tracker, calc, stubHealthRecorder{}, nil, nil, nil,
-		noRetryConfig(t), logTo, func() bool { return true }))
+		noRetryConfig(t), nil, logTo, func() bool { return true }))
 	t.Cleanup(srv.Close)
 	return srv
 }

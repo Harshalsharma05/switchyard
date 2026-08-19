@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Harshalsharma05/switchyard/internal/provider"
+	"github.com/Harshalsharma05/switchyard/internal/telemetry"
 )
 
 // Config controls Step 6.1's retry loop. It is process-level (env vars in
@@ -131,7 +132,7 @@ const maxBackoffExponent = 20
 // requires a *provider.Error to build a meaningful response, and a plain
 // context.DeadlineExceeded would read as an unclassified internal bug
 // instead of the provider failure that actually caused it.
-func Do[T any](ctx context.Context, cfg Config, log *slog.Logger, labels Labels, attempt func(ctx context.Context, n int) (T, error)) (result T, err error, attempts int) {
+func Do[T any](ctx context.Context, cfg Config, log *slog.Logger, metrics *telemetry.Metrics, labels Labels, attempt func(ctx context.Context, n int) (T, error)) (result T, err error, attempts int) {
 	for n := 1; n <= cfg.MaxAttempts; n++ {
 		result, err = attempt(ctx, n)
 		attempts = n
@@ -157,6 +158,9 @@ func Do[T any](ctx context.Context, cfg Config, log *slog.Logger, labels Labels,
 			slog.Duration("delay", delay),
 			slog.String("reason", string(provErr.Kind)),
 		)
+		if metrics != nil {
+			metrics.RetriesTotal.WithLabelValues(labels.Provider, labels.Model, string(provErr.Kind)).Inc()
+		}
 
 		select {
 		case <-ctx.Done():

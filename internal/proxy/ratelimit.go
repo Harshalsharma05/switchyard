@@ -10,8 +10,11 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/codes"
+
 	"github.com/Harshalsharma05/switchyard/internal/auth"
 	"github.com/Harshalsharma05/switchyard/internal/ratelimit"
+	"github.com/Harshalsharma05/switchyard/internal/telemetry"
 )
 
 // RateLimiter is the slice of internal/ratelimit.Limiter this package needs.
@@ -93,7 +96,7 @@ func shouldShedForPriority(team *auth.Team, capacity int, res ratelimit.Result) 
 // needs the decoded body, and nothing before the handler has parsed one —
 // the same constraint Step 3.1 hit with the model allowlist. TPM enforcement
 // lives in handler.go instead, right after decode.
-func RateLimit(limiter RateLimiter, log *slog.Logger) func(http.Handler) http.Handler {
+func RateLimit(limiter RateLimiter, metrics *telemetry.Metrics, log *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			team := TeamFrom(r.Context())
@@ -107,10 +110,22 @@ func RateLimit(limiter RateLimiter, log *slog.Logger) func(http.Handler) http.Ha
 				return
 			}
 
-			ctx, cancel := context.WithTimeout(r.Context(), checkTimeout)
+			// Span started from r.Context(), not carried forward -- same
+			// sibling-not-nested reasoning as Auth's span in auth.go. The
+			// checkTimeout derivation below nests under the span (that
+			// Redis call *is* the work switchyard.ratelimit represents);
+			// next.ServeHTTP below goes back to r.Context() unchanged.
+			spanCtx, span := telemetry.Tracer().Start(r.Context(), "switchyard.ratelimit")
+
+			ctx, cancel := context.WithTimeout(spanCtx, checkTimeout)
 			defer cancel()
 
 			res, err := limiter.Consume(ctx, team.ID, ratelimit.RPM, team.RateLimits.RPM, 1, bucketTTL)
+			if err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+			}
+			span.End()
 			if err != nil {
 				// Fail open: the gateway must never be the reason a request
 				// fails, and Redis being unreachable is exactly that class of
@@ -122,8 +137,12 @@ func RateLimit(limiter RateLimiter, log *slog.Logger) func(http.Handler) http.Ha
 				return
 			}
 
+			if metrics != nil {
+				metrics.RatelimitTokensRemaining.WithLabelValues(team.ID, string(ratelimit.RPM)).Set(res.Remaining)
+			}
+
 			if !res.Allowed {
-				writeRateLimitError(w, log, ratelimit.RPM, team.RateLimits.RPM, res)
+				writeRateLimitError(w, log, metrics, team.ID, ratelimit.RPM, team.RateLimits.RPM, res)
 				return
 			}
 
@@ -135,7 +154,7 @@ func RateLimit(limiter RateLimiter, log *slog.Logger) func(http.Handler) http.Ha
 			// threshold. Refunding it would erase the backpressure this
 			// exists to apply and let a naive immediate retry look free.
 			if shouldShedForPriority(team, team.RateLimits.RPM, res) {
-				writePriorityShedError(w, log, ratelimit.RPM, team.RateLimits.RPM, res)
+				writePriorityShedError(w, log, metrics, team.ID, ratelimit.RPM, team.RateLimits.RPM, res)
 				return
 			}
 
@@ -189,7 +208,10 @@ func writeRateLimitHeaders(w http.ResponseWriter, kind ratelimit.LimitType, limi
 
 // writeRateLimitError sends a 429 for the hard-exhaustion case: the bucket
 // itself could not admit this request.
-func writeRateLimitError(w http.ResponseWriter, log *slog.Logger, kind ratelimit.LimitType, limit int, res ratelimit.Result) {
+func writeRateLimitError(w http.ResponseWriter, log *slog.Logger, metrics *telemetry.Metrics, teamID string, kind ratelimit.LimitType, limit int, res ratelimit.Result) {
+	if metrics != nil {
+		metrics.RatelimitRejectionsTotal.WithLabelValues(teamID, string(kind)).Inc()
+	}
 	retryAfterSeconds := writeRateLimitHeaders(w, kind, limit, res)
 	writeError(w, log, http.StatusTooManyRequests, "rate_limit_exceeded",
 		fmt.Sprintf("%s rate limit exceeded; retry after %d seconds", strings.ToUpper(string(kind)), retryAfterSeconds))
@@ -199,7 +221,10 @@ func writeRateLimitError(w http.ResponseWriter, log *slog.Logger, kind ratelimit
 // this request, but the caller is a batch-priority team already past the
 // shed threshold, so the request is rejected to leave headroom rather than
 // let batch traffic run its own bucket all the way to zero.
-func writePriorityShedError(w http.ResponseWriter, log *slog.Logger, kind ratelimit.LimitType, limit int, res ratelimit.Result) {
+func writePriorityShedError(w http.ResponseWriter, log *slog.Logger, metrics *telemetry.Metrics, teamID string, kind ratelimit.LimitType, limit int, res ratelimit.Result) {
+	if metrics != nil {
+		metrics.RatelimitRejectionsTotal.WithLabelValues(teamID, string(kind)).Inc()
+	}
 	retryAfterSeconds := writeRateLimitHeaders(w, kind, limit, res)
 	writeError(w, log, http.StatusTooManyRequests, "priority_shed",
 		fmt.Sprintf("%s batch-priority traffic is shed once the bucket drops below %.0f%% remaining; retry after %d seconds or from a realtime-priority team",

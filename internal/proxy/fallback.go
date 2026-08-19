@@ -8,9 +8,14 @@ import (
 	"net/http"
 	"strconv"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
+
 	"github.com/Harshalsharma05/switchyard/internal/health"
 	"github.com/Harshalsharma05/switchyard/internal/provider"
 	"github.com/Harshalsharma05/switchyard/internal/resilience"
+	"github.com/Harshalsharma05/switchyard/internal/telemetry"
 )
 
 // HealthOracle is the slice of health.Monitor this package needs for Step
@@ -146,14 +151,26 @@ func runChain[T any](
 		// probe slot, but worth knowing when reading a recovering provider's
 		// access log.
 		breaker := h.breakerFor(cand)
-		if breaker != nil && !breaker.Allow(ctx) {
-			h.log.LogAttrs(ctx, slog.LevelInfo, "skipping candidate on open circuit breaker",
-				slog.String("request_id", RequestIDFrom(ctx)),
-				slog.String("provider", cand.Provider),
-				slog.String("model", cand.Model),
+		if breaker != nil {
+			breakerCtx, breakerSpan := telemetry.Tracer().Start(ctx, "switchyard.breaker.check")
+			beforeState := breaker.State()
+			allowed := breaker.Allow(breakerCtx)
+			h.recordBreakerState(cand, beforeState, breaker.State())
+			breakerSpan.SetAttributes(
+				semconv.GenAIProviderNameKey.String(cand.Provider),
+				semconv.GenAIRequestModel(cand.Model),
+				attribute.Bool("switchyard.breaker.allowed", allowed),
 			)
-			failures = append(failures, chainFailure{candidate: cand, err: errBreakerOpen})
-			continue
+			breakerSpan.End()
+			if !allowed {
+				h.log.LogAttrs(ctx, slog.LevelInfo, "skipping candidate on open circuit breaker",
+					slog.String("request_id", RequestIDFrom(ctx)),
+					slog.String("provider", cand.Provider),
+					slog.String("model", cand.Model),
+				)
+				failures = append(failures, chainFailure{candidate: cand, err: errBreakerOpen})
+				continue
+			}
 		}
 
 		// Step 6.4's re-check, before any call is made: a candidate the team
@@ -174,7 +191,7 @@ func runChain[T any](
 		}
 
 		if i > 0 {
-			logFallback(ctx, h.log, chain[0], cand, costDelta, failures)
+			logFallback(ctx, h.log, h.promMetrics, chain[0], cand, costDelta, failures)
 		}
 
 		prov, resolveErr := h.resolver.ForModel(cand.Model)
@@ -200,10 +217,42 @@ func runChain[T any](
 			cfg.MaxAttempts = remaining
 		}
 
-		value, attemptErr, attempts := resilience.Do(ctx, cfg, h.log,
+		isFallback := i > 0
+		value, attemptErr, attempts := resilience.Do(ctx, cfg, h.log, h.promMetrics,
 			resilience.Labels{Provider: cand.Provider, Model: cand.Model},
-			func(ctx context.Context, _ int) (T, error) {
-				return call(ctx, prov, cand)
+			func(attemptCtx context.Context, n int) (T, error) {
+				spanCtx, span := telemetry.Tracer().Start(attemptCtx, "switchyard.provider.call")
+				span.SetAttributes(
+					semconv.GenAIProviderNameKey.String(cand.Provider),
+					semconv.GenAIRequestModel(cand.Model),
+					attribute.Int("switchyard.attempt", n),
+					attribute.Bool("fallback", isFallback),
+				)
+
+				if h.promMetrics != nil {
+					h.promMetrics.InflightRequests.WithLabelValues(cand.Provider).Inc()
+					defer h.promMetrics.InflightRequests.WithLabelValues(cand.Provider).Dec()
+				}
+
+				result, err := call(spanCtx, prov, cand)
+
+				if err != nil {
+					span.RecordError(err)
+					span.SetStatus(codes.Error, err.Error())
+					kind := failureKind(err)
+					span.SetAttributes(attribute.String("switchyard.error.kind", kind))
+					if h.promMetrics != nil {
+						h.promMetrics.ErrorsTotal.WithLabelValues(teamID(ctx), cand.Provider, cand.Model, kind).Inc()
+					}
+				} else if resp, ok := any(result).(*provider.Response); ok {
+					span.SetAttributes(
+						semconv.GenAIUsageInputTokens(resp.Usage.InputTokens),
+						semconv.GenAIUsageOutputTokens(resp.Usage.OutputTokens),
+					)
+				}
+
+				span.End()
+				return result, err
 			},
 		)
 		spent += attempts
@@ -214,11 +263,13 @@ func runChain[T any](
 		// HalfOpen it would report several outcomes for a probe that was
 		// claimed once.
 		if breaker != nil {
+			beforeState := breaker.State()
 			if attemptErr == nil {
 				breaker.RecordSuccess(ctx)
 			} else {
 				breaker.RecordFailure(ctx)
 			}
+			h.recordBreakerState(cand, beforeState, breaker.State())
 		}
 
 		if attemptErr == nil {
@@ -249,8 +300,9 @@ func runChain[T any](
 // cheaper option. It is an estimate rather than the real figure because the
 // real one does not exist yet; the actual cost is priced from the provider's
 // own usage report once the response lands.
-func logFallback(ctx context.Context, log *slog.Logger, requested, next resilience.Candidate, costDelta int64, failures []chainFailure) {
+func logFallback(ctx context.Context, log *slog.Logger, metrics *telemetry.Metrics, requested, next resilience.Candidate, costDelta int64, failures []chainFailure) {
 	prev := failures[len(failures)-1]
+	reason := failureKind(prev.err)
 
 	log.LogAttrs(ctx, slog.LevelWarn, "falling back to next candidate",
 		slog.String("request_id", RequestIDFrom(ctx)),
@@ -260,9 +312,13 @@ func logFallback(ctx context.Context, log *slog.Logger, requested, next resilien
 		slog.String("to_provider", next.Provider),
 		slog.String("to_model", next.Model),
 		slog.Int("attempts", prev.attempts),
-		slog.String("reason", failureKind(prev.err)),
+		slog.String("reason", reason),
 		slog.Int64("estimated_cost_delta_micros", costDelta),
 	)
+
+	if metrics != nil {
+		metrics.FallbacksTotal.WithLabelValues(prev.candidate.Provider, next.Provider, reason).Inc()
+	}
 }
 
 // failureKind names a failure by its provider.Error kind, so the fallback log
@@ -289,6 +345,29 @@ func (h *Handler) breakerFor(cand resilience.Candidate) *resilience.Breaker {
 	return h.breakers.For(resilience.Labels{Provider: cand.Provider, Model: cand.Model})
 }
 
+func (h *Handler) recordBreakerState(cand resilience.Candidate, before, after resilience.State) {
+	if h.promMetrics == nil {
+		return
+	}
+	h.promMetrics.BreakerState.WithLabelValues(cand.Provider, cand.Model).Set(breakerStateValue(after))
+	if before != after {
+		h.promMetrics.BreakerTransitionsTotal.WithLabelValues(cand.Provider, cand.Model, before.String(), after.String()).Inc()
+	}
+}
+
+func breakerStateValue(s resilience.State) float64 {
+	switch s {
+	case resilience.StateClosed:
+		return 0
+	case resilience.StateHalfOpen:
+		return 1
+	case resilience.StateOpen:
+		return 2
+	default:
+		return -1
+	}
+}
+
 // writeChainError picks how a failed chain is reported.
 //
 // Three cases, and the distinction matters to whoever reads the response:
@@ -308,7 +387,7 @@ func (h *Handler) writeChainError(w http.ResponseWriter, requestedModel string, 
 	// honest answer.
 	var denied *budgetDeniedError
 	if errors.As(err, &denied) {
-		writeBudgetExceededError(w, h.log, denied.teamID, denied.spentMicros, denied.capMicros)
+		writeBudgetExceededError(w, h.log, h.promMetrics, denied.teamID, denied.spentMicros, denied.capMicros)
 		return
 	}
 

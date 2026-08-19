@@ -1,9 +1,9 @@
 # SwitchYard local dev/deploy stack.
 #
-# Filled in incrementally, one phase at a time — Redis now (Phase 3), Jaeger
-# and Prometheus/Grafana arrive with Phases 8-10. `docker compose up` is meant
-# to bring up everything by the end of Part 1; until then, bring up only what
-# the current phase needs.
+# Filled in incrementally, one phase at a time — Redis (Phase 3), Jaeger
+# (Phase 8), Prometheus (Phase 9) now; Grafana arrives with Phase 10.
+# `docker compose up` is meant to bring up everything by the end of Part 1;
+# until then, bring up only what the current phase needs.
 
 services:
   redis:
@@ -21,5 +21,37 @@ services:
       timeout: 3s
       retries: 5
 
+  # Local collector + UI for Phase 8's traces. The gateway ships spans over
+  # OTLP/HTTP (SWITCHYARD_OTLP_ENDPOINT defaults to localhost:4318, or this
+  # service's name on the compose network), never gRPC — see DECISIONS.md
+  # for why. all-in-one bundles the collector, storage, and query UI in one
+  # container, which is the right trade for local dev; it is not what a real
+  # deployment would run.
+  jaeger:
+    image: jaegertracing/all-in-one
+    ports:
+      - "16686:16686" # web UI
+      - "4318:4318"   # OTLP/HTTP receiver
+    environment:
+      # Older all-in-one builds keep the OTLP receiver off unless told;
+      # harmless to set on newer ones where it's already the default.
+      - COLLECTOR_OTLP_ENABLED=true
+
+  prometheus:
+    image: prom/prometheus
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules.yml:/etc/prometheus/rules.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
 volumes:
   redis-data:
+  prometheus-data:
