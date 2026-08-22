@@ -11,7 +11,7 @@
 
 <p align="center">
   <img alt="Go" src="https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white">
-  <img alt="Gateway overhead p95" src="https://img.shields.io/badge/gateway%20overhead%20p95-3.11ms-brightgreen">
+  <img alt="Gateway overhead p95" src="https://img.shields.io/badge/gateway%20overhead%20p95-2.84ms-brightgreen">
   <img alt="Race detector" src="https://img.shields.io/badge/go%20test%20--race-clean-brightgreen">
   <img alt="Dependencies" src="https://img.shields.io/badge/web%20framework-none%20(net%2Fhttp%20%2B%20chi)-blue">
   <img alt="Status" src="https://img.shields.io/badge/status-Part%201%20%C2%B7%20Phase%2011-orange">
@@ -46,11 +46,12 @@ All figures below come from [`docs/loadtest-results.md`](docs/loadtest-results.m
 
 | Metric | Result |
 |---|---|
-| **Gateway overhead p95** | **3.11 ms** (p50 1.55 ms · p90 2.58 ms) — target was < 10 ms |
-| **Requests served** | 5,401 over ~90s at a sustained 60 req/s |
-| **Expected-status rate** | 5,401 / 5,401 — every response was a status the gateway is designed to produce |
-| **Failover under load** | 754 requests transparently served by the fallback provider during a 30s induced primary outage |
-| **End-to-end p95** | 37.95 ms (includes mock provider time; overhead is the gateway's share of it) |
+| **Gateway overhead p95** | **2.84 ms** (p50 1.57 ms · p90 2.52 ms) — target was < 10 ms |
+| **Requests served** | 5,400 over ~90s at a sustained 60 req/s |
+| **Expected-status rate** | 5,400 / 5,400 — every response was a status the gateway is designed to produce |
+| **Failover under load** | 1,118 requests transparently served by the fallback provider during a 30s induced primary outage |
+| **End-to-end p95** | 37.41 ms (includes mock provider time; overhead is the gateway's share of it) |
+| **No goroutine leak** | 19 → 28 → 19 (baseline → peak → settled), confirmed after the run |
 
 Overhead is measured *inside* the gateway and excludes provider time — it is reported on every single response as `X-Switchyard-Overhead-Ms`, not just under test.
 
@@ -135,18 +136,20 @@ Retries happen against the *same* provider first, then the chain moves on — an
 
 ## Quickstart
 
-**Requires:** Go 1.26+ (per the `go` directive in `go.mod`), Docker, and a Groq or Gemini API key (both have free tiers).
+**Requires:** Docker, [Ollama](https://ollama.com) running locally, and a Groq or Gemini API key (both have free tiers). Go 1.26+ only if you'd rather run the gateway outside Docker (per the `go` directive in `go.mod`).
 
 ```bash
-# 1. Start Redis, Jaeger, Prometheus, and Grafana
-docker compose -f deploy/docker-compose.yml up -d
-
-# 2. Add your key
+# 1. Add your key — must exist before step 2, since the gateway container
+# reads it via env_file
 cp .env.example .env    # then fill in GROQ_API_KEY
 
-# 3. Run the gateway
-go run ./cmd/gateway
+# 2. Bring up Redis, Jaeger, Prometheus, Grafana, and the gateway itself
+docker compose -f deploy/docker-compose.yml up -d
 ```
+
+Ollama isn't part of this stack — it runs natively on the host (not
+containerized), and the gateway container reaches it at
+`host.docker.internal:11434`.
 
 Then make a request:
 
@@ -159,7 +162,15 @@ curl http://localhost:8080/v1/chat/completions \
 
 The response carries `X-Switchyard-Overhead-Ms`, `X-Switchyard-Provider`, and `X-Switchyard-Served-Model`. Traces land in Jaeger at [localhost:16686](http://localhost:16686); dashboards are pre-provisioned in Grafana at [localhost:3000](http://localhost:3000).
 
-> The gateway itself runs on the host, not in Compose — Prometheus is configured to scrape it at `host.docker.internal:9090`. Containerizing it is tracked below.
+#### One-time: pull a model for the local fallback
+
+The `fast` tier's last hop is Ollama — local, free, no credential — but nothing can invent model weights for you; pulling one is a real multi-gigabyte download from Ollama's own registry, not something `docker compose up` (or Ollama itself) can bake in automatically. Run this once, locally, whenever Ollama is installed:
+
+```bash
+ollama pull llama3.2:3b
+```
+
+Skip it and everything else still works exactly as designed: Groq and Gemini serve normally, and the gateway's health checker correctly marks `ollama` unavailable rather than blocking on it (see [Resilience path](#resilience-path)) — the only gap is the final fallback hop having nothing to serve if every paid provider is also down.
 
 ## Configuration
 

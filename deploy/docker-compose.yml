@@ -36,6 +36,14 @@ services:
       # Older all-in-one builds keep the OTLP receiver off unless told;
       # harmless to set on newer ones where it's already the default.
       - COLLECTOR_OTLP_ENABLED=true
+    healthcheck:
+      # No curl in this image, but it does ship wget. :14269 is the
+      # all-in-one's own admin port; / answers 200 once it's actually
+      # serving, not just once the process has started.
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:14269/"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
   prometheus:
     image: prom/prometheus
@@ -51,6 +59,79 @@ services:
       - "--storage.tsdb.retention.time=15d"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    healthcheck:
+      # Same story as jaeger: no curl, but wget is there. Prometheus's own
+      # /-/healthy is the documented liveness endpoint.
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # The gateway itself, containerized (Step 11.4's last checklist item: a
+  # fresh clone plus `docker compose up` should be the whole story). Builds
+  # from the repo-root Dockerfile rather than a pulled image — there is
+  # nowhere else this image comes from yet.
+  #
+  # depends_on with condition: service_healthy, not the plain form: a
+  # plain depends_on only waits for a container to *start*, and this
+  # gateway dials Redis and ships OTLP spans from its very first request —
+  # starting before those are actually ready to answer would just move the
+  # "is my dependency up yet" race from Compose into the gateway's own
+  # fail-open/fail-closed logic, which exists for production degradation,
+  # not for masking a slow local boot order.
+  #
+  # SWITCHYARD_REDIS_ADDR and SWITCHYARD_OTLP_ENDPOINT still default to
+  # localhost at this point in the diff — Step 3 is the localhost ->
+  # service-name rewrite, on purpose kept separate so it can be reviewed
+  # on its own. Ollama is not a Compose service (it runs natively on the
+  # host); its address is handled below.
+  gateway:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    # configs/ is bind-mounted, not baked in only, so editing
+    # configs/providers.yaml or configs/teams.yaml on the host and calling
+    # POST /admin/reload works the same way it does outside Docker —
+    # Step 4.4's hot reload shouldn't behave differently just because the
+    # process is containerized.
+    volumes:
+      - ../configs:/app/configs:ro
+      # Ollama's base_url is a literal field in configs/providers.yaml, not
+      # an env var, and that file is shared with host-run dev, the load
+      # test, and demo.sh — none of which want the container-side address.
+      # This mounts a second, compose-only copy and points
+      # SWITCHYARD_PROVIDERS_CONFIG at it instead, so the shared file never
+      # changes. Deliberately mounted as a sibling of /app/configs, not
+      # nested inside it: Docker can't create a mountpoint for a second
+      # bind mount inside a directory that's already bind-mounted
+      # read-only (confirmed the hard way — nesting it under /app/configs/
+      # fails at container start with "read-only file system"). Must be
+      # kept in sync with configs/providers.yaml by hand if Groq/Gemini
+      # pricing or models ever change there.
+      - ./providers.yaml:/app/providers.compose.yaml:ro
+    env_file:
+      - ../.env
+    environment:
+      - SWITCHYARD_REDIS_ADDR=redis:6379
+      - SWITCHYARD_OTLP_ENDPOINT=jaeger:4318
+      - SWITCHYARD_PROVIDERS_CONFIG=/app/providers.compose.yaml
+    # Ollama runs natively on the host, not as a Compose service — this is
+    # what lets the container reach it at host.docker.internal regardless.
+    # Docker Desktop (Windows/Mac) resolves that hostname on its own;
+    # Linux needs this explicit mapping, same reasoning as prometheus's
+    # own extra_hosts entry above.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      redis:
+        condition: service_healthy
+      jaeger:
+        condition: service_healthy
+      prometheus:
+        condition: service_healthy
 
   # Dashboards + alerting for Phase 9's metrics, file-provisioned on boot.
   grafana:
