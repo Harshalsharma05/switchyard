@@ -55,3 +55,10 @@ k6-summary.json
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# --- Local-only planning docs -------------------------------------------------
+# Working notes and instructions for this repo's own development, not meant
+# for anyone cloning it.
+CLAUDE.md
+PART1_PLAN.md
+NOTES.md
