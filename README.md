@@ -293,6 +293,15 @@ The integration suite in [`test/`](test/) compiles `cmd/gateway`, spawns it as a
 
 To rerun the load test, see [`docs/loadtest-results.md`](docs/loadtest-results.md).
 
+## Demo
+
+[`scripts/demo.sh`](scripts/demo.sh) narrates the whole story against a running gateway (see Quickstart), pausing before each scene: a normal request (with a trace to find in Jaeger), hammering a team's rate limit, killing a provider via the admin-only chaos harness and watching fallback engage, restoring it and watching the breaker's half-open probe close it again, and pushing a team over budget for a `402`. Needs `SWITCHYARD_ENV=dev SWITCHYARD_CHAOS_ENABLED=true` set before starting the gateway; it checks for this and fails fast with the fix if it's missing.
+
+```bash
+SWITCHYARD_ENV=dev SWITCHYARD_CHAOS_ENABLED=true go run ./cmd/gateway &
+bash scripts/demo.sh
+```
+
 ## Project layout
 
 ```
@@ -320,7 +329,7 @@ Every non-obvious choice in this project — and the alternative it was chosen o
 
 ## Roadmap
 
-**In progress (Part 1):** demo script, containerizing the gateway so `docker compose up` brings up the complete system in one command.
+**In progress (Part 1):** containerizing the gateway so `docker compose up` brings up the complete system in one command.
 
 **Part 2:** semantic caching, cost-aware routing, async quality verification, request-log persistence, and a React UI.
 
