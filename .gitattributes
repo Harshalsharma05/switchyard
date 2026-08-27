@@ -1,0 +1,26 @@
+# Normalize line endings. Windows editors here have repeatedly saved config
+# and source files as CRLF, which breaks docker compose env parsing, shell
+# scripts, and strict YAML loading. Force LF for everything text; Git stores
+# LF and checks out LF on every platform.
+
+* text=auto eol=lf
+
+# Explicit for the file types that have actually bitten us.
+*.go     text eol=lf
+*.yaml   text eol=lf
+*.yml    text eol=lf
+*.sh     text eol=lf
+*.env    text eol=lf
+.env.example text eol=lf
+Dockerfile   text eol=lf
+*.json   text eol=lf
+*.js     text eol=lf
+*.jsx    text eol=lf
+*.css    text eol=lf
+*.html   text eol=lf
+*.md     text eol=lf
+
+# Binary assets — never touch these.
+*.png    binary
+*.svg    text eol=lf
+*.ico    binary

@@ -42,36 +42,48 @@ func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers 
 	r.Get("/readyz", readyz(ready))
 	r.Handle("/metrics", promhttp.HandlerFor(metrics.Registry(), promhttp.HandlerOpts{}))
 
-	r.Route("/admin/teams", func(r chi.Router) {
-		r.Get("/", listTeams(teams, spend, log))
-		r.Get("/{id}", getTeam(teams, spend, log))
-		r.Patch("/{id}", patchTeam(teams, spend, log))
-		r.Post("/{id}/reset-budget", resetBudget(teams, spend, log))
-	})
-
-	// The only admin routes that take a bearer key: they return per-team data,
-	// so they need to know who is asking. Everything else on this listener
-	// stays unauthenticated operator surface, including the Prometheus scrape.
+	// Routes that take a bearer key and scope their own response to the caller.
+	// /admin/me is the frontend's first call on load; the request-log routes
+	// pin a non-admin to its own rows internally. Neither is behind the admin
+	// gate — any valid key reaches them.
+	r.Get("/admin/me", handleMe(authr, spend, log))
 	r.Get("/admin/requests", listRequests(requestLog, authr, log))
 	r.Get("/admin/requests/{id}", getRequest(requestLog, authr, log))
 
+	// Read-only operator surface: no key, same as the Prometheus scrape.
 	r.Get("/admin/providers", listProviders(providers, log))
 	r.Get("/admin/providers/health", listProviderHealth(healthReader, log))
-	// Registered after /admin/providers/health so chi's static-over-wildcard
-	// precedence is not the only thing keeping "health" from being read as a
-	// provider name; the literal route is more specific either way.
-	r.Post("/admin/providers/{name}/breaker/reset", resetBreaker(breakers, providers, log))
-	r.Post("/admin/reload", reloadConfig(reload, log))
 
-	// Step 7.5's chaos controls. The routes are always registered and answer
-	// 404 unless the harness is available, rather than being conditionally
-	// mounted: the guard that matters is inside the harness, and keeping the
-	// routing table identical in every environment means a production gateway
-	// is indistinguishable from a build that never had chaos compiled in.
-	r.Route("/admin/chaos", func(r chi.Router) {
-		r.Get("/", getChaos(chaos, log))
-		r.Post("/", setChaos(chaos, log))
-		r.Delete("/", deleteChaos(chaos, log))
+	// Everything mutating or cross-team now requires an admin key (Step 2.1).
+	// requireAdmin is inert when authr is nil, so tests that drive these
+	// handlers directly still work and a registry-less build keeps Part 1's
+	// open operator port.
+	r.Group(func(r chi.Router) {
+		r.Use(requireAdmin(authr, log))
+
+		r.Route("/admin/teams", func(r chi.Router) {
+			r.Get("/", listTeams(teams, spend, log))
+			r.Get("/{id}", getTeam(teams, spend, log))
+			r.Patch("/{id}", patchTeam(teams, spend, log))
+			r.Post("/{id}/reset-budget", resetBudget(teams, spend, log))
+		})
+
+		// Registered after /admin/providers/health so chi's static-over-wildcard
+		// precedence is not the only thing keeping "health" from being read as a
+		// provider name; the literal route is more specific either way.
+		r.Post("/admin/providers/{name}/breaker/reset", resetBreaker(breakers, providers, log))
+		r.Post("/admin/reload", reloadConfig(reload, log))
+
+		// Step 7.5's chaos controls. The routes are always registered and answer
+		// 404 unless the harness is available, rather than being conditionally
+		// mounted: the guard that matters is inside the harness, and keeping the
+		// routing table identical in every environment means a production gateway
+		// is indistinguishable from a build that never had chaos compiled in.
+		r.Route("/admin/chaos", func(r chi.Router) {
+			r.Get("/", getChaos(chaos, log))
+			r.Post("/", setChaos(chaos, log))
+			r.Delete("/", deleteChaos(chaos, log))
+		})
 	})
 
 	return r

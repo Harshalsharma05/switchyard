@@ -1,0 +1,57 @@
+/* Design tokens — the single source for every colour, size, and duration in
+   web/. Components reference var(--…); they never hardcode a hex. See DESIGN.md.
+   Dark-first and dark-only for Part 2. */
+
+:root {
+  /* surfaces */
+  --bg-base: #0B0D0F;
+  --bg-surface: #131619;
+  --bg-raised: #1A1E22;
+  --bg-inset: #0E1113;
+
+  /* borders */
+  --border: #22272C;
+  --border-strong: #2E353B;
+
+  /* text */
+  --text-primary: #E6E9EC;
+  --text-secondary: #9BA4AD;
+  --text-muted: #5F6A73;
+
+  /* status — the only colours that carry meaning */
+  --status-healthy: #3FB950;
+  --status-warn: #D29922;
+  --status-error: #F85149;
+  --status-info: #4C8DFF;
+
+  --status-healthy-bg: rgba(63, 185, 80, 0.12);
+  --status-warn-bg: rgba(210, 153, 34, 0.12);
+  --status-error-bg: rgba(248, 81, 73, 0.12);
+  --status-info-bg: rgba(76, 141, 255, 0.12);
+
+  /* accent — same as status-info; one accent-filled button per view */
+  --accent: #4C8DFF;
+
+  /* type — real font files land in Phase 2.2; fallbacks hold until then */
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
+
+  /* spacing — 4px scale, nothing off it */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+
+  /* radius */
+  --radius-control: 6px;
+  --radius-card: 10px;
+
+  /* motion — functional only */
+  --motion-hover: 120ms;
+  --motion-state: 200ms;
+  --motion-flash: 600ms;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+}
