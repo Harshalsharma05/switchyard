@@ -47,12 +47,16 @@ import (
 //     Logger is outside it at the router level — a 401 or 429 rejection
 //     must still be counted, not silently skipped because the middleware
 //     that would have recorded it never got called.
-//  7. Auth       — mounted only on the API route group below, not on the
+//  7. RequestLog — Part 2 Phase 1, mounted on the API route group for the same
+//     reason Metrics is, and outside Auth so a 429, 402, or 403 is
+//     logged too. A 401 never authenticated, so it has no team to
+//     attribute a row to and is skipped.
+//  8. Auth       — mounted only on the API route group below, not on the
 //     probes: a load balancer's health check carries no API key, and
 //     Auth would 401 every one of them if it wrapped the whole router.
 //     Auth's own latency still lands inside Timing's overhead number,
 //     since Timing wraps Logger which wraps Auth.
-//  8. RateLimit   — inside Auth, since it needs the *auth.Team Auth attaches
+//  9. RateLimit   — inside Auth, since it needs the *auth.Team Auth attaches
 //     to the context. This only enforces RPM; TPM needs the decoded
 //     body, which nothing before the handler has parsed, so it is
 //     checked inside ChatCompletions instead (see reserveTokens in
@@ -66,7 +70,7 @@ import (
 // the request path here but exposed nowhere on this router: its controls are
 // mounted on the admin listener only, so nothing reachable from the public
 // port can turn fault injection on.
-func NewRouter(resolver Resolver, authr Authenticator, limiter RateLimiter, budgetTracker BudgetTracker, calc CostCalculator, healthRecorder HealthRecorder, healthOracle HealthOracle, breakers Breakers, chaos *Chaos, retryConfig resilience.Config, promMetrics *telemetry.Metrics, log *slog.Logger, ready func() bool) http.Handler {
+func NewRouter(resolver Resolver, authr Authenticator, limiter RateLimiter, budgetTracker BudgetTracker, calc CostCalculator, healthRecorder HealthRecorder, healthOracle HealthOracle, breakers Breakers, chaos *Chaos, retryConfig resilience.Config, promMetrics *telemetry.Metrics, reqLog RequestLogger, log *slog.Logger, ready func() bool) http.Handler {
 	h := NewHandler(resolver, limiter, budgetTracker, calc, healthRecorder, healthOracle, breakers, chaos, retryConfig, promMetrics, log)
 
 	r := chi.NewRouter()
@@ -79,6 +83,7 @@ func NewRouter(resolver Resolver, authr Authenticator, limiter RateLimiter, budg
 
 	r.Group(func(r chi.Router) {
 		r.Use(Metrics(promMetrics))
+		r.Use(RequestLog(reqLog))
 		r.Use(Auth(authr, log))
 		r.Use(RateLimit(limiter, promMetrics, log))
 		r.Post("/v1/chat/completions", h.ChatCompletions)

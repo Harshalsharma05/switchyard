@@ -32,6 +32,9 @@ teams:
       tpm: 100000
     monthly_budget_usd: 50.00
     priority: realtime
+    # Reads other teams' request-log rows on the admin API. globex, left
+    # without the flag, is the non-admin case the scoping tests use.
+    is_admin: true
 
   # Dev key: sk-switchyard-dev-globex-7a4e0d
   # Deliberately narrower than acme: no Gemini access, and batch priority, so

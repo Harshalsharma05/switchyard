@@ -59,7 +59,7 @@ func (f *fakeBreakerResetter) calls() []string {
 func newTestAdminServerWithHealth(t *testing.T, reader HealthReader) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(NewRouter(func() bool { return true },
-		testTeamStore(t), &fakeSpendReader{}, fakeProviderLister{}, reader, &fakeBreakerResetter{}, nil, fakeReloader, testMetrics(t), discardLogger()))
+		testTeamStore(t), &fakeSpendReader{}, fakeProviderLister{}, reader, &fakeBreakerResetter{}, nil, fakeReloader, nil, nil, testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -181,7 +181,7 @@ func TestListProviderHealthEmptyIsAnEmptyArray(t *testing.T) {
 func newTestAdminServerWithBreakers(t *testing.T, providers ProviderLister, resetter BreakerResetter) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(NewRouter(func() bool { return true },
-		testTeamStore(t), &fakeSpendReader{}, providers, fakeHealthReader{}, resetter, nil, fakeReloader, testMetrics(t), discardLogger()))
+		testTeamStore(t), &fakeSpendReader{}, providers, fakeHealthReader{}, resetter, nil, fakeReloader, nil, nil, testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)
 	return srv
 }

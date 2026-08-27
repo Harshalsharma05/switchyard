@@ -13,8 +13,10 @@ RUN go mod download
 
 COPY cmd/ cmd/
 COPY internal/ internal/
+COPY migrations/ migrations/
 
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/gateway ./cmd/gateway
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/gateway ./cmd/gateway \
+    && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/migrate ./cmd/migrate
 
 FROM alpine:3.20 AS final
 
@@ -25,6 +27,7 @@ RUN apk add --no-cache ca-certificates curl \
 WORKDIR /app
 
 COPY --from=build /out/gateway /app/gateway
+COPY --from=build /out/migrate /app/migrate
 COPY configs/ /app/configs/
 
 EXPOSE 8080 9090

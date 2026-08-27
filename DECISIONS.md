@@ -342,3 +342,52 @@ Each adapter wraps the caller's `ctx` with `context.WithTimeout(ctx, cfg.Timeout
 - **`scripts/demo.sh` uses the existing chaos harness (`POST /admin/chaos`) to simulate "kill a provider," and a temporary `PATCH /admin/teams/{id}` to shrink a team's budget for the 402 scene** — both reuse admin capability that already exists rather than physically disrupting a real provider or waiting out real spend at real (if cheap) pricing.
 - **README leads with numbers sourced only from `docs/loadtest-results.md`, including two deliberately *not* claimed: an actual throughput ceiling (only a sustained 60 req/s rate was tested, never ramped to find a breaking point) and isolated failover latency (proven to work under load; its per-request cost was never measured on its own).**
 - **The Windows clock caveat from Phase 1 still applies at load-test scale.** ~529µs monotonic-clock granularity is fine at the 1–3ms overhead this run measured, but the honest claim is "credible smoke test," not "final defensible number" — that needs a rerun inside the Linux container this project already builds.
+
+---
+
+# Part 2 — Postgres + Frontend
+
+## Phase 1 — Request-Log Persistence
+
+### Schema and migrations
+
+- **`pgx/v5` over `lib/pq`.** No Postgres driver in the stdlib, so a dependency was unavoidable. `lib/pq` is maintenance-only upstream; `pgx` is actively developed and its native interface gives batching and a pool without `database/sql` in the way.
+- **Hand-rolled migration runner over golang-migrate/goose.** The whole requirement is "apply N numbered files once, in order, idempotently" — ~40 lines, no dependency, and no `.up/.down` file-pair convention imposed on a repo whose plan specifies a single `0001_requests.sql`.
+- **Each migration commits with its own `schema_migrations` row in one transaction.** A failure mid-file can't leave a half-applied schema that the bookkeeping claims is done. A Postgres advisory lock wraps the run so two starting replicas can't both apply it.
+- **`id` is `text`, not `uuid`.** Part 1 honours a caller-supplied `X-Request-ID` (≤64 chars, `[A-Za-z0-9_-]`), so request IDs are not guaranteed to be UUIDs. Consequence: a client reusing an ID collides on the PK, handled with `ON CONFLICT (id) DO NOTHING` in the writer.
+- **`latency_ms`/`overhead_ms` are `numeric(12,3)`, not integer ms.** Part 1's headline overhead is ~3ms and reported to microsecond resolution; integer milliseconds would round the project's defining number to `0`.
+- **Three indexes, not one per filter.** `(team_id, ts DESC, id DESC)` for the team-scoped list, `(ts DESC, id DESC)` for the admin list, `(provider, ts DESC)` for per-provider rollups. Status/model/cache filters ride on an already team- and time-bounded scan; indexing each one would cost write throughput on the hot path to save nothing at 30-day retention scale.
+- **`cache_hit` and `quality_score` are nullable, not defaulted.** NULL means "not evaluated" and is distinguishable from a real `false`/`0` once Phases 7 and 9 land — the same rule as the UI's "never show a fabricated number."
+
+### The writer
+
+- **Buffered channel + background flusher, over a goroutine per request.** A per-request goroutine is fire-and-forget with no backpressure — at 60 req/s against a slow Postgres it piles up unboundedly, and it violates the project rule that every goroutine has a defined lifecycle tied to a context. One flusher owns the queue, batches on size or a 1s tick, and writes the batch in a single round trip.
+- **`Write` takes no `context`, deliberately.** It's a non-blocking channel send, not I/O. Passing the request's context would be actively wrong: by the time the row is built the client may already have disconnected, and that context is cancelled.
+- **Queue full → drop the row and count it; never block.** The request has already been served. Logging is observability, not money — the opposite call from budget enforcement, which fails closed.
+- **The flusher's context is *not* the shutdown signal context.** It's cancelled only after the HTTP drain completes. Cancelling on SIGTERM would flush while in-flight requests were still finishing and still enqueuing rows, losing exactly the rows a graceful shutdown is supposed to keep.
+- **Batch via `pgx.Batch` of single-row inserts, not `CopyFrom`.** `CopyFrom` is faster but one duplicate ID fails the whole batch; per-statement `ON CONFLICT DO NOTHING` isolates a colliding row without taking its neighbours down.
+- **Request log disabled entirely when `POSTGRES_PASSWORD` is unset**, and a 401 is never logged — an unauthenticated request has no team to attribute a row to, and logging scanner traffic would fill the table with unattributable noise.
+
+### The query API
+
+- **Auth on the request-log routes only, not the whole admin listener.** These are the first admin endpoints that return per-team data, so they need to know who is asking. Blanket auth on the port would have broken the Prometheus scrape of `/metrics`, all 11 admin calls in `demo.sh`, and every existing admin test — a large blast radius to solve a two-route problem.
+- **`is_admin` added to the teams.yaml schema now, ahead of its planned Phase 2.1 slot.** Phase 1's own checklist requires that a non-admin key cannot read another team's rows, and that is unimplementable without an identity. Step 2.1 now only adds `GET /admin/me` on top.
+- **A non-admin caller's `team` filter comes from its key, never from the query string.** An explicit `?team=` naming another team is a 400, not silently ignored — ignoring it would leave a client believing it had filtered.
+- **Row detail is scoped inside the SQL, not checked after the read.** A non-admin fetching another team's id gets `ErrNotFound`, so a guessed id cannot even confirm that a request exists.
+- **Keyset pagination over OFFSET.** OFFSET walks every skipped row and shifts the window when new rows arrive mid-pagination. The cursor is `(ts, id)` compared as a row value, which the planner pushes into the composite index directly — measured over 1,500 rows: Index Only Scan, `Heap Fetches: 0`, 3 buffer hits per 100-row page, 0.146 ms.
+- **The `id` half of the cursor is load-bearing, not decorative.** Rows written in one batch share a timestamp; without the tiebreaker a page boundary landing inside that group repeats or skips rows.
+- **Fetch `limit+1` to detect a next page** rather than a second `count(*)` over the same predicate.
+- **The `model` filter matches requested *or* served.** A request that fell back is findable by what was asked for and by what actually ran it; matching only one would hide exactly the rows worth investigating.
+- **The cursor token is opaque base64.** The client must not construct one, so the encoding stays free to change without breaking callers.
+- **Request log unconfigured answers 503 `request_log_disabled`, not an empty list** — an empty list is indistinguishable from "no traffic yet", which is the same fabricated-data problem the UI rules forbid.
+
+### Retention
+
+- **Roll up into a daily summary, then delete — not a plain delete.** Detail rows go after 30 days, but cost and volume history outlives them in `requests_daily`, keyed by (day, team, provider, served_model). Measured: 18,561 expired rows compressed to 28 summary rows with cost preserved exactly. Without this, "why did spend jump last quarter" is unanswerable by construction. Cost accepted: Phase 6 has to union detail and summary at the retention boundary.
+- **The summary holds counts and sums only — never a percentile.** p95 latency cannot be re-derived from aggregates, and an average of p95s is a number that looks real and is not. Latency history genuinely ends at the retention boundary; that is stated rather than faked.
+- **Roll up and delete in one statement, over one snapshot.** Two data-modifying CTEs read the same `doomed` set, so a row is summed and removed atomically. That is what makes an interrupted or repeated sweep safe: a row is either still detail or counted once in the summary, never both and never neither. Verified by running the sweep repeatedly and watching totals hold.
+- **Batched, on an hourly tick, not one unbounded DELETE.** A single `DELETE WHERE ts < cutoff` over a backlog is one long transaction holding locks and bloating WAL. Bounded batches with a per-sweep ceiling work a backlog down over several ticks instead.
+- **`pg_try_advisory_lock`, not `pg_advisory_lock`.** If another replica is already sweeping there is nothing useful to do but return and come back next tick; blocking would just pile up connections waiting to do work that is already being done.
+- **NULL provider and served_model become empty strings in the summary.** They are primary-key columns, and NULL would split what should be one group into rows that never match on conflict — silently losing the rejected-request rows (402s, 403s) that never reached a provider.
+- **Retention stops on the shutdown signal, not on the log flusher's context.** An in-progress sweep has nothing to hand off, unlike the flusher, which still has rows arriving from requests finishing during the drain.
+- **A zero window disables retention entirely** rather than meaning "delete everything" — the value you get from a typo or an unset variable must be the safe one.

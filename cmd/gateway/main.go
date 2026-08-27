@@ -23,6 +23,7 @@ import (
 	"github.com/Harshalsharma05/switchyard/internal/admin"
 	"github.com/Harshalsharma05/switchyard/internal/budget"
 	"github.com/Harshalsharma05/switchyard/internal/health"
+	"github.com/Harshalsharma05/switchyard/internal/logstore"
 	"github.com/Harshalsharma05/switchyard/internal/proxy"
 	"github.com/Harshalsharma05/switchyard/internal/ratelimit"
 	"github.com/Harshalsharma05/switchyard/internal/resilience"
@@ -117,6 +118,27 @@ const (
 	// defaultDrainTimeout: a slow exporter gets a fair window to deliver
 	// whatever it's still holding, not an unbounded wait on process exit.
 	defaultTracingShutdownTimeout = 5 * time.Second
+
+	// Part 2 Phase 1 request log. QueueSize holds roughly a minute of Part 1's
+	// 60 req/s load test, so a brief Postgres stall costs nothing; past that
+	// rows are dropped rather than allowed to slow a request. FlushTimeout
+	// also bounds the final flush on shutdown.
+	defaultRequestLogQueueSize     = 4096
+	defaultRequestLogBatchSize     = 100
+	defaultRequestLogFlushInterval = time.Second
+	defaultRequestLogFlushTimeout  = 5 * time.Second
+
+	// Retention. 30 days of detail is the plan default; older rows are rolled
+	// into requests_daily and dropped. Window 0 disables the sweep entirely.
+	defaultRetentionWindow     = 30 * 24 * time.Hour
+	defaultRetentionInterval   = time.Hour
+	defaultRetentionBatchSize  = 5000
+	defaultRetentionMaxBatches = 200
+
+	defaultPostgresHost    = "localhost:5432"
+	defaultPostgresUser    = "switchyard"
+	defaultPostgresDB      = "switchyard"
+	defaultPostgresSSLMode = "disable"
 
 	// readHeaderTimeout bounds how long a client may take to send its headers,
 	// which is the Slowloris defence. Note that WriteTimeout is deliberately
@@ -312,6 +334,48 @@ func run() error {
 		log,
 	)
 
+	// Part 2 Phase 1's request log. Left disabled when POSTGRES_PASSWORD is
+	// unset, so a dev without Postgres still gets a working gateway; the
+	// interface stays nil in that case, which makes the middleware a no-op.
+	var reqLog proxy.RequestLogger
+	var reqLogReader admin.RequestLogReader
+	var logWriter *logstore.Writer
+	var retainer *logstore.Retainer
+	if pw := os.Getenv("POSTGRES_PASSWORD"); pw != "" {
+		dbCfg := logstore.DBConfig{
+			Host:     envOr("SWITCHYARD_POSTGRES_HOST", defaultPostgresHost),
+			User:     envOr("SWITCHYARD_POSTGRES_USER", defaultPostgresUser),
+			Password: pw,
+			Database: envOr("SWITCHYARD_POSTGRES_DB", defaultPostgresDB),
+			SSLMode:  envOr("SWITCHYARD_POSTGRES_SSLMODE", defaultPostgresSSLMode),
+		}
+		pool, err := logstore.NewPool(context.Background(), dbCfg)
+		if err != nil {
+			return fmt.Errorf("building request log pool: %w", err)
+		}
+		defer pool.Close()
+
+		logWriter = logstore.NewWriter(pool, logstore.Config{
+			QueueSize:     intOr("SWITCHYARD_REQUESTLOG_QUEUE_SIZE", defaultRequestLogQueueSize),
+			BatchSize:     intOr("SWITCHYARD_REQUESTLOG_BATCH_SIZE", defaultRequestLogBatchSize),
+			FlushInterval: durationOr("SWITCHYARD_REQUESTLOG_FLUSH_INTERVAL", defaultRequestLogFlushInterval),
+			FlushTimeout:  durationOr("SWITCHYARD_REQUESTLOG_FLUSH_TIMEOUT", defaultRequestLogFlushTimeout),
+		}, promMetrics, log)
+		reqLog = logWriter
+		reqLogReader = logWriter
+
+		retainer = logstore.NewRetainer(pool, logstore.RetentionConfig{
+			Window:     durationOr("SWITCHYARD_RETENTION_WINDOW", defaultRetentionWindow),
+			Interval:   durationOr("SWITCHYARD_RETENTION_INTERVAL", defaultRetentionInterval),
+			BatchSize:  intOr("SWITCHYARD_RETENTION_BATCH_SIZE", defaultRetentionBatchSize),
+			MaxBatches: intOr("SWITCHYARD_RETENTION_MAX_BATCHES", defaultRetentionMaxBatches),
+		}, promMetrics, log)
+
+		log.Info("request log enabled", slog.String("database", dbCfg.Redacted()))
+	} else {
+		log.Warn("request log disabled: POSTGRES_PASSWORD is unset")
+	}
+
 	// ready gates /readyz. It flips true once wiring is complete and false again
 	// the moment shutdown begins, so a load balancer stops sending new traffic
 	// while in-flight requests drain.
@@ -330,13 +394,13 @@ func run() error {
 		// (Step 5.2's passive samples), healthMonitor the read side Step 6.2's
 		// chain ordering consults to skip a down provider and sink a degraded
 		// one.
-		Handler:           proxy.NewRouter(store, store, limiter, budgetTracker, store, healthRecorder, healthMonitor, breakerRegistry, chaos, retryConfig, promMetrics, log, isReady),
+		Handler:           proxy.NewRouter(store, store, limiter, budgetTracker, store, healthRecorder, healthMonitor, breakerRegistry, chaos, retryConfig, promMetrics, reqLog, log, isReady),
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
 
 	adminSrv := &http.Server{
 		Addr: envOr("SWITCHYARD_ADMIN_ADDR", defaultAdminAddr),
-		Handler: admin.NewRouter(isReady, store, budgetTracker, store, healthMonitor, breakerRegistry, chaosAdapter{chaos}, newReloader(store, providersPath, teamsPath), promMetrics, log,
+		Handler: admin.NewRouter(isReady, store, budgetTracker, store, healthMonitor, breakerRegistry, chaosAdapter{chaos}, newReloader(store, providersPath, teamsPath), reqLogReader, store, promMetrics, log,
 			proxy.Recoverer(log),
 			proxy.RequestID,
 			proxy.Logger(log),
@@ -376,6 +440,30 @@ func run() error {
 	// checker's goroutines stop on the same signal rather than outliving it.
 	go checker.Run(ctx)
 
+	// The flusher gets its own context, cancelled only after the HTTP drain
+	// finishes: requests still completing during the drain enqueue rows, and
+	// cancelling on the shutdown signal would flush before they arrive.
+	logCtx, cancelLog := context.WithCancel(context.Background())
+	defer cancelLog()
+	if logWriter != nil {
+		go logWriter.Run(logCtx)
+	}
+
+	// Retention stops on the shutdown signal, not on logCtx: an in-progress
+	// sweep has nothing to hand off, unlike the flusher, which still has rows
+	// arriving from requests finishing during the drain.
+	if retainer != nil {
+		go retainer.Run(ctx)
+	}
+
+	drainLog := func() {
+		if logWriter == nil {
+			return
+		}
+		cancelLog()
+		logWriter.Wait(durationOr("SWITCHYARD_REQUESTLOG_FLUSH_TIMEOUT", defaultRequestLogFlushTimeout) + time.Second)
+	}
+
 	ready.Store(true)
 	log.Info("gateway started",
 		slog.String("public_addr", publicSrv.Addr),
@@ -390,6 +478,7 @@ func run() error {
 		// traffic it will never finish serving.
 		ready.Store(false)
 		_ = shutdown(publicSrv, adminSrv, log)
+		drainLog()
 		return err
 	case <-ctx.Done():
 		log.Info("shutdown signal received, draining")
@@ -400,7 +489,9 @@ func run() error {
 	// accepted finish.
 	ready.Store(false)
 
-	return shutdown(publicSrv, adminSrv, log)
+	err = shutdown(publicSrv, adminSrv, log)
+	drainLog()
+	return err
 }
 
 // serve runs one already-bound listener and reports anything other than an

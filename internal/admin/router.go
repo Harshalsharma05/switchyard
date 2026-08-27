@@ -31,7 +31,7 @@ type Middleware func(http.Handler) http.Handler
 // Route paths carry an explicit /admin prefix even though the whole listener
 // is already the admin port, leaving room for /metrics and future operator
 // endpoints to live at the root without colliding with this namespace.
-func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers ProviderLister, healthReader HealthReader, breakers BreakerResetter, chaos ChaosController, reload Reloader, metrics *telemetry.Metrics, log *slog.Logger, middleware ...Middleware) http.Handler {
+func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers ProviderLister, healthReader HealthReader, breakers BreakerResetter, chaos ChaosController, reload Reloader, requestLog RequestLogReader, authr KeyAuthenticator, metrics *telemetry.Metrics, log *slog.Logger, middleware ...Middleware) http.Handler {
 	r := chi.NewRouter()
 
 	for _, mw := range middleware {
@@ -48,6 +48,12 @@ func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers 
 		r.Patch("/{id}", patchTeam(teams, spend, log))
 		r.Post("/{id}/reset-budget", resetBudget(teams, spend, log))
 	})
+
+	// The only admin routes that take a bearer key: they return per-team data,
+	// so they need to know who is asking. Everything else on this listener
+	// stays unauthenticated operator surface, including the Prometheus scrape.
+	r.Get("/admin/requests", listRequests(requestLog, authr, log))
+	r.Get("/admin/requests/{id}", getRequest(requestLog, authr, log))
 
 	r.Get("/admin/providers", listProviders(providers, log))
 	r.Get("/admin/providers/health", listProviderHealth(healthReader, log))

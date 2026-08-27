@@ -27,7 +27,7 @@ func retryTestConfig(t *testing.T) resilience.Config {
 func newTestServerWithRetry(t *testing.T, resolver Resolver, retryConfig resilience.Config) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(NewRouter(resolver, stubAuthenticator{team: defaultTestTeam()}, stubRateLimiter{},
-		stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, nil, nil, nil, retryConfig, nil, discardLogger(), func() bool { return true }))
+		stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, nil, nil, nil, retryConfig, nil, nil, discardLogger(), func() bool { return true }))
 	t.Cleanup(srv.Close)
 	return srv
 }

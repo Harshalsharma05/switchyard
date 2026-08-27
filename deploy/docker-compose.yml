@@ -132,6 +132,58 @@ services:
         condition: service_healthy
       prometheus:
         condition: service_healthy
+      # The gateway starts only after the request-log schema is in place, so
+      # its first write can never hit a missing table. service_completed_
+      # successfully waits for the one-shot migrate container to exit 0.
+      migrate:
+        condition: service_completed_successfully
+
+  # Request-log persistence (Part 2, Phase 1). Postgres 16, named volume so
+  # rows survive a container restart. POSTGRES_PASSWORD comes from ../.env
+  # via env_file — same pattern as the provider API keys (GROQ_API_KEY,
+  # GEMINI_API_KEY): a third-party credential under its native name, never
+  # in this file. POSTGRES_USER / POSTGRES_DB are not secrets, so they sit
+  # here as literals. The healthcheck exists so the gateway's depends_on
+  # (wired in Phase 1) can wait on a database that actually answers, not
+  # just a container that has started.
+  postgres:
+    image: postgres:16
+    ports:
+      - "5432:5432"
+    env_file:
+      - ../.env
+    environment:
+      - POSTGRES_USER=switchyard
+      - POSTGRES_DB=switchyard
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U switchyard -d switchyard"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # One-shot request-log schema migration (Part 2, Phase 1). Runs to
+  # completion and exits; the gateway's depends_on waits on that exit rather
+  # than doing migrations to itself on boot — a clean separation between
+  # "bring the schema up" and "serve traffic". Built from the same repo-root
+  # Dockerfile as the gateway, overriding the entrypoint to the migrate
+  # binary. Connection settings mirror the gateway's: POSTGRES_PASSWORD from
+  # env_file, host pointed at the compose service.
+  migrate:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    # Override the image's ENTRYPOINT (the gateway) with the migrate binary
+    # baked into the same image.
+    entrypoint: ["/app/migrate"]
+    env_file:
+      - ../.env
+    environment:
+      - SWITCHYARD_POSTGRES_HOST=postgres:5432
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   # Dashboards + alerting for Phase 9's metrics, file-provisioned on boot.
   grafana:
@@ -153,3 +205,4 @@ volumes:
   redis-data:
   prometheus-data:
   grafana-data:
+  postgres-data:

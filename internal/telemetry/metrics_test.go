@@ -29,6 +29,11 @@ func TestNewMetricsRegistersEveryFamily(t *testing.T) {
 	m.RatelimitTokensRemaining.WithLabelValues("acme", "tpm").Set(1000)
 	m.InflightRequests.WithLabelValues("groq").Set(1)
 
+	m.RequestLogRowsTotal.WithLabelValues("written").Inc()
+	m.RequestLogQueueDepth.Set(0)
+	m.RetentionRowsDeletedTotal.Add(0)
+	m.RetentionLastSweepTimestamp.Set(0)
+
 	families, err := m.Registry().Gather()
 	if err != nil {
 		t.Fatalf("Gather: %v", err)
@@ -53,6 +58,10 @@ func TestNewMetricsRegistersEveryFamily(t *testing.T) {
 		"switchyard_budget_utilization_ratio",
 		"switchyard_ratelimit_tokens_remaining",
 		"switchyard_inflight_requests",
+		"switchyard_requestlog_rows_total",
+		"switchyard_requestlog_queue_depth",
+		"switchyard_retention_rows_deleted_total",
+		"switchyard_retention_last_sweep_timestamp_seconds",
 	}
 
 	got := map[string]bool{}

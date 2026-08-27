@@ -38,6 +38,10 @@ type teamEntry struct {
 	MonthlyBudgetUSD float64 `yaml:"monthly_budget_usd"`
 
 	Priority string `yaml:"priority"`
+
+	// IsAdmin grants cross-team read access on the admin API's request-log
+	// endpoints. Absent means false, so a team is non-admin unless it says so.
+	IsAdmin bool `yaml:"is_admin"`
 }
 
 // --- loading ------------------------------------------------------------
@@ -146,6 +150,7 @@ func (e teamEntry) resolve(label string) (auth.Team, error) {
 		RateLimits:          auth.RateLimits{RPM: e.RateLimits.RPM, TPM: e.RateLimits.TPM},
 		MonthlyBudgetMicros: usdToMicros(e.MonthlyBudgetUSD),
 		Priority:            priority,
+		IsAdmin:             e.IsAdmin,
 	}, nil
 }
 

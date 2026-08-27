@@ -53,6 +53,10 @@ type Team struct {
 	MonthlyBudgetMicros int64
 
 	Priority Priority
+
+	// IsAdmin lets this team read other teams' rows on the admin API's
+	// request-log endpoints. Enforced server-side in the handler.
+	IsAdmin bool
 }
 
 // AllowsModel reports whether the team's allowlist includes model. This is

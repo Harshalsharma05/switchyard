@@ -54,7 +54,7 @@ func newTieredServerWithBreakers(t *testing.T, team *auth.Team, breakers Breaker
 	}
 	srv := httptest.NewServer(NewRouter(resolver, stubAuthenticator{team: team}, stubRateLimiter{},
 		stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, nil, breakers, nil,
-		noRetryConfig(t), nil, discardLogger(), func() bool { return true }))
+		noRetryConfig(t), nil, nil, discardLogger(), func() bool { return true }))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -230,7 +230,7 @@ func TestSoleCandidateBreakerOpenReturns503(t *testing.T) {
 	resolver := stubResolver{byModel: map[string]provider.Provider{"fast-a": groq}}
 	srv := httptest.NewServer(NewRouter(resolver, stubAuthenticator{team: tieredTeam()}, stubRateLimiter{},
 		stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, nil, registry, nil,
-		noRetryConfig(t), nil, discardLogger(), func() bool { return true }))
+		noRetryConfig(t), nil, nil, discardLogger(), func() bool { return true }))
 	t.Cleanup(srv.Close)
 
 	resp := post(t, srv, `{"model":"fast-a","messages":[{"role":"user","content":"hi"}]}`)
@@ -266,7 +266,7 @@ func TestBreakerIsPerProviderAndModelEndToEnd(t *testing.T) {
 	resolver := stubResolver{byModel: map[string]provider.Provider{"fast-a": groq, "fast-b": groq}}
 	srv := httptest.NewServer(NewRouter(resolver, stubAuthenticator{team: tieredTeam()}, stubRateLimiter{},
 		stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, nil, registry, nil,
-		noRetryConfig(t), nil, discardLogger(), func() bool { return true }))
+		noRetryConfig(t), nil, nil, discardLogger(), func() bool { return true }))
 	t.Cleanup(srv.Close)
 
 	resp := post(t, srv, `{"model":"fast-b","messages":[{"role":"user","content":"hi"}]}`)

@@ -15,15 +15,17 @@ var overheadBuckets = []float64{0.0005, 0.001, 0.0015, 0.002, 0.003, 0.005, 0.00
 type Metrics struct {
 	registry *prometheus.Registry
 
-	RequestsTotal            *prometheus.CounterVec
-	ErrorsTotal              *prometheus.CounterVec
-	RetriesTotal             *prometheus.CounterVec
-	FallbacksTotal           *prometheus.CounterVec
-	RatelimitRejectionsTotal *prometheus.CounterVec
-	BudgetRejectionsTotal    *prometheus.CounterVec
-	BreakerTransitionsTotal  *prometheus.CounterVec
-	TokensTotal              *prometheus.CounterVec
-	CostMicrodollarsTotal    *prometheus.CounterVec
+	RequestsTotal             *prometheus.CounterVec
+	ErrorsTotal               *prometheus.CounterVec
+	RetriesTotal              *prometheus.CounterVec
+	FallbacksTotal            *prometheus.CounterVec
+	RatelimitRejectionsTotal  *prometheus.CounterVec
+	BudgetRejectionsTotal     *prometheus.CounterVec
+	BreakerTransitionsTotal   *prometheus.CounterVec
+	TokensTotal               *prometheus.CounterVec
+	CostMicrodollarsTotal     *prometheus.CounterVec
+	RequestLogRowsTotal       *prometheus.CounterVec
+	RetentionRowsDeletedTotal prometheus.Counter
 
 	RequestDuration  *prometheus.HistogramVec
 	GatewayOverhead  prometheus.Histogram
@@ -35,6 +37,9 @@ type Metrics struct {
 	BudgetUtilizationRatio   *prometheus.GaugeVec
 	RatelimitTokensRemaining *prometheus.GaugeVec
 	InflightRequests         *prometheus.GaugeVec
+
+	RequestLogQueueDepth        prometheus.Gauge
+	RetentionLastSweepTimestamp prometheus.Gauge
 }
 
 func NewMetrics() (*Metrics, error) {
@@ -84,6 +89,26 @@ func NewMetrics() (*Metrics, error) {
 		Name: "switchyard_cost_microdollars_total",
 		Help: "Total cost in integer micro-dollars, by team, provider, and model. Compute spend rates in PromQL, not here.",
 	}, []string{"team", "provider", "model"})
+
+	m.RequestLogRowsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "switchyard_requestlog_rows_total",
+		Help: "Request-log rows by outcome: written, dropped (queue full), or failed (Postgres write error).",
+	}, []string{"outcome"})
+
+	m.RequestLogQueueDepth = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "switchyard_requestlog_queue_depth",
+		Help: "Request-log rows currently buffered and awaiting a flush.",
+	})
+
+	m.RetentionRowsDeletedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "switchyard_retention_rows_deleted_total",
+		Help: "Request-log detail rows rolled into the daily summary and deleted by retention.",
+	})
+
+	m.RetentionLastSweepTimestamp = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "switchyard_retention_last_sweep_timestamp_seconds",
+		Help: "Unix time of the last successful retention sweep. Alert when this stops advancing.",
+	})
 
 	m.RequestDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "switchyard_request_duration_seconds",
@@ -137,10 +162,12 @@ func NewMetrics() (*Metrics, error) {
 	collectors := []prometheus.Collector{
 		m.RequestsTotal, m.ErrorsTotal, m.RetriesTotal, m.FallbacksTotal,
 		m.RatelimitRejectionsTotal, m.BudgetRejectionsTotal, m.BreakerTransitionsTotal,
-		m.TokensTotal, m.CostMicrodollarsTotal,
+		m.TokensTotal, m.CostMicrodollarsTotal, m.RequestLogRowsTotal,
+		m.RetentionRowsDeletedTotal,
 		m.RequestDuration, m.GatewayOverhead, m.ProviderDuration, m.TimeToFirstToken,
 		m.ProviderHealth, m.BreakerState, m.BudgetUtilizationRatio,
-		m.RatelimitTokensRemaining, m.InflightRequests,
+		m.RatelimitTokensRemaining, m.InflightRequests, m.RequestLogQueueDepth,
+		m.RetentionLastSweepTimestamp,
 	}
 	for _, c := range collectors {
 		if err := m.registry.Register(c); err != nil {
