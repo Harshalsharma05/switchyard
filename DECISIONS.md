@@ -391,3 +391,18 @@ Each adapter wraps the caller's `ctx` with `context.WithTimeout(ctx, cfg.Timeout
 - **NULL provider and served_model become empty strings in the summary.** They are primary-key columns, and NULL would split what should be one group into rows that never match on conflict — silently losing the rejected-request rows (402s, 403s) that never reached a provider.
 - **Retention stops on the shutdown signal, not on the log flusher's context.** An in-progress sweep has nothing to hand off, unlike the flusher, which still has rows arriving from requests finishing during the drain.
 - **A zero window disables retention entirely** rather than meaning "delete everything" — the value you get from a typo or an unset variable must be the safe one.
+
+---
+
+## Phase 2 — Frontend Shell + Overview
+
+- **Polling, not SSE, for live updates.** Simpler, no per-tab connection to manage, and adequate at this scale. `/admin/summary` caches for ~5s server-side, so N open tabs cost one Prometheus query per window regardless of N — which is what removes the usual argument for SSE here.
+- **The poll hook owns the two behaviours the plan requires:** hidden tabs stop polling entirely (resume on `visibilitychange`), and repeated failures back off exponentially to a 30s cap instead of hammering a down gateway. Last good data stays on screen under a "Reconnecting" / "Disconnected" indicator rather than the screen blanking on one failed poll.
+- **`/admin/summary` never returns an error.** A Prometheus failure comes back as a `200` with `degraded: true` and whatever scalars did resolve; the UI shows partial KPIs plus a banner. A dashboard showing stale numbers beats one showing an error page.
+- **Summary endpoint caches per `(range, team)` for 5s**, so the 3–5s poll interval across several tabs collapses to one Prometheus round trip per key per window.
+- **`/admin/me` and `/admin/summary` are not behind the admin gate** — any valid team key reaches them, and a non-admin's summary is scoped to its own team server-side (`team=` naming another team is a 400, not silently ignored). The admin flag is data in the `/me` response, not a gate on reaching it.
+- **Admin routes gated in two places:** hidden from the nav rail *and* redirected in the router, so typing the URL directly lands on Overview, never a broken screen. The API `403` is the real control; the UI gate is courtesy.
+- **Cache-hit-rate ships as an explicit empty state, not a zero.** `/admin/summary` returns `cache.enabled: false` until Phase 7; the KPI renders "Not yet enabled". Same rule as the request-log — a fabricated 0% is worse than no number.
+- **Key lives in `sessionStorage` + a ref, never React state.** Per-tab, gone on tab close, and kept out of render so it can't leak into a component tree or a screenshot. A restored key is validated by one `/admin/me` call before the app renders.
+- **Grafana link carries the current range through** (`from=now-<range>`) and points at the provisioned `switchyard-performance` dashboard. The point of the affordance is proving both read the same Prometheus — the styled charts are not a replacement for the real stack.
+- **Overhead histogram is queried without a team label.** Gateway overhead is a property of the gateway, not of a team's traffic, so it is never scoped even when the rest of the summary is.

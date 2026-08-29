@@ -118,6 +118,10 @@ services:
       - SWITCHYARD_REDIS_ADDR=redis:6379
       - SWITCHYARD_OTLP_ENDPOINT=jaeger:4318
       - SWITCHYARD_PROVIDERS_CONFIG=/app/providers.compose.yaml
+      - SWITCHYARD_ENV=dev
+      - SWITCHYARD_CHAOS_ENABLED=true
+      - SWITCHYARD_HEALTH_CHECK_TIMEOUT=20s 
+
       # Step 2.3's Overview summary queries Prometheus server-side. On the
       # compose network that is the service name and its container port, not
       # the 9091 the host default points at.

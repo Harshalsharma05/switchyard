@@ -6,11 +6,14 @@
 // so callers can branch on type (invalid_api_key, admin_required, …) rather
 // than parsing a message string.
 export class ApiError extends Error {
-  constructor(status, type, message) {
+  constructor(status, type, message, detail) {
     super(message || `request failed with ${status}`)
     this.name = 'ApiError'
     this.status = status
     this.type = type
+    // The full error envelope ({type, message, switchyard_attempts?}) when the
+    // caller needs the structured detail — Playground's 503 breakdown does.
+    this.detail = detail ?? null
   }
 }
 
@@ -40,7 +43,7 @@ export async function request(path, { key, method = 'GET', body, signal } = {}) 
 
   if (!resp.ok) {
     const e = data && data.error
-    throw new ApiError(resp.status, e?.type ?? 'error', e?.message)
+    throw new ApiError(resp.status, e?.type ?? 'error', e?.message, e)
   }
   return data
 }

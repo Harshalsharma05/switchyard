@@ -1,0 +1,201 @@
+/* Playground layout: a 7/5 split (DESIGN.md). Left is the prompt and the
+   streaming response; right holds metadata and history from Step 3.2 on. */
+.pg {
+  display: grid;
+  grid-template-columns: 7fr 5fr;
+  gap: var(--space-3);
+}
+.pg-main, .pg-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.pg-prompt {
+  width: 100%;
+  resize: vertical;
+  padding: var(--space-3);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  color: var(--text-primary);
+  line-height: 1.5;
+}
+.pg-prompt:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--status-info-bg);
+}
+
+.pg-controls {
+  display: flex;
+  align-items: end;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+.pg-field { display: flex; flex-direction: column; gap: var(--space-1); }
+.pg-field > span { font-size: 11px; color: var(--text-secondary); }
+
+.pg-select {
+  height: 32px;
+  padding: 0 var(--space-2);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  color: var(--text-primary);
+}
+
+.pg-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 32px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.pg-send {
+  height: 32px;
+  margin-left: auto;
+  padding: 0 var(--space-4);
+  font-weight: 500;
+  color: var(--text-primary);
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+}
+.pg-send:disabled { opacity: 0.5; cursor: default; }
+
+.pg-response {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-primary);
+}
+
+.pg-waiting { margin: 0; font-size: 13px; color: var(--text-muted); }
+
+/* 429 / 402 / 503: a bordered block in the status colour, structured detail. */
+.pg-err {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  font-size: 13px;
+  border: 1px solid;
+  border-radius: var(--radius-control);
+}
+.pg-err:first-child { margin-top: 0; }
+.pg-err-warn { border-color: var(--status-warn); background: var(--status-warn-bg); }
+.pg-err-error { border-color: var(--status-error); background: var(--status-error-bg); }
+
+.pg-err-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-weight: 500;
+}
+.pg-err-warn .pg-err-head { color: var(--status-warn); }
+.pg-err-error .pg-err-head { color: var(--status-error); }
+
+.pg-err-msg { margin: var(--space-2) 0 0; color: var(--text-primary); }
+
+.pg-err-grid {
+  margin: var(--space-3) 0 0;
+  display: grid;
+  grid-template-columns: auto auto;
+  justify-content: start;
+  gap: var(--space-1) var(--space-4);
+  font-size: 12px;
+}
+.pg-err-grid dt { color: var(--text-secondary); }
+.pg-err-grid dd { margin: 0; font-family: var(--font-mono); color: var(--text-primary); }
+
+.pg-err-attempts {
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.pg-err-attempts li {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  column-gap: var(--space-3);
+  padding: var(--space-2);
+  background: var(--bg-inset);
+  border-radius: var(--radius-control);
+  font-size: 12px;
+}
+.pg-att-cand { font-family: var(--font-mono); color: var(--text-primary); }
+.pg-att-type { color: var(--status-warn); }
+.pg-att-n { color: var(--text-muted); }
+.pg-att-msg {
+  grid-column: 1 / -1;
+  color: var(--text-secondary);
+  word-break: break-word;
+}
+
+.pg-err-partial { margin: var(--space-3) 0 0; font-size: 12px; color: var(--text-muted); }
+
+/* Metadata as a definition list: label in --text-secondary, value in mono. */
+.pg-meta {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-2) var(--space-4);
+}
+.pg-meta dt { font-size: 12px; color: var(--text-secondary); }
+.pg-meta dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+  text-align: right;
+  word-break: break-all;
+}
+.pg-meta .pg-muted { color: var(--text-muted); }
+.pg-unit { color: var(--text-muted); }
+
+.pg-fallback {
+  margin-left: var(--space-2);
+  padding: 0 var(--space-1);
+  font-family: var(--font-sans);
+  font-size: 10px;
+  color: var(--status-warn);
+  border: 1px solid var(--status-warn);
+  border-radius: 3px;
+}
+
+/* Session history: click a row to repopulate the controls and re-send. */
+.pg-hist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.pg-hist-item {
+  width: 100%;
+  text-align: left;
+  padding: var(--space-2);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  cursor: pointer;
+}
+.pg-hist-item:hover:not(:disabled) { border-color: var(--border-strong); }
+.pg-hist-item:disabled { opacity: 0.5; cursor: default; }
+
+.pg-hist-prompt {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+.pg-hist-meta { display: block; margin-top: var(--space-1); font-size: 11px; color: var(--text-muted); }
+
+@media (max-width: 1100px) {
+  .pg { grid-template-columns: 1fr; }
+}

@@ -19,6 +19,14 @@ export function formatUSD(n) {
   return `$${n.toFixed(2)}`
 }
 
+// Micro-dollar precision for a single cost value, where formatUSD's two
+// decimals would round a real sub-cent request cost to $0.00.
+export function formatMicroDollars(micros) {
+  if (micros === null || micros === undefined) return '—'
+  if (micros === 0) return '$0.00'
+  return `$${(micros / 1_000_000).toFixed(6)}`
+}
+
 export function formatPercent(ratio, digits = 2) {
   if (ratio === null || ratio === undefined) return '—'
   return `${(ratio * 100).toFixed(digits)}%`
