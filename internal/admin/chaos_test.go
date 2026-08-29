@@ -56,7 +56,7 @@ func newTestAdminServerWithChaos(t *testing.T, chaos ChaosController) *httptest.
 	t.Helper()
 	srv := httptest.NewServer(NewRouter(func() bool { return true },
 		testTeamStore(t), &fakeSpendReader{}, fakeProviderLister{}, fakeHealthReader{},
-		&fakeBreakerResetter{}, chaos, fakeReloader, nil, nil, testMetrics(t), discardLogger()))
+		&fakeBreakerController{}, chaos, fakeReloader, nil, nil, nil, testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)
 	return srv
 }

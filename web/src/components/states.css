@@ -1,0 +1,42 @@
+.state-skeleton { display: flex; flex-direction: column; gap: var(--space-2); }
+
+.state-skeleton-bar {
+  height: 14px;
+  border-radius: var(--radius-control);
+  background: var(--bg-raised);
+  animation: state-pulse 1.4s var(--ease) infinite;
+}
+.state-skeleton-bar:nth-child(2) { width: 82%; }
+.state-skeleton-bar:nth-child(3) { width: 64%; }
+
+@keyframes state-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+.state-empty, .state-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-4) 0;
+}
+
+.state-empty p { margin: 0; font-size: 13px; color: var(--text-secondary); }
+.state-error p { margin: 0; font-size: 13px; color: var(--status-error); }
+
+.state-retry {
+  height: 32px;
+  padding: 0 var(--space-3);
+  font-size: 13px;
+  color: var(--text-primary);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  cursor: pointer;
+}
+.state-retry:hover { background: var(--bg-raised); }
+
+@media (prefers-reduced-motion: reduce) {
+  .state-skeleton-bar { animation: none; }
+}

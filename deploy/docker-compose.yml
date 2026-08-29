@@ -118,6 +118,20 @@ services:
       - SWITCHYARD_REDIS_ADDR=redis:6379
       - SWITCHYARD_OTLP_ENDPOINT=jaeger:4318
       - SWITCHYARD_PROVIDERS_CONFIG=/app/providers.compose.yaml
+      # Step 2.3's Overview summary queries Prometheus server-side. On the
+      # compose network that is the service name and its container port, not
+      # the 9091 the host default points at.
+      - SWITCHYARD_PROMETHEUS_URL=http://prometheus:9090
+      # The request-log Postgres is the compose service, not localhost — the
+      # code default (localhost:5432) is for a host-run gateway. The migrate
+      # service already sets this; the gateway needs it too, or every
+      # /admin/requests read and every log write dials its own container.
+      - SWITCHYARD_POSTGRES_HOST=postgres:5432
+      # A cold local Ollama model can take longer than the 5s default to load
+      # into memory for its first health-check ping. Hosted providers answer in
+      # well under a second, and the check loop runs every provider
+      # concurrently, so a wider ceiling never delays groq or gemini.
+      - SWITCHYARD_HEALTH_CHECK_TIMEOUT=20s
     # Ollama runs natively on the host, not as a Compose service — this is
     # what lets the container reach it at host.docker.internal regardless.
     # Docker Desktop (Windows/Mac) resolves that hostname on its own;
@@ -198,6 +212,11 @@ services:
       # Placeholder default so a missing webhook never blocks provisioning;
       # see .env.example for how to set a real one.
       - SWITCHYARD_SLACK_WEBHOOK_URL=${SWITCHYARD_SLACK_WEBHOOK_URL:-https://hooks.slack.com/services/PLACEHOLDER}
+      # Step 2.6: the console's "Open in Grafana" link should land on the
+      # dashboard, not a login form. Anonymous Viewer is read-only and this is
+      # a local dev/demo stack — admin/admin still gates every edit.
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
     depends_on:
       - prometheus
 

@@ -1,0 +1,118 @@
+.degraded {
+  margin: 0 0 var(--space-4);
+  padding: var(--space-2) var(--space-3);
+  font-size: 12px;
+  color: var(--status-warn);
+  background: var(--status-warn-bg);
+  border-radius: var(--radius-control);
+}
+
+/* KPI row: five equal cards across the full width. */
+.kpi-row {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: var(--space-3);
+  margin-bottom: var(--space-6);
+}
+
+/* Two-up: 8 / 4 split, main chart column plus side panels. */
+.split {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: var(--space-3);
+  margin-bottom: var(--space-6);
+}
+.split-main, .split-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.card-link { font-size: 12px; color: var(--accent); }
+
+/* --- provider / breaker lists --- */
+.plist { list-style: none; margin: 0; padding: 0; }
+
+.plist-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border);
+}
+.plist-row:last-child { border-bottom: none; }
+
+.plist-name { font-size: 13px; color: var(--text-primary); }
+.plist-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.plist-row > .pill-status { margin-left: auto; }
+.plist-metrics { margin-left: auto; font-size: 12px; color: var(--text-secondary); }
+.plist-unit { color: var(--text-muted); margin-left: 2px; }
+
+/* --- live feed table --- */
+.feed-card { padding-bottom: var(--space-2); }
+.feed-wrap { overflow-x: auto; }
+
+.table { width: 100%; border-collapse: collapse; }
+
+.table th {
+  position: sticky;
+  top: 0;
+  padding: 10px 12px;
+  font-size: 11px;
+  font-weight: 400;
+  text-align: left;
+  color: var(--text-secondary);
+  background: var(--bg-raised);
+  white-space: nowrap;
+}
+
+.table td {
+  padding: 10px 12px;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.table tbody tr:last-child td { border-bottom: none; }
+.table tbody tr:hover { background: var(--bg-raised); }
+
+.ta-r { text-align: right; }
+
+.feed-unit { color: var(--text-muted); margin-left: 2px; }
+
+.feed-flag {
+  margin-left: var(--space-2);
+  font-size: 11px;
+  color: var(--status-info);
+}
+
+.feed-paused {
+  margin: var(--space-2) 0 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* New rows flash once and settle — no slide-in, no layout shift. Rows are keyed
+   by request id, so only a newly mounted row runs this; rows that persist keep
+   their element and never re-animate. */
+.feed-table tbody tr { animation: row-flash var(--motion-flash) var(--ease) 1; }
+
+@keyframes row-flash {
+  from { background: var(--bg-raised); }
+  to { background: transparent; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .feed-table tbody tr { animation: none; }
+}
+
+@media (max-width: 1100px) {
+  .kpi-row { grid-template-columns: repeat(2, 1fr); }
+  .split { grid-template-columns: 1fr; }
+}

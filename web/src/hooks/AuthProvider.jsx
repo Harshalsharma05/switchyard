@@ -2,7 +2,7 @@
 // is no login backend. The user pastes a team key; it lives in memory and in
 // sessionStorage (per-tab, gone when the tab closes), and every call sends it
 // as a bearer token. A successful GET /admin/me is what proves a key is valid.
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError } from '../api/client.js'
 import { fetchMe } from '../api/session.js'
 import { AuthContext, STORAGE_KEY } from './useAuth.js'
@@ -67,15 +67,16 @@ export function AuthProvider({ children }) {
     }
   }, [apply, clear])
 
-  const value = {
-    status,
-    me,
-    error,
-    isAdmin: me?.is_admin ?? false,
-    signIn,
-    signOut: () => clear(null),
-    // A function, not a value, so the key stays out of React state and render.
-    getKey: () => keyRef.current,
-  }
+  // A function, not a value, so the key stays out of React state and render.
+  const getKey = useCallback(() => keyRef.current, [])
+  const signOut = useCallback(() => clear(null), [clear])
+
+  // Memoized: the polling hooks key their effects on the fetchers built from
+  // getKey, so a context value rebuilt on every render would restart every
+  // poll on every render.
+  const value = useMemo(
+    () => ({ status, me, error, isAdmin: me?.is_admin ?? false, signIn, signOut, getKey }),
+    [status, me, error, signIn, signOut, getKey],
+  )
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }

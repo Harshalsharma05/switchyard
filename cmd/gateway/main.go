@@ -27,6 +27,7 @@ import (
 	"github.com/Harshalsharma05/switchyard/internal/proxy"
 	"github.com/Harshalsharma05/switchyard/internal/ratelimit"
 	"github.com/Harshalsharma05/switchyard/internal/resilience"
+	"github.com/Harshalsharma05/switchyard/internal/summary"
 	"github.com/Harshalsharma05/switchyard/internal/telemetry"
 )
 
@@ -139,6 +140,17 @@ const (
 	defaultPostgresUser    = "switchyard"
 	defaultPostgresDB      = "switchyard"
 	defaultPostgresSSLMode = "disable"
+
+	// Part 2 Step 2.3's Overview summary. SWITCHYARD_PROMETHEUS_URL defaults to
+	// the port docker-compose publishes Prometheus on, so a host-run gateway
+	// with `docker compose up prometheus` works with no config; the compose
+	// gateway service overrides it to the service name. Empty disables the
+	// endpoint (it returns degraded). The cache TTL is deliberately short —
+	// long enough that several polling tabs don't hammer Prometheus, short
+	// enough that a stale summary is only a few seconds old.
+	defaultPrometheusURL      = "http://localhost:9091"
+	defaultSummaryCacheTTL    = 5 * time.Second
+	defaultSummaryHTTPTimeout = 3 * time.Second
 
 	// readHeaderTimeout bounds how long a client may take to send its headers,
 	// which is the Slowloris defence. Note that WriteTimeout is deliberately
@@ -376,6 +388,15 @@ func run() error {
 		log.Warn("request log disabled: POSTGRES_PASSWORD is unset")
 	}
 
+	// Step 2.3's Overview summary service. It never blocks a request path and
+	// degrades on its own when Prometheus is unreachable, so it is wired
+	// unconditionally — an empty URL just makes every response degraded.
+	summarySvc := summary.NewService(summary.Config{
+		PrometheusURL: envOr("SWITCHYARD_PROMETHEUS_URL", defaultPrometheusURL),
+		CacheTTL:      durationOr("SWITCHYARD_SUMMARY_CACHE_TTL", defaultSummaryCacheTTL),
+		HTTPTimeout:   durationOr("SWITCHYARD_SUMMARY_HTTP_TIMEOUT", defaultSummaryHTTPTimeout),
+	})
+
 	// ready gates /readyz. It flips true once wiring is complete and false again
 	// the moment shutdown begins, so a load balancer stops sending new traffic
 	// while in-flight requests drain.
@@ -400,7 +421,7 @@ func run() error {
 
 	adminSrv := &http.Server{
 		Addr: envOr("SWITCHYARD_ADMIN_ADDR", defaultAdminAddr),
-		Handler: admin.NewRouter(isReady, store, budgetTracker, store, healthMonitor, breakerRegistry, chaosAdapter{chaos}, newReloader(store, providersPath, teamsPath), reqLogReader, store, promMetrics, log,
+		Handler: admin.NewRouter(isReady, store, budgetTracker, store, healthMonitor, breakerRegistry, chaosAdapter{chaos}, newReloader(store, providersPath, teamsPath), reqLogReader, store, summarySvc, promMetrics, log,
 			proxy.Recoverer(log),
 			proxy.RequestID,
 			proxy.Logger(log),

@@ -61,8 +61,8 @@ func newRequestLogServer(t *testing.T, reader RequestLogReader) *httptest.Server
 	t.Helper()
 	srv := httptest.NewServer(NewRouter(func() bool { return true },
 		testTeamStore(t), &fakeSpendReader{}, fakeProviderLister{}, fakeHealthReader{},
-		&fakeBreakerResetter{}, nil, fakeReloader, reader, requestLogRegistry(t),
-		testMetrics(t), discardLogger()))
+		&fakeBreakerController{}, nil, fakeReloader, reader, requestLogRegistry(t),
+		nil, testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)
 	return srv
 }

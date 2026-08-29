@@ -32,6 +32,12 @@
   /* accent — same as status-info; one accent-filled button per view */
   --accent: #4C8DFF;
 
+  /* chart series — accent first, then a restrained sequence. Defined once here
+     so no chart component ever names a colour of its own. */
+  --chart-series-1: #4C8DFF;
+  --chart-series-2: #5F6A73;
+  --chart-series-3: #7FA8E8;
+
   /* type — real font files land in Phase 2.2; fallbacks hold until then */
   --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;

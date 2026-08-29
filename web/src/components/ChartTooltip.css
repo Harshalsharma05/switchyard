@@ -1,0 +1,19 @@
+.charttip {
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.charttip-label { color: var(--text-secondary); margin-bottom: var(--space-1); }
+
+.charttip-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.charttip-swatch { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.charttip-name { color: var(--text-secondary); }
+.charttip-value { margin-left: auto; color: var(--text-primary); }

@@ -31,7 +31,7 @@ type Middleware func(http.Handler) http.Handler
 // Route paths carry an explicit /admin prefix even though the whole listener
 // is already the admin port, leaving room for /metrics and future operator
 // endpoints to live at the root without colliding with this namespace.
-func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers ProviderLister, healthReader HealthReader, breakers BreakerResetter, chaos ChaosController, reload Reloader, requestLog RequestLogReader, authr KeyAuthenticator, metrics *telemetry.Metrics, log *slog.Logger, middleware ...Middleware) http.Handler {
+func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers ProviderLister, healthReader HealthReader, breakers BreakerController, chaos ChaosController, reload Reloader, requestLog RequestLogReader, authr KeyAuthenticator, summarySvc SummaryService, metrics *telemetry.Metrics, log *slog.Logger, middleware ...Middleware) http.Handler {
 	r := chi.NewRouter()
 
 	for _, mw := range middleware {
@@ -47,12 +47,13 @@ func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers 
 	// pin a non-admin to its own rows internally. Neither is behind the admin
 	// gate — any valid key reaches them.
 	r.Get("/admin/me", handleMe(authr, spend, log))
+	r.Get("/admin/summary", handleSummary(summarySvc, healthReader, authr, log))
 	r.Get("/admin/requests", listRequests(requestLog, authr, log))
 	r.Get("/admin/requests/{id}", getRequest(requestLog, authr, log))
 
 	// Read-only operator surface: no key, same as the Prometheus scrape.
 	r.Get("/admin/providers", listProviders(providers, log))
-	r.Get("/admin/providers/health", listProviderHealth(healthReader, log))
+	r.Get("/admin/providers/health", listProviderHealth(healthReader, breakers, log))
 
 	// Everything mutating or cross-team now requires an admin key (Step 2.1).
 	// requireAdmin is inert when authr is nil, so tests that drive these
