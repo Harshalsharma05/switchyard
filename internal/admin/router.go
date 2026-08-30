@@ -50,6 +50,8 @@ func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers 
 	r.Get("/admin/summary", handleSummary(summarySvc, healthReader, authr, log))
 	r.Get("/admin/requests", listRequests(requestLog, authr, log))
 	r.Get("/admin/requests/{id}", getRequest(requestLog, authr, log))
+	r.Get("/admin/costs", handleCosts(requestLog, authr, log))
+	r.Get("/admin/attribution", handleAttribution(requestLog, authr, log))
 
 	// Read-only operator surface: no key, same as the Prometheus scrape.
 	r.Get("/admin/providers", listProviders(providers, log))
@@ -68,6 +70,9 @@ func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers 
 			r.Patch("/{id}", patchTeam(teams, spend, log))
 			r.Post("/{id}/reset-budget", resetBudget(teams, spend, log))
 		})
+
+		// Step 6.1: cross-checks Redis budget counters against the request log.
+		r.Get("/admin/reconciliation", handleReconciliation(teams, spend, requestLog, log))
 
 		// Registered after /admin/providers/health so chi's static-over-wildcard
 		// precedence is not the only thing keeping "health" from being read as a

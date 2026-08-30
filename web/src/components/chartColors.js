@@ -2,6 +2,10 @@
 // the palette lives in tokens.css and no component names a colour itself.
 export const CHART_SERIES = ['var(--chart-series-1)', 'var(--chart-series-2)', 'var(--chart-series-3)']
 
+// The "Other" bucket a breakdown chart folds its long tail into, kept visually
+// quiet so it never competes with a named series.
+export const CHART_OVERFLOW = 'var(--text-muted)'
+
 // Overhead's three percentiles: p95 carries the accent because it is the
 // number the project is measured against; p50 and p99 sit back.
 export const OVERHEAD_SERIES = [

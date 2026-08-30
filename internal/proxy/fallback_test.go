@@ -485,6 +485,32 @@ func TestFallbackLogsCostDelta(t *testing.T) {
 	}
 }
 
+// Step 6.3: the served request records the real, signed cost delta against the
+// requested model priced at the same usage — 20 tokens at fast-b's rate (200)
+// minus fast-a's (20) is +180.
+func TestFallbackRecordsRealCostDelta(t *testing.T) {
+	groq := failingMock("groq", provider.KindServerError, true)
+	ollama := &provider.Mock{
+		ProviderName: "ollama",
+		Response: &provider.Response{
+			Content: "hi", FinishReason: provider.FinishStop, Model: "fast-b", Provider: "ollama",
+			Usage: provider.Usage{InputTokens: 10, OutputTokens: 10},
+		},
+	}
+	calc := modelCostCalculator{perToken: map[string]int64{"fast-a": 1, "fast-b": 10}}
+
+	var logs bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&logs, nil))
+	srv := newCostAwareServer(t, &recordingBudgetTracker{}, calc, log, groq, ollama)
+
+	if resp := post(t, srv, `{"model":"fast-a","messages":[{"role":"user","content":"hi"}]}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if want := `"fallback_cost_delta_micros":180`; !strings.Contains(logs.String(), want) {
+		t.Errorf("request log missing %s\n%s", want, logs.String())
+	}
+}
+
 // TestPricierFallbackReservesOnlyTheDifference is Step 6.4's third
 // requirement. The budget check re-runs for the costlier model, and it
 // reserves the difference rather than the whole estimate again — the part

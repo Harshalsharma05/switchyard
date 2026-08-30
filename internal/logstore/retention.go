@@ -28,7 +28,7 @@ const retentionLockKey int64 = 0x5359_4152_4401 // "SYARD\1"
 const sweepSQL = `
 WITH doomed AS (
     SELECT id, ts, team_id, provider, served_model, status_code,
-           input_tokens, output_tokens, cost_micros
+           input_tokens, output_tokens, cost_micros, fallback_cost_delta_micros
     FROM requests
     WHERE ts < $1
     ORDER BY ts
@@ -37,13 +37,15 @@ WITH doomed AS (
 rolled AS (
     INSERT INTO requests_daily AS d (
         day, team_id, provider, served_model,
-        requests, errors, input_tokens, output_tokens, cost_micros
+        requests, errors, input_tokens, output_tokens, cost_micros,
+        fallback_cost_delta_micros
     )
     SELECT (ts AT TIME ZONE 'UTC')::date, team_id,
            COALESCE(provider, ''), COALESCE(served_model, ''),
            count(*), count(*) FILTER (WHERE status_code >= 400),
            COALESCE(sum(input_tokens), 0), COALESCE(sum(output_tokens), 0),
-           COALESCE(sum(cost_micros), 0)
+           COALESCE(sum(cost_micros), 0),
+           COALESCE(sum(fallback_cost_delta_micros), 0)
     FROM doomed
     GROUP BY 1, 2, 3, 4
     ON CONFLICT (day, team_id, provider, served_model) DO UPDATE SET
@@ -51,7 +53,9 @@ rolled AS (
         errors        = d.errors        + EXCLUDED.errors,
         input_tokens  = d.input_tokens  + EXCLUDED.input_tokens,
         output_tokens = d.output_tokens + EXCLUDED.output_tokens,
-        cost_micros   = d.cost_micros   + EXCLUDED.cost_micros
+        cost_micros   = d.cost_micros   + EXCLUDED.cost_micros,
+        fallback_cost_delta_micros =
+            d.fallback_cost_delta_micros + EXCLUDED.fallback_cost_delta_micros
     RETURNING 1
 ),
 removed AS (

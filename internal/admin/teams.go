@@ -62,6 +62,12 @@ type teamView struct {
 	SpentUSD          *float64       `json:"spent_usd"`
 	BudgetUtilization *float64       `json:"budget_utilization"`
 	Priority          string         `json:"priority"`
+
+	// KeyFingerprint is the first 12 hex characters of the key's SHA-256
+	// digest — enough for an operator to tell one configured key from another
+	// or notice one changed, and far too little to be the digest or to attack.
+	// Step 6.4's "view API key metadata, never the key and never the hash".
+	KeyFingerprint string `json:"key_fingerprint,omitempty"`
 }
 
 // teamPatchRequest is PATCH /admin/teams/{id}'s body. Every field is
@@ -83,6 +89,16 @@ func microsToUSD(micros int64) float64 {
 	return float64(micros) / microsPerUSD
 }
 
+// keyFingerprint is a short, one-way handle on a team's key for the management
+// UI. A 12-hex-char prefix of a 64-char SHA-256 digest: identifying, not the
+// digest, and nothing a brute-force could work back from.
+func keyFingerprint(keyHash string) string {
+	if len(keyHash) < 12 {
+		return ""
+	}
+	return keyHash[:12]
+}
+
 // newTeamView builds the response shape for one team. spentMicros is nil
 // when spend was not read (a Redis failure, logged by the caller) — see the
 // teamView doc comment for why that stays null rather than becoming 0.
@@ -95,6 +111,7 @@ func newTeamView(t auth.Team, spentMicros *int64) teamView {
 		RateLimits:       rateLimitsView{RPM: t.RateLimits.RPM, TPM: t.RateLimits.TPM},
 		MonthlyBudgetUSD: microsToUSD(t.MonthlyBudgetMicros),
 		Priority:         string(t.Priority),
+		KeyFingerprint:   keyFingerprint(t.KeyHash),
 	}
 	if spentMicros != nil {
 		spentUSD := microsToUSD(*spentMicros)

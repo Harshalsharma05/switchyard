@@ -44,20 +44,21 @@ func RequestLog(logger RequestLogger) func(http.Handler) http.Handler {
 			}
 
 			logger.Write(logstore.Record{
-				ID:             RequestIDFrom(r.Context()),
-				Timestamp:      m.start,
-				TeamID:         m.teamID,
-				RequestedModel: m.requestedModel,
-				ServedModel:    m.servedModel,
-				Provider:       m.providerName,
-				StatusCode:     status,
-				InputTokens:    m.usage.InputTokens,
-				OutputTokens:   m.usage.OutputTokens,
-				CostMicros:     m.costMicros,
-				LatencyMS:      millis(time.Since(m.start)),
-				OverheadMS:     millis(m.overhead()),
-				Fallback:       m.fellBack,
-				TraceID:        traceID,
+				ID:                      RequestIDFrom(r.Context()),
+				Timestamp:               m.start,
+				TeamID:                  m.teamID,
+				RequestedModel:          m.requestedModel,
+				ServedModel:             m.servedModel,
+				Provider:                m.providerName,
+				StatusCode:              status,
+				InputTokens:             m.usage.InputTokens,
+				OutputTokens:            m.usage.OutputTokens,
+				CostMicros:              m.costMicros,
+				LatencyMS:               millis(time.Since(m.start)),
+				OverheadMS:              millis(m.overhead()),
+				Fallback:                m.fellBack,
+				TraceID:                 traceID,
+				FallbackCostDeltaMicros: m.fallbackCostDeltaMicros,
 			})
 		})
 	}

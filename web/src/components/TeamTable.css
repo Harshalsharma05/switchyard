@@ -1,0 +1,51 @@
+/* Team management table (Step 6.4). Uses the shared .table primitive; only its
+   own inline-edit bits live here. */
+.tt-wrap { overflow-x: auto; }
+
+.tt-name { color: var(--text-primary); }
+.tt-id {
+  margin-left: var(--space-2);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.tt-fingerprint { color: var(--text-secondary); }
+
+.tt-row-editing td { background: var(--bg-raised); }
+
+.tt-input {
+  width: 96px;
+  height: 28px;
+  padding: 0 var(--space-2);
+  font-size: 13px;
+  text-align: right;
+  color: var(--text-primary);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+}
+.tt-input:focus-visible { border-color: var(--accent); outline: none; }
+
+.tt-actions { white-space: nowrap; text-align: right; }
+
+.tt-btn {
+  height: 28px;
+  padding: 0 var(--space-2);
+  margin-left: var(--space-2);
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  cursor: pointer;
+}
+.tt-btn:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-raised); }
+.tt-btn:disabled { color: var(--text-muted); cursor: not-allowed; }
+
+.tt-btn-primary { color: var(--accent); border-color: var(--accent); }
+
+.tt-error-row td {
+  padding-top: var(--space-1);
+  font-size: 12px;
+  color: var(--status-error);
+  border-bottom: 1px solid var(--border);
+}

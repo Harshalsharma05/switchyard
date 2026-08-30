@@ -32,10 +32,10 @@ export function formatPercent(ratio, digits = 2) {
   return `${(ratio * 100).toFixed(digits)}%`
 }
 
-// Time axes format by range: HH:mm within a day, MMM d beyond it.
+// Time axes format by range: HH:mm within a day, MMM d for any multi-day span.
 export function formatAxisTime(iso, range) {
   const d = new Date(iso)
-  if (range === '7d') {
+  if (range === '7d' || range === '30d') {
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
   }
   return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false })

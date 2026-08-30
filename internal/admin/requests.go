@@ -17,10 +17,16 @@ import (
 	"github.com/Harshalsharma05/switchyard/internal/logstore"
 )
 
-// RequestLogReader is the slice of logstore.Writer this package needs.
+// RequestLogReader is everything the admin API reads from the request log: the
+// paginated query and single-row lookup behind /admin/requests, the per-team
+// cost total /admin/reconciliation weighs against Redis, and the bucketed cost
+// series behind /admin/costs.
 type RequestLogReader interface {
 	Query(ctx context.Context, f logstore.Filter) (logstore.Page, error)
 	Get(ctx context.Context, id, teamID string) (logstore.Record, error)
+	SpendByTeamSince(ctx context.Context, since time.Time) (map[string]int64, error)
+	CostSeries(ctx context.Context, q logstore.CostQuery) ([]logstore.CostCell, error)
+	FallbackCostSince(ctx context.Context, since time.Time, teamID string) (logstore.FallbackAttribution, error)
 }
 
 // KeyAuthenticator resolves a bearer token to a team. The admin listener has no

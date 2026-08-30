@@ -97,6 +97,9 @@ func TestWriterRoundTrip(t *testing.T) {
 	go w.Run(runCtx)
 
 	want := sampleRecord("req-roundtrip")
+	delta := int64(-742)
+	want.Fallback = true
+	want.FallbackCostDeltaMicros = &delta
 	w.Write(want)
 
 	cancel()
@@ -107,13 +110,16 @@ func TestWriterRoundTrip(t *testing.T) {
 	err := pool.QueryRow(ctx, `
 		SELECT id, ts, team_id, requested_model, served_model, provider, status_code,
 		       input_tokens, output_tokens, cost_micros, latency_ms, overhead_ms,
-		       fallback, cache_hit, quality_score, trace_id
+		       fallback, cache_hit, quality_score, trace_id, fallback_cost_delta_micros
 		FROM requests WHERE id = $1`, want.ID).Scan(
 		&got.ID, &got.Timestamp, &got.TeamID, &requested, &served, &prov, &got.StatusCode,
 		&got.InputTokens, &got.OutputTokens, &got.CostMicros, &got.LatencyMS, &got.OverheadMS,
-		&got.Fallback, &got.CacheHit, &got.QualityScore, &traceID)
+		&got.Fallback, &got.CacheHit, &got.QualityScore, &traceID, &got.FallbackCostDeltaMicros)
 	if err != nil {
 		t.Fatalf("reading row back: %v", err)
+	}
+	if got.FallbackCostDeltaMicros == nil || *got.FallbackCostDeltaMicros != -742 {
+		t.Errorf("fallback_cost_delta_micros = %v, want -742", got.FallbackCostDeltaMicros)
 	}
 
 	if got.TeamID != want.TeamID || got.StatusCode != want.StatusCode {

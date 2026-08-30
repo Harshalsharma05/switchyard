@@ -1,0 +1,54 @@
+/* Team spend card (Step 6.1): a KPI card with a 4px budget bar beneath. */
+.spend {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  padding: var(--space-4);
+}
+
+.spend-name { font-size: 12px; color: var(--text-secondary); }
+
+.spend-value {
+  font-size: 28px;
+  font-weight: 500;
+  line-height: 1.15;
+  color: var(--text-primary);
+}
+.spend-value-missing { color: var(--text-muted); }
+
+.spend-context {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.spend-badge {
+  padding: 1px 6px;
+  border-radius: var(--radius-control);
+  font-size: 10px;
+}
+.spend-badge-warn { color: var(--status-warn); background: var(--status-warn-bg); }
+.spend-badge-error { color: var(--status-error); background: var(--status-error-bg); }
+
+.spend-track {
+  margin-top: var(--space-2);
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+.spend-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  transition: width var(--motion-state) var(--ease);
+}
+.spend-fill-ok { background: var(--accent); }
+.spend-fill-warn { background: var(--status-warn); }
+.spend-fill-error { background: var(--status-error); }
+.spend-fill-info { background: var(--text-muted); }

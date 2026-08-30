@@ -105,6 +105,12 @@ type requestMetrics struct {
 	// usage does — no provider reached, or a mid-stream failure that never
 	// received a terminal usage-bearing chunk (see streamChatCompletions).
 	costMicros int64
+
+	// fallbackCostDeltaMicros is set by recordCost only when fellBack is true:
+	// costMicros minus what the requested model would have cost for the same
+	// usage. nil otherwise, so the request-log column stays NULL for requests
+	// that did not fall back. Step 6.3's "cost shifted by fallback".
+	fallbackCostDeltaMicros *int64
 }
 
 // metricsFrom returns the per-request metrics, or nil if Timing did not run.
@@ -444,6 +450,9 @@ func Logger(log *slog.Logger) func(http.Handler) http.Handler {
 						slog.Int("output_tokens", m.usage.OutputTokens),
 						slog.Int64("cost_micros", m.costMicros),
 					)
+				}
+				if m.fallbackCostDeltaMicros != nil {
+					attrs = append(attrs, slog.Int64("fallback_cost_delta_micros", *m.fallbackCostDeltaMicros))
 				}
 			}
 

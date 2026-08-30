@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/Harshalsharma05/switchyard/internal/auth"
 	"github.com/Harshalsharma05/switchyard/internal/logstore"
@@ -15,12 +16,21 @@ import (
 // tests assert on scoping: what matters is the TeamID the handler resolved,
 // not what a stub database would return for it.
 type fakeRequestLogReader struct {
-	gotFilter logstore.Filter
-	gotID     string
-	gotTeamID string
-	page      logstore.Page
-	record    logstore.Record
-	getErr    error
+	gotFilter   logstore.Filter
+	gotID       string
+	gotTeamID   string
+	page        logstore.Page
+	record      logstore.Record
+	getErr      error
+	spendByTeam map[string]int64
+	spendErr    error
+
+	gotCostQuery logstore.CostQuery
+	costCells    []logstore.CostCell
+	costErr      error
+
+	fallbackAttr logstore.FallbackAttribution
+	fallbackErr  error
 }
 
 func (f *fakeRequestLogReader) Query(_ context.Context, filter logstore.Filter) (logstore.Page, error) {
@@ -31,6 +41,20 @@ func (f *fakeRequestLogReader) Query(_ context.Context, filter logstore.Filter) 
 func (f *fakeRequestLogReader) Get(_ context.Context, id, teamID string) (logstore.Record, error) {
 	f.gotID, f.gotTeamID = id, teamID
 	return f.record, f.getErr
+}
+
+func (f *fakeRequestLogReader) SpendByTeamSince(_ context.Context, _ time.Time) (map[string]int64, error) {
+	return f.spendByTeam, f.spendErr
+}
+
+func (f *fakeRequestLogReader) CostSeries(_ context.Context, q logstore.CostQuery) ([]logstore.CostCell, error) {
+	f.gotCostQuery = q
+	return f.costCells, f.costErr
+}
+
+func (f *fakeRequestLogReader) FallbackCostSince(_ context.Context, _ time.Time, teamID string) (logstore.FallbackAttribution, error) {
+	f.gotTeamID = teamID
+	return f.fallbackAttr, f.fallbackErr
 }
 
 // requestLogRegistry mirrors testTeamStore but marks acme as admin, which is

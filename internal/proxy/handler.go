@@ -136,6 +136,22 @@ func (h *Handler) recordCost(ctx context.Context, metrics *requestMetrics, model
 		return
 	}
 	metrics.costMicros = cost
+
+	// When a fallback served this request, price the requested model against
+	// the same real usage and keep the signed difference — the durable form of
+	// the estimate Part 1 only logs (Step 6.3). A pricing failure on the
+	// counterfactual is left nil, exactly like the primary cost above: cost
+	// accounting never fails a request that already succeeded.
+	if metrics.fellBack && metrics.requestedModel != "" && metrics.requestedModel != model {
+		want, err := h.calc.Cost(metrics.requestedModel, usage.InputTokens, usage.OutputTokens)
+		if err != nil {
+			h.log.ErrorContext(ctx, "pricing fallback counterfactual",
+				slog.String("requested_model", metrics.requestedModel), slog.Any("error", err))
+			return
+		}
+		delta := cost - want
+		metrics.fallbackCostDeltaMicros = &delta
+	}
 }
 
 // ChatCompletions serves POST /v1/chat/completions, streaming and

@@ -436,3 +436,18 @@ Each adapter wraps the caller's `ctx` with `context.WithTimeout(ctx, cfg.Timeout
 - **The chaos banner and controls are admin-only** because `/admin/chaos` is admin-gated. A non-admin sees chaos affect their traffic with no indicator — accepted for a dev-only tool.
 - **The per-provider chaos control manages one provider-scoped rule and rebuilds the whole set on apply** (the endpoint replaces wholesale), preserving other providers' rules and any model-scoped ones.
 - **The load simulator is browser-generated and hard-capped at 20 concurrent / 60s**, clamped on input and again at start. The UI states plainly it is indicative, not a benchmark — the authoritative numbers stay with the committed k6 script (Phase 10). Leaving the screen aborts the run.
+
+---
+
+## Phase 6 — Usage & Cost
+
+- **Redis is the source of truth for spend; the request log is an independent cross-check, not a second ledger.** Spend cards read `budget.Spent` (Redis) directly. `GET /admin/reconciliation` (admin-only) sums logged `cost_micros` per team for the month and surfaces any drift beyond a $0.01 tolerance rather than hiding it — the tolerance absorbs in-flight reservations and estimate→reconcile rounding.
+- **Cost trends come from the request log, never Prometheus.** Prometheus holds rates, not a queryable per-provider/model/team history. `GET /admin/costs` buckets `cost_micros` with `date_trunc(... AT TIME ZONE 'UTC')` so buckets don't drift with the server's timezone; daily buckets `UNION` the live rows with `requests_daily` so a range crossing the retention boundary still totals correctly.
+- **The cost chart shows the top 3 contributors plus "Other".** DESIGN.md defines a 3-colour series palette; folding the long tail into one quiet "Other" bucket keeps the chart inside it and is the more honest view of a cost breakdown anyway.
+- **Usage & Cost owns its own `24h / 7d / 30d` range control.** The global selector is `1h / 24h / 7d`; `1h` is meaningless for cost trends and spend cards are always month-to-date, so the page is dropped from the shared-range routes (same pattern as Request Logs).
+- **The fallback cost delta is a request-log column, not a metric.** `fallback_cost_delta_micros` (migration 0003, nullable — NULL for non-fallback rows, like `cache_hit`). A column is queryable per-row, feeds row detail, and stores a signed value natively; a Prometheus counter can't go negative and would need splitting by sign.
+- **The delta is a counterfactual from real usage, not the pre-call estimate.** `recordCost` prices the requested model against the tokens the request actually consumed and keeps `served_cost − requested_cost`. Part 1's `estimated_cost_delta_micros` slog line is a ceiling guess made before the call; this is what the fallback actually cost.
+- **Attribution sums live rows only.** `GET /admin/attribution` reads the `requests` table, not the rollup — every supported range sits inside the 30-day retention window, and `requests_daily` keeps only a net-per-group sum that can't be re-split into "added" vs "saved".
+- **Cache and routing savings ship as explicit "wired up in Phase 7/8" panels**, never a fabricated $0.00 — the same rule as the rest of the console.
+- **Key metadata is a 12-hex-char fingerprint of the SHA-256 digest**, added to `teamView`. Enough to tell two configured keys apart or notice one changed; far too little to be the digest or to attack. "Never the key, never the hash" still holds.
+- **Team management is a UI over Part 1's existing audit-logged endpoints — no new mutation paths, no optimistic UI.** An edit shows a pending state and then the server's actual response; a control plane that displays a change that didn't apply is worse than a brief delay.

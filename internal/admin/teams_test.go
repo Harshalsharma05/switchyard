@@ -195,6 +195,16 @@ func TestGetTeamSuccess(t *testing.T) {
 	if v.ID != "acme" || v.Name != "Acme Corp" {
 		t.Errorf("v = %+v, want acme/Acme Corp", v)
 	}
+
+	// Key metadata is a short one-way fingerprint — present, distinctive, and
+	// never the full digest (Step 6.4).
+	full := auth.HashKey("acme-key")
+	if v.KeyFingerprint == "" || v.KeyFingerprint == full || len(v.KeyFingerprint) >= len(full) {
+		t.Errorf("key_fingerprint = %q, want a short prefix of %q", v.KeyFingerprint, full)
+	}
+	if !strings.HasPrefix(full, v.KeyFingerprint) {
+		t.Errorf("key_fingerprint %q is not a prefix of the digest", v.KeyFingerprint)
+	}
 }
 
 func TestGetTeamUnknownIs404(t *testing.T) {

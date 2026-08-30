@@ -17,8 +17,8 @@ const insertSQL = `
 INSERT INTO requests (
 	id, ts, team_id, requested_model, served_model, provider, status_code,
 	input_tokens, output_tokens, cost_micros, latency_ms, overhead_ms,
-	fallback, cache_hit, quality_score, trace_id
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+	fallback, cache_hit, quality_score, trace_id, fallback_cost_delta_micros
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
 ON CONFLICT (id) DO NOTHING`
 
 // Record is one request-log row. Empty strings are stored as NULL; CacheHit
@@ -40,6 +40,11 @@ type Record struct {
 	CacheHit       *bool
 	QualityScore   *float64
 	TraceID        string
+
+	// FallbackCostDeltaMicros is set only when Fallback is true: the served
+	// model's real cost minus what the requested model would have cost for the
+	// same token usage. Negative when the fallback was cheaper.
+	FallbackCostDeltaMicros *int64
 }
 
 type Config struct {
@@ -171,6 +176,7 @@ func (w *Writer) flush(ctx context.Context, batch []Record) []Record {
 			rec.StatusCode, rec.InputTokens, rec.OutputTokens, rec.CostMicros,
 			rec.LatencyMS, rec.OverheadMS, rec.Fallback,
 			rec.CacheHit, rec.QualityScore, nullable(rec.TraceID),
+			rec.FallbackCostDeltaMicros,
 		)
 	}
 

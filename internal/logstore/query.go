@@ -85,7 +85,7 @@ type Page struct {
 const selectColumns = `
 	id, ts, team_id, requested_model, served_model, provider, status_code,
 	input_tokens, output_tokens, cost_micros, latency_ms, overhead_ms,
-	fallback, cache_hit, quality_score, trace_id`
+	fallback, cache_hit, quality_score, trace_id, fallback_cost_delta_micros`
 
 // Query returns one page of rows, newest first.
 func (w *Writer) Query(ctx context.Context, f Filter) (Page, error) {
@@ -180,6 +180,182 @@ func (w *Writer) Query(ctx context.Context, f Filter) (Page, error) {
 	return Page{Records: records, NextCursor: next}, nil
 }
 
+// SpendByTeamSince totals logged request cost per team from `since` to now. It
+// spans both the live detail rows and any the retention sweep has already
+// folded into requests_daily, so a month that straddles the retention window
+// is still summed in full — this is the number GET /admin/reconciliation
+// checks Redis's budget counter against.
+func (w *Writer) SpendByTeamSince(ctx context.Context, since time.Time) (map[string]int64, error) {
+	const sql = `
+		SELECT team_id, SUM(cost_micros)::bigint FROM (
+			SELECT team_id, cost_micros FROM requests       WHERE ts  >= $1
+			UNION ALL
+			SELECT team_id, cost_micros FROM requests_daily  WHERE day >= $1::date
+		) s
+		GROUP BY team_id`
+
+	rows, err := w.pool.Query(ctx, sql, since.UTC())
+	if err != nil {
+		return nil, fmt.Errorf("summing request-log spend by team: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[string]int64)
+	for rows.Next() {
+		var team string
+		var micros int64
+		if err := rows.Scan(&team, &micros); err != nil {
+			return nil, fmt.Errorf("scanning request-log spend row: %w", err)
+		}
+		out[team] = micros
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading request-log spend rows: %w", err)
+	}
+	return out, nil
+}
+
+// CostBucket is the time resolution of a cost series.
+type CostBucket string
+
+const (
+	CostHourly CostBucket = "hour"
+	CostDaily  CostBucket = "day"
+)
+
+// CostDimension is the column a cost series is split by.
+type CostDimension string
+
+const (
+	CostByProvider CostDimension = "provider"
+	CostByModel    CostDimension = "model"
+	CostByTeam     CostDimension = "team"
+)
+
+// columns maps a dimension onto its column in each source table. served_model,
+// not requested_model: cost is attributed to the model that actually ran.
+func (d CostDimension) columns() (live, rolled string, ok bool) {
+	switch d {
+	case CostByProvider:
+		return "COALESCE(provider, '')", "provider", true
+	case CostByModel:
+		return "COALESCE(served_model, '')", "served_model", true
+	case CostByTeam:
+		return "team_id", "team_id", true
+	}
+	return "", "", false
+}
+
+// CostQuery aggregates request-log cost into time buckets split by one
+// dimension. TeamID == "" spans every team (an admin caller).
+type CostQuery struct {
+	Since     time.Time
+	Bucket    CostBucket
+	Dimension CostDimension
+	TeamID    string
+}
+
+// CostCell is one (bucket, dimension-value) total in micro-dollars.
+type CostCell struct {
+	Bucket time.Time
+	Key    string
+	Micros int64
+}
+
+// CostSeries returns per-bucket, per-dimension cost totals ordered oldest
+// first. Daily buckets union the live rows with anything retention has already
+// rolled into requests_daily; hourly buckets read only the live rows, since
+// the rollup has no sub-day resolution and an hourly range is always well
+// inside the retention window anyway.
+func (w *Writer) CostSeries(ctx context.Context, q CostQuery) ([]CostCell, error) {
+	liveCol, rolledCol, ok := q.Dimension.columns()
+	if !ok {
+		return nil, fmt.Errorf("cost series: unknown dimension %q", q.Dimension)
+	}
+	trunc := "hour"
+	if q.Bucket == CostDaily {
+		trunc = "day"
+	}
+
+	args := []any{q.Since.UTC()}
+	teamClause := ""
+	if q.TeamID != "" {
+		args = append(args, q.TeamID)
+		teamClause = " AND team_id = $2"
+	}
+
+	live := fmt.Sprintf(`
+		SELECT date_trunc('%s', ts AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AS bucket,
+		       %s AS k, cost_micros AS micros
+		FROM requests WHERE ts >= $1%s`, trunc, liveCol, teamClause)
+
+	src := live
+	if q.Bucket == CostDaily {
+		src += fmt.Sprintf(` UNION ALL
+		SELECT (day + time '00:00') AT TIME ZONE 'UTC' AS bucket,
+		       %s AS k, cost_micros AS micros
+		FROM requests_daily WHERE day >= $1::date%s`, rolledCol, teamClause)
+	}
+
+	sql := fmt.Sprintf(
+		`SELECT bucket, k, SUM(micros)::bigint FROM (%s) s GROUP BY bucket, k ORDER BY bucket`, src)
+
+	rows, err := w.pool.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying cost series: %w", err)
+	}
+	defer rows.Close()
+
+	var cells []CostCell
+	for rows.Next() {
+		var c CostCell
+		if err := rows.Scan(&c.Bucket, &c.Key, &c.Micros); err != nil {
+			return nil, fmt.Errorf("scanning cost cell: %w", err)
+		}
+		cells = append(cells, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading cost cells: %w", err)
+	}
+	return cells, nil
+}
+
+// FallbackAttribution splits the logged fallback cost deltas by sign: what
+// fallbacks added versus what they saved, over some window.
+type FallbackAttribution struct {
+	ExtraMicros int64 // sum of positive deltas — fallback served something pricier
+	SavedMicros int64 // sum of the negative deltas' magnitudes — fallback served something cheaper
+}
+
+// NetMicros is the overall effect: positive means fallback cost more than the
+// requested models would have.
+func (a FallbackAttribution) NetMicros() int64 { return a.ExtraMicros - a.SavedMicros }
+
+// FallbackCostSince totals the per-request fallback cost deltas from `since` to
+// now, split by sign. It reads only the live detail rows — every supported
+// range sits within the retention window, so the daily rollup (which stores
+// only a net sum per group and cannot be resplit by sign) is not consulted.
+func (w *Writer) FallbackCostSince(ctx context.Context, since time.Time, teamID string) (FallbackAttribution, error) {
+	args := []any{since.UTC()}
+	where := "ts >= $1 AND fallback_cost_delta_micros IS NOT NULL"
+	if teamID != "" {
+		args = append(args, teamID)
+		where += " AND team_id = $2"
+	}
+
+	sql := `
+		SELECT
+			COALESCE(SUM(fallback_cost_delta_micros) FILTER (WHERE fallback_cost_delta_micros > 0), 0),
+			COALESCE(-SUM(fallback_cost_delta_micros) FILTER (WHERE fallback_cost_delta_micros < 0), 0)
+		FROM requests WHERE ` + where
+
+	var a FallbackAttribution
+	if err := w.pool.QueryRow(ctx, sql, args...).Scan(&a.ExtraMicros, &a.SavedMicros); err != nil {
+		return FallbackAttribution{}, fmt.Errorf("summing fallback cost deltas: %w", err)
+	}
+	return a, nil
+}
+
 // ErrNotFound is returned by Get when no row has that id.
 var ErrNotFound = fmt.Errorf("request not found")
 
@@ -218,7 +394,7 @@ func scanRecord(s scanner) (Record, error) {
 		&rec.ID, &rec.Timestamp, &rec.TeamID, &requested, &served, &provider,
 		&rec.StatusCode, &rec.InputTokens, &rec.OutputTokens, &rec.CostMicros,
 		&rec.LatencyMS, &rec.OverheadMS, &rec.Fallback, &rec.CacheHit,
-		&rec.QualityScore, &traceID,
+		&rec.QualityScore, &traceID, &rec.FallbackCostDeltaMicros,
 	); err != nil {
 		return Record{}, fmt.Errorf("scanning request log row: %w", err)
 	}
