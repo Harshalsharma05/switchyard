@@ -310,6 +310,80 @@ func (b *Breaker) State() State {
 	return b.state
 }
 
+// BreakerSnapshot is a point-in-time view of a Breaker for admin and health
+// reporting. Every field is a plain value copied under the lock, so a caller
+// can read it without holding anything.
+type BreakerSnapshot struct {
+	State State
+
+	// Failures is how many failures currently fall inside Window, and
+	// FailureThreshold is how many it takes to open from Closed.
+	Failures         int
+	FailureThreshold int
+
+	// SuccessStreak is consecutive probe successes in HalfOpen;
+	// SuccessThreshold is how many close the breaker.
+	SuccessStreak    int
+	SuccessThreshold int
+
+	// Reopens is how many consecutive Open episodes there have been without a
+	// clean close — what the exponential cooldown grows against.
+	Reopens int
+
+	// ProbeInFlight is true while a HalfOpen probe has been handed out and not
+	// yet reported back.
+	ProbeInFlight bool
+
+	// Cooldown is the current episode's full wait; CooldownRemaining is how
+	// much of it is left. CooldownRemaining is zero unless State is Open.
+	Cooldown          time.Duration
+	CooldownRemaining time.Duration
+}
+
+// Inspect returns a BreakerSnapshot without side effects — unlike Allow,
+// reading it never drives an Open -> HalfOpen transition.
+//
+// The failure count is computed against Window here rather than by calling
+// pruneBefore, so this stays a pure read: an expired timestamp is skipped in
+// the count but left in the slice for the next real RecordFailure to prune.
+//
+// With a store, State, SuccessStreak, and Reopens are this replica's mirror of
+// the last shared state Allow read — at most StateCacheTTL behind, the same
+// staleness State() already accepts. The failure window is always this
+// replica's own, never shared.
+func (b *Breaker) Inspect() BreakerSnapshot {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	now := time.Now()
+	cutoff := now.Add(-b.cfg.Window)
+	failures := 0
+	for _, t := range b.failures {
+		if !t.Before(cutoff) {
+			failures++
+		}
+	}
+
+	var remaining time.Duration
+	if b.state == StateOpen {
+		if elapsed := now.Sub(b.openedAt); elapsed < b.cooldown {
+			remaining = b.cooldown - elapsed
+		}
+	}
+
+	return BreakerSnapshot{
+		State:             b.state,
+		Failures:          failures,
+		FailureThreshold:  b.cfg.FailureThreshold,
+		SuccessStreak:     b.successStreak,
+		SuccessThreshold:  b.cfg.SuccessThreshold,
+		Reopens:           b.reopens,
+		ProbeInFlight:     b.probeInFlight,
+		Cooldown:          b.cooldown,
+		CooldownRemaining: remaining,
+	}
+}
+
 // Allow reports whether a request may proceed. It is where Open -> HalfOpen
 // happens: the transition is driven by a caller asking to go through after
 // the cooldown has elapsed, not by a background timer, so it only ever fires

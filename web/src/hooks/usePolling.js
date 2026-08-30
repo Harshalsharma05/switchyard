@@ -16,7 +16,11 @@ let nextId = 0
 // `fetcher` receives an AbortSignal and returns a promise. It must be stable
 // (wrap it in useCallback) — a change to it restarts the poll, which is exactly
 // what should happen when something like the time range changes.
-export function usePolling(fetcher, { interval = 5000, enabled = true } = {}) {
+// `ignoreError` marks an error as expected and terminal: the poll stops, the
+// error is surfaced for the caller to read, and the connection indicator is
+// left alone — used for a 404 that means "this endpoint isn't here", which
+// retrying every interval would only misreport as a bad connection.
+export function usePolling(fetcher, { interval = 5000, enabled = true, ignoreError } = {}) {
   const [data, setData] = useState(null)
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -71,6 +75,12 @@ export function usePolling(fetcher, { interval = 5000, enabled = true } = {}) {
         schedule(interval)
       } catch (err) {
         if (cancelled || ac.signal.aborted || err.name === 'AbortError') return
+        if (ignoreError?.(err)) {
+          setError(err)
+          setLoading(false)
+          clearConnection(id)
+          return // no reschedule — the poll stops here
+        }
         failuresRef.current += 1
         setError(err)
         setLoading(false)
@@ -98,7 +108,7 @@ export function usePolling(fetcher, { interval = 5000, enabled = true } = {}) {
       document.removeEventListener('visibilitychange', onVisibility)
       clearConnection(id)
     }
-  }, [fetcher, enabled, interval, nonce, id])
+  }, [fetcher, enabled, interval, nonce, id, ignoreError])
 
   return { data, error, loading, refresh }
 }

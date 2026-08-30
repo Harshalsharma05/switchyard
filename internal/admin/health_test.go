@@ -33,9 +33,9 @@ func (f fakeHealthReader) Snapshots() []health.ProviderHealth {
 // reports nothing reset and no error, which is all the tests that are not
 // about the breaker endpoint need.
 type fakeBreakerController struct {
-	count  int
-	err    error
-	states map[resilience.Labels]resilience.State
+	count     int
+	err       error
+	snapshots map[resilience.Labels]resilience.BreakerSnapshot
 
 	mu       sync.Mutex
 	resetFor []string
@@ -48,8 +48,8 @@ func (f *fakeBreakerController) Reset(_ context.Context, providerName string) (i
 	return f.count, f.err
 }
 
-func (f *fakeBreakerController) States() map[resilience.Labels]resilience.State {
-	return f.states
+func (f *fakeBreakerController) Snapshots() map[resilience.Labels]resilience.BreakerSnapshot {
+	return f.snapshots
 }
 
 func (f *fakeBreakerController) calls() []string {
@@ -282,9 +282,9 @@ func TestListProviderHealthIncludesBreakerStates(t *testing.T) {
 		{Provider: "groq", Status: health.StatusHealthy},
 		{Provider: "gemini", Status: health.StatusHealthy},
 	}}
-	breakers := &fakeBreakerController{states: map[resilience.Labels]resilience.State{
-		{Provider: "groq", Model: "openai/gpt-oss-20b"}:  resilience.StateOpen,
-		{Provider: "groq", Model: "openai/gpt-oss-120b"}: resilience.StateClosed,
+	breakers := &fakeBreakerController{snapshots: map[resilience.Labels]resilience.BreakerSnapshot{
+		{Provider: "groq", Model: "openai/gpt-oss-20b"}:  {State: resilience.StateOpen, Failures: 5, FailureThreshold: 5, Cooldown: 30 * time.Second, CooldownRemaining: 12 * time.Second},
+		{Provider: "groq", Model: "openai/gpt-oss-120b"}: {State: resilience.StateClosed, FailureThreshold: 5},
 	}}
 	srv := httptest.NewServer(NewRouter(func() bool { return true },
 		testTeamStore(t), &fakeSpendReader{}, fakeProviderLister{}, reader, breakers,
@@ -315,6 +315,12 @@ func TestListProviderHealthIncludesBreakerStates(t *testing.T) {
 	}
 	if groq[1].State != "open" {
 		t.Errorf("second breaker state = %q, want open", groq[1].State)
+	}
+	if groq[1].Failures != 5 || groq[1].FailureThreshold != 5 {
+		t.Errorf("open breaker failures = %d/%d, want 5/5", groq[1].Failures, groq[1].FailureThreshold)
+	}
+	if groq[1].CooldownRemaining != 12000 {
+		t.Errorf("open breaker cooldown_remaining_ms = %v, want 12000", groq[1].CooldownRemaining)
 	}
 	if byName["gemini"].Breakers == nil {
 		t.Error("a provider with no breakers should serialize [], not null")

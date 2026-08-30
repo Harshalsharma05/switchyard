@@ -406,3 +406,33 @@ Each adapter wraps the caller's `ctx` with `context.WithTimeout(ctx, cfg.Timeout
 - **Key lives in `sessionStorage` + a ref, never React state.** Per-tab, gone on tab close, and kept out of render so it can't leak into a component tree or a screenshot. A restored key is validated by one `/admin/me` call before the app renders.
 - **Grafana link carries the current range through** (`from=now-<range>`) and points at the provisioned `switchyard-performance` dashboard. The point of the affordance is proving both read the same Prometheus — the styled charts are not a replacement for the real stack.
 - **Overhead histogram is queried without a team label.** Gateway overhead is a property of the gateway, not of a team's traffic, so it is never scoped even when the rest of the summary is.
+
+---
+
+## Phase 3 — Playground
+
+- **Streaming reads the response body as a stream** (`api/chat.js`, separate from `api/client.js`), so tokens render as they arrive. If a response appears in one lump that is a real bug in Part 1's SSE passthrough to chase, not something to paper over in the UI.
+- **429 / 402 / 503 render as structured, labelled panels** — status colour on the border and heading, the detail parsed out — never as raw JSON. These responses are the system working as designed, and demoing a clean 402 live is worth more than another happy path.
+- **Rate-limit and budget detail comes from response headers, not the body.** `Retry-After` and `X-RateLimit-*` are kept on the thrown error so the panel can show the backoff and bucket state.
+- **The 402 panel re-fetches `/admin/me`** to get cap and current spend as distinct numeric fields, because the 402 body states them only as prose.
+- **Latency, tokens, and cost are not in the response headers** — they come from the async request-log row, fetched by id with a short backoff poll (`awaitRequestRow`). The panel shows "settling…" until it lands and "—" if it never does.
+- **The model selector is populated from `me.allowed_models` only**, so the UI can never offer a model the team's allowlist would 403.
+- **Session history is in-memory only and collapses an immediate repeat.** It is deliberately separate from Request Logs, which never store prompt text at all.
+- **Navigating away mid-stream aborts the fetch** (one `AbortController` per run). Part 1 already cancels the upstream call when the client disconnects, so this needs no gateway cooperation.
+- **Cache hit/miss is an explicit "not yet enabled" placeholder** (Phase 7) — the same fabricated-data rule the rest of the console follows.
+- **A mid-stream failure after some tokens (status 0)** renders as "Stream interrupted / stopped partway", not a normal error panel; the partial output above it is real and stays on screen.
+
+---
+
+## Phase 4 — Live Ops
+
+- **`Breaker.Inspect()` was added to the hand-written `breaker.go`, with the owner's sign-off**, returning a side-effect-free `BreakerSnapshot`. Reading breaker detail for admin/UI must never drive the Open → HalfOpen transition that `Allow` does.
+- **`Inspect` counts in-window failures inline rather than calling `pruneBefore`**, so it stays a pure read: an expired timestamp is skipped in the count but left in the slice for the next real `RecordFailure` to prune.
+- **`BreakerRegistry.States()` was replaced by `Snapshots()`, not joined by a second method.** It had one caller (the admin health endpoint); `breakerModelView` gained failures/threshold/cooldown/probe fields, and Overview's compact panel still reads only model + state.
+- **The breaker reset control is scoped per provider**, matching Part 1's `POST /admin/providers/{name}/breaker/reset` — an operator who has just fixed something knows the whole provider is good, not one model.
+- **Manual reset is the documented way out of a stuck `degraded`.** An open breaker forces a provider to `degraded`, and a breaker only closes after successful probe traffic — with no traffic there is no recovery, so the button has to exist.
+- **Chaos is polled once in the shell** (`ChaosProvider`, admin-only) and shared by the every-screen banner and Live Ops' controls, rather than each polling `/admin/chaos` independently.
+- **A chaos `404` (harness not compiled in) stops the poll**, via a new `usePolling` `ignoreError` option. Retrying a dead endpoint every 5s would otherwise push the global connection indicator to "disconnected".
+- **The chaos banner and controls are admin-only** because `/admin/chaos` is admin-gated. A non-admin sees chaos affect their traffic with no indicator — accepted for a dev-only tool.
+- **The per-provider chaos control manages one provider-scoped rule and rebuilds the whole set on apply** (the endpoint replaces wholesale), preserving other providers' rules and any model-scoped ones.
+- **The load simulator is browser-generated and hard-capped at 20 concurrent / 60s**, clamped on input and again at start. The UI states plainly it is indicative, not a benchmark — the authoritative numbers stay with the committed k6 script (Phase 10). Leaving the screen aborts the run.

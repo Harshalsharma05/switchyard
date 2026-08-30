@@ -41,6 +41,16 @@ export function formatAxisTime(iso, range) {
   return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
+// Relative time for a live console — "just now", "12s ago", "4m ago".
+export function formatRelative(iso, now = Date.now()) {
+  if (!iso) return '—'
+  const secs = Math.max(0, Math.round((now - new Date(iso).getTime()) / 1000))
+  if (secs < 5) return 'just now'
+  if (secs < 60) return `${secs}s ago`
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`
+  return `${Math.floor(secs / 3600)}h ago`
+}
+
 export function formatClock(iso) {
   return new Date(iso).toLocaleTimeString(undefined, {
     hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,

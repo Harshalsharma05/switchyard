@@ -5,6 +5,8 @@ import { useMemo, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth.js'
 import { RANGES, TimeRangeContext } from '../hooks/useTimeRange.js'
+import ChaosProvider from '../hooks/ChaosProvider.jsx'
+import ChaosBanner from './ChaosBanner.jsx'
 import LiveIndicator from './LiveIndicator.jsx'
 import {
   OverviewIcon, PlaygroundIcon, LiveOpsIcon, LogsIcon, UsageIcon, SettingsIcon,
@@ -88,10 +90,19 @@ function TopBar({ team, isAdmin, onSignOut, range, setRange, showRange }) {
 }
 
 export default function AppShell() {
-  const { me, isAdmin, signOut } = useAuth()
+  const { me, isAdmin, signOut, getKey } = useAuth()
   const { pathname } = useLocation()
   const [range, setRange] = useState('24h')
   const timeRange = useMemo(() => ({ range, setRange }), [range])
+
+  // Chaos is an admin-only, dev-only concern; a non-admin shell has no provider
+  // and no banner.
+  const content = (
+    <main className="content">
+      <ChaosBanner />
+      <Outlet />
+    </main>
+  )
 
   return (
     <TimeRangeContext.Provider value={timeRange}>
@@ -106,9 +117,7 @@ export default function AppShell() {
             setRange={setRange}
             showRange={RANGE_ROUTES.has(pathname)}
           />
-          <main className="content">
-            <Outlet />
-          </main>
+          {isAdmin ? <ChaosProvider getKey={getKey}>{content}</ChaosProvider> : content}
         </div>
       </div>
     </TimeRangeContext.Provider>

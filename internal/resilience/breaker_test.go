@@ -550,6 +550,64 @@ func openBreaker(ctx context.Context, t *testing.T, b *Breaker, cfg BreakerConfi
 // to trigger Open -> HalfOpen, failing the test if it doesn't land there.
 //
 // Note that its Allow call claims the single probe slot (Step 7.2), so a test
+// TestInspect covers the two pieces of Inspect that carry logic rather than a
+// straight field copy: the in-window failure count, and the open-state
+// cooldown remaining.
+func TestInspect(t *testing.T) {
+	log, _ := newBreakerTestLogger()
+	ctx := context.Background()
+
+	t.Run("counts only failures inside the window and does not prune", func(t *testing.T) {
+		cfg := testBreakerConfig()
+		b := newTestBreaker(t, cfg, log)
+
+		// Two failures, below the threshold of 3, so the breaker stays Closed
+		// and nothing else prunes the slice.
+		b.RecordFailure(ctx)
+		b.RecordFailure(ctx)
+		if got := b.Inspect().Failures; got != 2 {
+			t.Fatalf("Inspect().Failures = %d, want 2 while both are inside the window", got)
+		}
+
+		time.Sleep(cfg.Window + 5*time.Millisecond) // ages both out
+
+		snap := b.Inspect()
+		if snap.Failures != 0 {
+			t.Fatalf("Inspect().Failures = %d, want 0 once both have left the window", snap.Failures)
+		}
+		if snap.FailureThreshold != cfg.FailureThreshold {
+			t.Fatalf("Inspect().FailureThreshold = %d, want %d", snap.FailureThreshold, cfg.FailureThreshold)
+		}
+		// Inspect must not have pruned the expired timestamps out of the slice.
+		b.mu.Lock()
+		raw := len(b.failures)
+		b.mu.Unlock()
+		if raw != 2 {
+			t.Fatalf("len(b.failures) = %d after Inspect, want 2 — Inspect should not prune", raw)
+		}
+	})
+
+	t.Run("reports cooldown remaining only while open", func(t *testing.T) {
+		cfg := testBreakerConfig()
+		b := newTestBreaker(t, cfg, log)
+
+		if r := b.Inspect().CooldownRemaining; r != 0 {
+			t.Fatalf("Inspect().CooldownRemaining = %s on a closed breaker, want 0", r)
+		}
+
+		for i := 0; i < cfg.FailureThreshold; i++ {
+			b.RecordFailure(ctx)
+		}
+		snap := b.Inspect()
+		if snap.State != StateOpen {
+			t.Fatalf("State = %v, want Open", snap.State)
+		}
+		if snap.CooldownRemaining <= 0 || snap.CooldownRemaining > cfg.CooldownBase {
+			t.Fatalf("Inspect().CooldownRemaining = %s, want (0, %s]", snap.CooldownRemaining, cfg.CooldownBase)
+		}
+	})
+}
+
 // calling this holds the probe until it reports an outcome.
 func waitForHalfOpen(ctx context.Context, t *testing.T, b *Breaker, cfg BreakerConfig) {
 	t.Helper()

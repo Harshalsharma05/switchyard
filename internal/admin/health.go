@@ -46,11 +46,36 @@ type providerHealthView struct {
 	Breakers         []breakerModelView `json:"breakers"`
 }
 
-// breakerModelView is one provider+model circuit breaker's current state, as
-// Overview's breaker panel and Phase 4's Live Ops both read it.
+// breakerModelView is one provider+model circuit breaker's state, as Overview's
+// breaker panel and Phase 4's Live Ops read it. Overview uses only Model/State;
+// Live Ops renders the rest — failures against threshold, cooldown remaining
+// while open, and whether a half-open probe is out.
 type breakerModelView struct {
-	Model string `json:"model"`
-	State string `json:"state"`
+	Model             string  `json:"model"`
+	State             string  `json:"state"`
+	Failures          int     `json:"failures"`
+	FailureThreshold  int     `json:"failure_threshold"`
+	SuccessStreak     int     `json:"success_streak"`
+	SuccessThreshold  int     `json:"success_threshold"`
+	Reopens           int     `json:"reopens"`
+	ProbeInFlight     bool    `json:"probe_in_flight"`
+	CooldownMillis    float64 `json:"cooldown_ms"`
+	CooldownRemaining float64 `json:"cooldown_remaining_ms"`
+}
+
+func newBreakerModelView(model string, s resilience.BreakerSnapshot) breakerModelView {
+	return breakerModelView{
+		Model:             model,
+		State:             s.State.String(),
+		Failures:          s.Failures,
+		FailureThreshold:  s.FailureThreshold,
+		SuccessStreak:     s.SuccessStreak,
+		SuccessThreshold:  s.SuccessThreshold,
+		Reopens:           s.Reopens,
+		ProbeInFlight:     s.ProbeInFlight,
+		CooldownMillis:    float64(s.Cooldown) / float64(time.Millisecond),
+		CooldownRemaining: float64(s.CooldownRemaining) / float64(time.Millisecond),
+	}
 }
 
 func newProviderHealthView(h health.ProviderHealth) providerHealthView {
@@ -94,9 +119,9 @@ func listProviderHealth(reader HealthReader, breakers BreakerController, log *sl
 		// without the resilience wiring; the field then stays an empty slice.
 		byProvider := map[string][]breakerModelView{}
 		if breakers != nil {
-			for labels, state := range breakers.States() {
+			for labels, snap := range breakers.Snapshots() {
 				byProvider[labels.Provider] = append(byProvider[labels.Provider],
-					breakerModelView{Model: labels.Model, State: state.String()})
+					newBreakerModelView(labels.Model, snap))
 			}
 			for p := range byProvider {
 				sort.Slice(byProvider[p], func(i, j int) bool {
@@ -125,8 +150,9 @@ type BreakerController interface {
 	// were reset, which distinguishes a provider name that matched nothing
 	// from one whose breakers were all already closed.
 	Reset(ctx context.Context, providerName string) (int, error)
-	// States is the current state of every breaker, keyed by provider+model.
-	States() map[resilience.Labels]resilience.State
+	// Snapshots is a side-effect-free view of every breaker, keyed by
+	// provider+model.
+	Snapshots() map[resilience.Labels]resilience.BreakerSnapshot
 }
 
 // breakerResetView is POST /admin/providers/{name}/breaker/reset's response.

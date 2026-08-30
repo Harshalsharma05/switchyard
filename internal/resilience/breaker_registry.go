@@ -153,15 +153,16 @@ func (r *BreakerRegistry) Reset(ctx context.Context, providerName string) (int, 
 	return len(targets), failed
 }
 
-// States returns the current state of every breaker this registry has built,
-// keyed by provider+model — the read Step 7.4's health endpoint reports.
-func (r *BreakerRegistry) States() map[Labels]State {
+// Snapshots returns a side-effect-free view of every breaker this registry has
+// built, keyed by provider+model — the read Step 7.4's health endpoint and
+// Part 2's Live Ops breaker visualisation report.
+func (r *BreakerRegistry) Snapshots() map[Labels]BreakerSnapshot {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	out := make(map[Labels]State, len(r.breakers))
+	out := make(map[Labels]BreakerSnapshot, len(r.breakers))
 	for labels, b := range r.breakers {
-		out[labels] = b.State()
+		out[labels] = b.Inspect()
 	}
 	return out
 }
