@@ -1,0 +1,75 @@
+/* Row-detail drawer for Request Logs (Step 5.3). Right-side, 480px, slides in
+   over a scrim that keeps the list visible behind it. */
+
+.rd-overlay { position: fixed; inset: 0; z-index: 50; display: flex; justify-content: flex-end; }
+
+.rd-scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  animation: rd-fade var(--motion-state) var(--ease);
+}
+
+.rd-panel {
+  position: relative;
+  width: 480px;
+  max-width: 100%;
+  height: 100%;
+  overflow-y: auto;
+  background: var(--bg-surface);
+  border-left: 1px solid var(--border);
+  animation: rd-slide var(--motion-state) var(--ease);
+}
+
+@keyframes rd-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes rd-slide { from { transform: translateX(100%); } to { transform: translateX(0); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .rd-scrim, .rd-panel { animation: none; }
+}
+
+.rd-head {
+  position: sticky;
+  top: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-4);
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+}
+.rd-head-title { font-size: 15px; font-weight: 500; color: var(--text-primary); }
+.rd-close {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  cursor: pointer;
+}
+.rd-close:hover { color: var(--text-primary); background: var(--bg-raised); }
+
+.rd { display: flex; flex-direction: column; gap: var(--space-6); padding: var(--space-4); }
+
+.rd-sec { display: flex; flex-direction: column; gap: var(--space-2); }
+.rd-sec-title { margin: 0; font-size: 12px; font-weight: 500; color: var(--text-secondary); }
+
+.rd-list {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-2) var(--space-4);
+  margin: 0;
+}
+.rd-list dt { font-size: 12px; color: var(--text-secondary); }
+.rd-list dd { margin: 0; font-size: 13px; color: var(--text-primary); }
+
+.rd-break { overflow-wrap: anywhere; }
+.rd-trace { margin: 0 0 var(--space-2); font-size: 12px; color: var(--text-primary); }
+.rd-unit { color: var(--text-muted); }
+.rd-muted { font-size: 12px; color: var(--text-muted); }
+.rd-flag { color: var(--status-info); }
+.rd-note { margin: var(--space-1) 0 0; font-size: 11px; color: var(--text-muted); }
+.rd-link { font-size: 13px; color: var(--accent); }

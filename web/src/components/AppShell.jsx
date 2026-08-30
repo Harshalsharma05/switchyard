@@ -26,8 +26,9 @@ const NAV = [
 ]
 
 // Screens that read the shared time range; the selector is hidden elsewhere so
-// it never implies it affects a screen it does not.
-const RANGE_ROUTES = new Set(['/', '/logs', '/usage'])
+// it never implies it affects a screen it does not. Request Logs owns its own
+// range control inside its filter bar (DESIGN.md), so it is not listed here.
+const RANGE_ROUTES = new Set(['/', '/usage'])
 
 function SideRail({ isAdmin }) {
   return (

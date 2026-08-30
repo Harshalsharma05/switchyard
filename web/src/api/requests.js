@@ -1,9 +1,19 @@
-// Request-log rows. Phase 5 adds filters and cursor pagination; Overview's live
-// feed only ever needs the newest page.
+// Request-log rows. Overview's live feed only ever needs the newest page;
+// Request Logs pages back through history with the server's opaque cursor.
 import { ApiError, request } from './client.js'
 
-export function fetchRequests(key, { limit = 25, signal } = {}) {
-  return request(`/admin/requests?limit=${limit}`, { key, signal })
+// `filters` maps straight onto the query API's parameters (team, status,
+// provider, model, cache, fallback, since); empty values are dropped so the
+// gateway sees only the filters that are actually set.
+export function fetchRequests(key, { limit, cursor, filters = {}, signal } = {}) {
+  const q = new URLSearchParams()
+  if (limit) q.set('limit', String(limit))
+  if (cursor) q.set('cursor', cursor)
+  for (const [k, v] of Object.entries(filters)) {
+    if (v) q.set(k, String(v))
+  }
+  const qs = q.toString()
+  return request(`/admin/requests${qs ? `?${qs}` : ''}`, { key, signal })
 }
 
 export function fetchRequestById(key, id, signal) {

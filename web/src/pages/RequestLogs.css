@@ -1,0 +1,107 @@
+/* Request Logs — the table, its cursor pager, and the filter bar. The
+   row-detail drawer (5.3) will add to this file. */
+
+/* --- filter bar --- */
+/* Sticks to the top of the viewport while the table scrolls under it. Negative
+   margins bleed it to the card edges so the opaque background covers the full
+   width once it is stuck; the matching surface colour keeps it seamless until
+   then. */
+.logf {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-3);
+  margin: calc(-1 * var(--space-4)) calc(-1 * var(--space-4)) var(--space-4);
+  padding: var(--space-4);
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  border-radius: var(--radius-card) var(--radius-card) 0 0;
+}
+
+.logf-field { display: flex; flex-direction: column; gap: var(--space-1); }
+.logf-label { font-size: 12px; color: var(--text-secondary); }
+
+.logf-select {
+  height: 32px;
+  padding: 0 var(--space-2);
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+}
+.logf-select:focus-visible { border-color: var(--accent); }
+
+.logf-check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 32px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.logf-active {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.logf-clear {
+  padding: 3px 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  cursor: pointer;
+}
+.logf-clear:hover { color: var(--text-primary); background: var(--bg-raised); }
+
+/* --- table --- */
+.logs-table-wrap { overflow-x: auto; }
+
+/* The sticky filter bar owns the top of the viewport on this screen, so the
+   column headers do not also stick — two stacked sticky bars would fight, and
+   a page holds at most one result page of rows. */
+table.logs-table th { position: static; }
+
+/* Rows are activatable — click or Enter/Space opens the detail drawer. */
+.logs-row { cursor: pointer; }
+.logs-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.logs-row-active { background: var(--bg-raised); }
+.logs-row-active td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+
+.logs-arrow { color: var(--text-muted); }
+.logs-unit { color: var(--text-muted); margin-left: 2px; }
+.logs-muted { color: var(--text-muted); }
+.logs-flag { font-size: 12px; color: var(--status-info); }
+
+.logs-pager {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+.logs-pager-info { font-size: 12px; color: var(--text-muted); }
+.logs-pager-btns { margin-left: auto; display: inline-flex; gap: var(--space-2); }
+
+.logs-pager-btn {
+  height: 32px;
+  padding: 0 var(--space-3);
+  font-size: 13px;
+  color: var(--text-primary);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  cursor: pointer;
+}
+.logs-pager-btn:hover:not(:disabled) { background: var(--bg-raised); }
+.logs-pager-btn:disabled { color: var(--text-muted); cursor: not-allowed; }

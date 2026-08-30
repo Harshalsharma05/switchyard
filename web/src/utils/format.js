@@ -51,6 +51,24 @@ export function formatRelative(iso, now = Date.now()) {
   return `${Math.floor(secs / 3600)}h ago`
 }
 
+// Full date + time for a historical log row — the live feed shows clock only,
+// but Request Logs spans days.
+export function formatDateTime(iso) {
+  return new Date(iso).toLocaleString(undefined, {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  })
+}
+
+// Compact cost for a table cell: cents at two decimals, sub-cent with enough
+// digits to stay non-zero. The exact micro-dollar figure lives in row detail.
+export function formatCostShort(micros) {
+  if (micros === null || micros === undefined) return '—'
+  const usd = micros / 1_000_000
+  if (usd === 0) return '$0.00'
+  return usd >= 0.01 ? `$${usd.toFixed(2)}` : `$${usd.toFixed(5)}`
+}
+
 export function formatClock(iso) {
   return new Date(iso).toLocaleTimeString(undefined, {
     hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,

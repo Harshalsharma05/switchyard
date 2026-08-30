@@ -66,3 +66,32 @@
 .pill-warn    { color: var(--status-warn);    background: var(--status-warn-bg); }
 .pill-error   { color: var(--status-error);   background: var(--status-error-bg); }
 .pill-info    { color: var(--status-info);    background: var(--status-info-bg); }
+
+/* --- table --- */
+/* DESIGN.md's Table primitive: raised sticky header, hairline rows, hover
+   raise. Screen-specific styling (the feed flash, the logs pager) lives with
+   each screen. */
+.table { width: 100%; border-collapse: collapse; }
+
+.table th {
+  position: sticky;
+  top: 0;
+  padding: 10px 12px;
+  font-size: 11px;
+  font-weight: 400;
+  text-align: left;
+  color: var(--text-secondary);
+  background: var(--bg-raised);
+  white-space: nowrap;
+}
+
+.table td {
+  padding: 10px 12px;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.table tbody tr:last-child td { border-bottom: none; }
+.table tbody tr:hover { background: var(--bg-raised); }
+
+.ta-r { text-align: right; }
