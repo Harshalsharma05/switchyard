@@ -70,9 +70,12 @@ type summaryCostView struct {
 	TotalUSD *float64 `json:"total_usd"`
 }
 
-// summaryCacheView is a placeholder until Phase 7 wires the semantic cache.
-// Enabled stays false and HitRate null so Overview renders an explicit empty
-// state rather than a fabricated 0%.
+// summaryCacheView carries Overview's cache KPI.
+//
+// Enabled is a config fact — whether this gateway has a cache at all — and is
+// separate from HitRate, which stays null when Prometheus has no data yet. The
+// two together are what let Overview distinguish "no cache here" from "a cache
+// that has not been asked anything".
 type summaryCacheView struct {
 	Enabled bool     `json:"enabled"`
 	HitRate *float64 `json:"hit_rate"`
@@ -85,7 +88,7 @@ type summaryProviderView struct {
 	P99LatencyMillis float64 `json:"p99_latency_ms"`
 }
 
-func toSummaryView(res summary.Result, health HealthReader) summaryView {
+func toSummaryView(res summary.Result, health HealthReader, cacheEnabled bool) summaryView {
 	v := summaryView{
 		Range:       res.Range,
 		GeneratedAt: res.GeneratedAt.Format(time.RFC3339Nano),
@@ -93,7 +96,7 @@ func toSummaryView(res summary.Result, health HealthReader) summaryView {
 		Requests:    summaryRequestsView{Total: res.RequestCount, ErrorRate: res.ErrorRate},
 		OverheadMS:  summaryOverheadView{P50: res.OverheadP50, P95: res.OverheadP95, P99: res.OverheadP99},
 		Cost:        summaryCostView{TotalUSD: res.CostUSD},
-		Cache:       summaryCacheView{Enabled: false, HitRate: nil},
+		Cache:       summaryCacheView{Enabled: cacheEnabled, HitRate: res.CacheHitRate},
 		Providers:   []summaryProviderView{},
 	}
 	if health != nil {
@@ -128,7 +131,7 @@ func toSummaryView(res summary.Result, health HealthReader) summaryView {
 
 // --- handler ----------------------------------------------------------
 
-func handleSummary(svc SummaryService, health HealthReader, authr KeyAuthenticator, log *slog.Logger) http.HandlerFunc {
+func handleSummary(svc SummaryService, health HealthReader, cacheEnabled bool, authr KeyAuthenticator, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if svc == nil {
 			writeError(w, log, http.StatusServiceUnavailable, "summary_disabled",
@@ -165,6 +168,6 @@ func handleSummary(svc SummaryService, health HealthReader, authr KeyAuthenticat
 		}
 
 		res := svc.Build(r.Context(), summary.Options{Range: rng, TeamID: scope})
-		writeJSON(w, log, http.StatusOK, toSummaryView(res, health))
+		writeJSON(w, log, http.StatusOK, toSummaryView(res, health, cacheEnabled))
 	}
 }

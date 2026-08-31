@@ -31,7 +31,7 @@ type Middleware func(http.Handler) http.Handler
 // Route paths carry an explicit /admin prefix even though the whole listener
 // is already the admin port, leaving room for /metrics and future operator
 // endpoints to live at the root without colliding with this namespace.
-func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers ProviderLister, healthReader HealthReader, breakers BreakerController, chaos ChaosController, reload Reloader, requestLog RequestLogReader, authr KeyAuthenticator, summarySvc SummaryService, metrics *telemetry.Metrics, log *slog.Logger, middleware ...Middleware) http.Handler {
+func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers ProviderLister, healthReader HealthReader, breakers BreakerController, chaos ChaosController, reload Reloader, requestLog RequestLogReader, authr KeyAuthenticator, summarySvc SummaryService, cacheTuner CacheTuner, costCalc CostCalculator, metrics *telemetry.Metrics, log *slog.Logger, middleware ...Middleware) http.Handler {
 	r := chi.NewRouter()
 
 	for _, mw := range middleware {
@@ -47,11 +47,11 @@ func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers 
 	// pin a non-admin to its own rows internally. Neither is behind the admin
 	// gate — any valid key reaches them.
 	r.Get("/admin/me", handleMe(authr, spend, log))
-	r.Get("/admin/summary", handleSummary(summarySvc, healthReader, authr, log))
+	r.Get("/admin/summary", handleSummary(summarySvc, healthReader, cacheTuner != nil, authr, log))
 	r.Get("/admin/requests", listRequests(requestLog, authr, log))
 	r.Get("/admin/requests/{id}", getRequest(requestLog, authr, log))
 	r.Get("/admin/costs", handleCosts(requestLog, authr, log))
-	r.Get("/admin/attribution", handleAttribution(requestLog, authr, log))
+	r.Get("/admin/attribution", handleAttribution(requestLog, costCalc, authr, log))
 
 	// Read-only operator surface: no key, same as the Prometheus scrape.
 	r.Get("/admin/providers", listProviders(providers, log))
@@ -79,6 +79,15 @@ func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers 
 		// provider name; the literal route is more specific either way.
 		r.Post("/admin/providers/{name}/breaker/reset", resetBreaker(breakers, providers, log))
 		r.Post("/admin/reload", reloadConfig(reload, log))
+
+		// Step 7.3's threshold tuning sweep. Answers 404 when the cache is
+		// disabled, matching the chaos routes: the routing table stays the
+		// same shape in every environment.
+		r.Get("/admin/cache/tune", tuneCache(cacheTuner, log))
+
+		// Step 7.4's manual invalidation. Registered under the admin gate
+		// because a purge crosses every team's entries.
+		r.Delete("/admin/cache", purgeCache(cacheTuner, log))
 
 		// Step 7.5's chaos controls. The routes are always registered and answer
 		// 404 unless the harness is available, rather than being conditionally

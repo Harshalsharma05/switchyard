@@ -70,8 +70,8 @@ import (
 // the request path here but exposed nowhere on this router: its controls are
 // mounted on the admin listener only, so nothing reachable from the public
 // port can turn fault injection on.
-func NewRouter(resolver Resolver, authr Authenticator, limiter RateLimiter, budgetTracker BudgetTracker, calc CostCalculator, healthRecorder HealthRecorder, healthOracle HealthOracle, breakers Breakers, chaos *Chaos, retryConfig resilience.Config, promMetrics *telemetry.Metrics, reqLog RequestLogger, log *slog.Logger, ready func() bool) http.Handler {
-	h := NewHandler(resolver, limiter, budgetTracker, calc, healthRecorder, healthOracle, breakers, chaos, retryConfig, promMetrics, log)
+func NewRouter(resolver Resolver, authr Authenticator, limiter RateLimiter, budgetTracker BudgetTracker, calc CostCalculator, healthRecorder HealthRecorder, healthOracle HealthOracle, breakers Breakers, chaos *Chaos, retryConfig resilience.Config, promMetrics *telemetry.Metrics, reqLog RequestLogger, log *slog.Logger, ready func() bool, opts ...Option) http.Handler {
+	h := NewHandler(resolver, limiter, budgetTracker, calc, healthRecorder, healthOracle, breakers, chaos, retryConfig, promMetrics, log, opts...)
 
 	r := chi.NewRouter()
 

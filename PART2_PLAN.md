@@ -393,7 +393,7 @@ Store in Redis: the embedding, the response, token counts, model, timestamp, TTL
 On each request: embed, nearest-neighbour search, compare similarity to a configurable threshold. Above → serve from cache. Below → proceed normally, then store.
 
 Threshold is the central tension of this feature: too low and you serve subtly wrong answers, too high and hit rate collapses. Make it configurable, and expose a tuning endpoint that replays historical requests at different thresholds so the trade-off is measurable rather than guessed. That measurement is the interview material here.
-
+  
 ### Step 7.4 — TTL and invalidation
 
 Not all responses age equally. Time-sensitive prompts need short TTLs or no caching at all; stable factual ones can live much longer. Decide how TTL is assigned and record it.

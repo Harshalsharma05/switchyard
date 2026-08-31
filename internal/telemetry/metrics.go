@@ -12,6 +12,15 @@ var durationBuckets = []float64{0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 1
 
 var overheadBuckets = []float64{0.0005, 0.001, 0.0015, 0.002, 0.003, 0.005, 0.0075, 0.01, 0.015, 0.02, 0.03, 0.05}
 
+// cacheLookupBuckets straddle two very different scales on purpose: the exact
+// tier lands in sub-millisecond buckets, the semantic tier around 500ms once
+// an embedding call is involved.
+var cacheLookupBuckets = []float64{0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 1, 2, 5}
+
+// similarityBuckets are dense above 0.8 because that is the only region where
+// the threshold decision is actually contested.
+var similarityBuckets = []float64{0, 0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.88, 0.9, 0.92, 0.94, 0.96, 0.98, 1}
+
 type Metrics struct {
 	registry *prometheus.Registry
 
@@ -37,6 +46,15 @@ type Metrics struct {
 	BudgetUtilizationRatio   *prometheus.GaugeVec
 	RatelimitTokensRemaining *prometheus.GaugeVec
 	InflightRequests         *prometheus.GaugeVec
+
+	// Phase 7's semantic cache. CacheLookupsTotal is labelled by tier and
+	// result so hit rate is derivable per tier — an exact hit and a semantic
+	// hit cost wildly different amounts and must not be averaged together.
+	CacheLookupsTotal   *prometheus.CounterVec
+	CacheDegradedTotal  *prometheus.CounterVec
+	CacheLookupDuration *prometheus.HistogramVec
+	CacheSimilarity     prometheus.Histogram
+	CacheNearMisses     prometheus.Histogram
 
 	RequestLogQueueDepth        prometheus.Gauge
 	RetentionLastSweepTimestamp prometheus.Gauge
@@ -159,6 +177,37 @@ func NewMetrics() (*Metrics, error) {
 		Help: "Requests currently in flight against a provider.",
 	}, []string{"provider"})
 
+	m.CacheLookupsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "switchyard_cache_lookups_total",
+		Help: "Semantic cache lookups, by team, tier (exact, semantic, none) and result (hit or miss). Overview's hit rate is derived from this.",
+	}, []string{"team", "tier", "result"})
+
+	m.CacheDegradedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "switchyard_cache_degraded_total",
+		Help: "Cache lookups that failed open and were served as a miss, by reason. Non-zero means the cache is silently off.",
+	}, []string{"reason"})
+
+	m.CacheLookupDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "switchyard_cache_lookup_seconds",
+		Help:    "Cache lookup wall time, by tier. The exact tier is the one held to the overhead budget.",
+		Buckets: cacheLookupBuckets,
+	}, []string{"tier"})
+
+	m.CacheSimilarity = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "switchyard_cache_similarity",
+		Help:    "Best cosine similarity found on every semantic lookup, hit or miss.",
+		Buckets: similarityBuckets,
+	})
+
+	// Near-misses are scored separately from the full distribution because the
+	// threshold question lives in this narrow band: these are the requests a
+	// slightly lower threshold would have converted into hits.
+	m.CacheNearMisses = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "switchyard_cache_near_miss_similarity",
+		Help:    "Best similarity on semantic misses that scored within the near-miss band below the threshold.",
+		Buckets: similarityBuckets,
+	})
+
 	collectors := []prometheus.Collector{
 		m.RequestsTotal, m.ErrorsTotal, m.RetriesTotal, m.FallbacksTotal,
 		m.RatelimitRejectionsTotal, m.BudgetRejectionsTotal, m.BreakerTransitionsTotal,
@@ -168,6 +217,8 @@ func NewMetrics() (*Metrics, error) {
 		m.ProviderHealth, m.BreakerState, m.BudgetUtilizationRatio,
 		m.RatelimitTokensRemaining, m.InflightRequests, m.RequestLogQueueDepth,
 		m.RetentionLastSweepTimestamp,
+		m.CacheLookupsTotal, m.CacheDegradedTotal, m.CacheLookupDuration,
+		m.CacheSimilarity, m.CacheNearMisses,
 	}
 	for _, c := range collectors {
 		if err := m.registry.Register(c); err != nil {

@@ -411,3 +411,71 @@ func deref(s *string) string {
 	}
 	return *s
 }
+
+// CacheSavings is what the semantic cache avoided spending over a range.
+//
+// Grouped by served model because a saving is only meaningful at that model's
+// price: the caller multiplies each group's real token counts by the same
+// pricing table the live path uses, so the figure is computed rather than
+// estimated. Hits and Misses come back alongside so the caller can report a
+// hit rate from the same query.
+type CacheSavings struct {
+	Groups []CacheSavingsGroup
+	Hits   int64
+	Misses int64
+}
+
+// CacheSavingsGroup is one served model's cache-hit token totals.
+type CacheSavingsGroup struct {
+	Model        string
+	Hits         int64
+	InputTokens  int64
+	OutputTokens int64
+}
+
+// CacheSavingsSince totals cache-hit tokens by served model from `since` to now.
+//
+// Only rows where cache_hit is non-null are counted: a null means the cache was
+// never consulted, which is neither a hit nor a miss and must not enter the
+// denominator.
+func (w *Writer) CacheSavingsSince(ctx context.Context, since time.Time, teamID string) (CacheSavings, error) {
+	args := []any{since.UTC()}
+	where := "ts >= $1 AND cache_hit IS NOT NULL"
+	if teamID != "" {
+		args = append(args, teamID)
+		where += " AND team_id = $2"
+	}
+
+	sql := `
+		SELECT COALESCE(served_model, ''),
+		       COUNT(*) FILTER (WHERE cache_hit),
+		       COALESCE(SUM(input_tokens) FILTER (WHERE cache_hit), 0),
+		       COALESCE(SUM(output_tokens) FILTER (WHERE cache_hit), 0),
+		       COUNT(*) FILTER (WHERE NOT cache_hit)
+		FROM requests WHERE ` + where + `
+		GROUP BY served_model`
+
+	rows, err := w.pool.Query(ctx, sql, args...)
+	if err != nil {
+		return CacheSavings{}, fmt.Errorf("summing cache savings: %w", err)
+	}
+	defer rows.Close()
+
+	var out CacheSavings
+	for rows.Next() {
+		var g CacheSavingsGroup
+		var misses int64
+		if err := rows.Scan(&g.Model, &g.Hits, &g.InputTokens, &g.OutputTokens, &misses); err != nil {
+			return CacheSavings{}, fmt.Errorf("scanning cache savings: %w", err)
+		}
+		out.Hits += g.Hits
+		out.Misses += misses
+		if g.Hits > 0 {
+			out.Groups = append(out.Groups, g)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return CacheSavings{}, fmt.Errorf("reading cache savings: %w", err)
+	}
+	return out, nil
+}

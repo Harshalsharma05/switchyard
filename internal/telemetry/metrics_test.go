@@ -34,6 +34,12 @@ func TestNewMetricsRegistersEveryFamily(t *testing.T) {
 	m.RetentionRowsDeletedTotal.Add(0)
 	m.RetentionLastSweepTimestamp.Set(0)
 
+	m.CacheLookupsTotal.WithLabelValues("acme", "exact", "hit").Inc()
+	m.CacheDegradedTotal.WithLabelValues("redis_read").Inc()
+	m.CacheLookupDuration.WithLabelValues("exact").Observe(0.001)
+	m.CacheSimilarity.Observe(0.95)
+	m.CacheNearMisses.Observe(0.9)
+
 	families, err := m.Registry().Gather()
 	if err != nil {
 		t.Fatalf("Gather: %v", err)
@@ -62,6 +68,11 @@ func TestNewMetricsRegistersEveryFamily(t *testing.T) {
 		"switchyard_requestlog_queue_depth",
 		"switchyard_retention_rows_deleted_total",
 		"switchyard_retention_last_sweep_timestamp_seconds",
+		"switchyard_cache_lookups_total",
+		"switchyard_cache_degraded_total",
+		"switchyard_cache_lookup_seconds",
+		"switchyard_cache_similarity",
+		"switchyard_cache_near_miss_similarity",
 	}
 
 	got := map[string]bool{}

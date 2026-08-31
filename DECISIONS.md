@@ -451,3 +451,69 @@ Each adapter wraps the caller's `ctx` with `context.WithTimeout(ctx, cfg.Timeout
 - **Cache and routing savings ship as explicit "wired up in Phase 7/8" panels**, never a fabricated $0.00 — the same rule as the rest of the console.
 - **Key metadata is a 12-hex-char fingerprint of the SHA-256 digest**, added to `teamView`. Enough to tell two configured keys apart or notice one changed; far too little to be the digest or to attack. "Never the key, never the hash" still holds.
 - **Team management is a UI over Part 1's existing audit-logged endpoints — no new mutation paths, no optimistic UI.** An edit shows a pending state and then the server's actual response; a control plane that displays a change that didn't apply is worse than a brief delay.
+
+---
+
+## Phase 7 — Semantic Cache
+
+### Embeddings and the two-tier split
+
+- **Hosted Gemini embeddings were measured before being committed to, and the measurement decided the architecture.** `scripts/embedbench` puts `gemini-embedding-001` at **p95 711ms, p99 1.24s** — 71x the entire 10ms gateway overhead budget. No amount of connection tuning closes a gap that is a round trip to Google.
+- **The break-even arithmetic is why a single-tier semantic cache was rejected.** A hit spends ~500ms to skip a ~1500ms provider call; a miss spends ~500ms for nothing. Break-even hit rate is `embed ÷ provider` ≈ 33%. Below that the cache makes the gateway slower on average.
+- **So the cache is two tiers: an exact-hash tier and a semantic tier.** The exact tier is one Redis round trip, keeps the overhead budget intact, and covers the repeat-prompt case for free. The semantic tier runs only on an exact miss. Rejected redefining "overhead" to hide the cost, which argues the constraint away rather than meeting it.
+- **Embedding quality was never the problem — latency was.** Paraphrases score 0.983, unrelated prompts 0.63. A 0.35 margin is a comfortable threshold window.
+
+### Cache key design
+
+- **The key splits into a fingerprint and a query, and that split is the correctness argument.** Entries bucket by fingerprint, so "same prompt, different system prompt" searches a *different bucket* and cannot hit. The threshold never gets a chance to be wrong about model, temperature, system prompt, or team — those are structural misses, not statistical ones.
+- **Conversation history is in the fingerprint**, beyond what the plan lists. "And what about Germany?" means something different depending on what preceded it.
+- **`stream` is deliberately *out* of the fingerprint.** Streaming and non-streaming produce identical content and differ only in framing. One entry serves both modes — verified in both directions.
+- **Cache entries are scoped per team.** `team_id` is in the fingerprint. Rejected a shared pool: better hit rate, but one team's response served to another is a cross-tenant read channel, and the cost savings become unattributable.
+- **Redis 7 has no vector index, so nearest-neighbour is bounded brute force inside one fingerprint bucket** (`max_candidates: 100`). Rejected adding redis-stack/RediSearch as new infrastructure for a scan that is already sub-millisecond at this size.
+- **Hash fields are length-prefixed.** Concatenating `"ab"+"c"` and `"a"+"bc"` into a digest collides; a length before each field makes that impossible. Temperature is hashed by its float bit pattern, since two values can print identically and differ in the last bit.
+
+### Lookup, threshold, and overhead
+
+- **The cache is consulted after authorization but before the TPM and budget reservations.** A hit spends no provider tokens and no money, so charging for one would be wrong — and would make the "cost saved by cache" number an accounting artifact rather than a measurement.
+- **Gateway overhead now excludes embedding time, on the same grounds it already excludes provider time**: both are round trips to an external service the gateway does not control. The exclusion is exposed on `X-Switchyard-Embed-Ms` so it is auditable rather than hidden.
+- **Every cache dependency fails open.** Redis down on read, embedding unavailable, index unreadable, or the winning candidate expired between scan and fetch all degrade to a *miss*, never an error. Each fires `switchyard_cache_degraded_total` and logs loudly.
+- **The overhead number was re-measured in Compose before optimizing, and that reversed the conclusion.** Host-run showed p95 12.48ms on a semantic miss — apparently over budget. In Compose (gateway and Redis on one network) the same measurement is **p95 6.74ms against a 4.09ms cache-off baseline**: the cache costs ~2.6ms and fits. Optimizing against the first number would have been tuning the test rig.
+- **Cache hits are ~125x faster end to end**: 1.00s to 0.008s on the exact tier.
+
+### Threshold tuning
+
+- **The plan asked for a tuning endpoint that replays historical requests. That is impossible here by design** — the request log stores no prompt text (migration 0001's hard boundary). The privacy constraint forced a better answer.
+- **`GET /admin/cache/tune` sweeps the cache's own embedding index instead.** Each entry is scored against the entries that already existed when it was written, reconstructing the decision the lookup faced. Real traffic, no prompt storage, no new table.
+- **The sweep reports its own limitation in the payload**: it measures how many entries a lower threshold would have collapsed, not whether collapsing them would have been *correct*. Hit rate is not precision, and a caller seeing only hit rates would over-trust them.
+- **0.93 was validated against a real false-positive class.** Four rewordings of "capital of France" hit; **"capital of Germany" missed** — same sentence template, different entity. The sweep shows those pairs at 0.85–0.90, so a threshold of 0.85 would have served Paris for Germany.
+
+### TTL and invalidation
+
+- **TTL comes from config pattern rules, not a classifier.** Volatile prompts (`today`, `weather`, `current price`) are never cached; `recent` gets 15m, `stable` 24h, default 1h. A substring scan costs microseconds — an LLM classifier would cost more than the cache saves, the same argument Phase 8 applies to complexity routing.
+- **A caller can override the TTL per request, and the override beats every rule.** Substring matching will misclassify; whoever wrote the prompt knows its volatility better than a keyword scan. An override of `0` opts a single request out entirely.
+- **The override is a header (`X-Switchyard-Cache-TTL`), not a body field**, so `/v1/chat/completions` stays byte-for-byte an OpenAI request. How long a gateway keeps an answer is not a model parameter. A malformed value is ignored, never rejected — a bad hint must not fail a valid completion.
+- **Invalidation by system-prompt or model change needed no code.** A changed fingerprint makes old entries unreachable immediately; they age out on their own. Only manual purge required building.
+- **Purge-by-team required a separate team index**, because `team_id` is hashed into the fingerprint and there is nothing left to scan for. It is written on the store path, which already runs after the client has its response.
+- **Purge prefixes are validated as hex.** An unvalidated `?prefix=*` would become a glob that deletes the whole keyspace. All key scans use `SCAN`, never `KEYS` — this Redis also serves rate limiting and budget enforcement.
+- **Purge leaves fingerprint-index membership dangling on purpose**; `Candidates` prunes stale IDs on the next read. Chasing them at purge time would mean scanning every index key to find which buckets a deleted entry appeared in.
+
+### Streaming
+
+- **A streaming cache hit replays as a real multi-delta SSE stream with no artificial delay.** Same event shape, same role-bearing first delta, same terminal `finish_reason` and `[DONE]` — only faster (TTFB 5-9ms vs ~1.5s live).
+- **Rejected paced replay**, which mimics generation cadence but hands back exactly the latency the cache exists to remove. **Rejected a single lump delta**, which changes the client's rendering experience based on an implementation detail.
+- **Replay splits by rune, not byte.** Byte-slicing cuts multi-byte characters in half: the response still streams and still looks nearly right, which is what makes it dangerous.
+- **Storing a streamed response does not violate "streaming stays streaming".** Content is accumulated *alongside* each flush, not buffered ahead of it, and the cache write happens after `[DONE]`.
+- **Only streams that reach `[DONE]` with `finish_reason: stop` are stored**, guarded twice — every mid-stream failure path returns before the store, and `Cacheable` independently rejects truncated responses. Otherwise a truncated answer would be replayed forever.
+
+### Metrics and UI
+
+- **Tier labels report how far a lookup got, not what produced a hit.** Labelling every miss `none` put a 500ms semantic miss and a 1ms exact-only miss in the same latency bucket, destroying the histogram's usefulness. The response header still reports the *outcome* — a caller cares whether it got a cached answer, not which tier declined.
+- **Similarity is charted for the semantic tier only.** An exact hit is definitionally 1.0 and would pile a meaningless spike onto the distribution the threshold is tuned from. Near-misses (within 0.08 below the threshold) get their own histogram, since that band is where the threshold question actually lives.
+- **Cache savings are priced from real per-row token counts** at the served model's own rate, grouped by model — not estimated from an average request. A model missing from pricing is skipped with a warning: understating savings is the safe direction, failing an otherwise-correct report is not.
+- **Hit rate is reported from two different sources and will not match exactly.** Overview reads Prometheus (live, gateway-wide, scrape-windowed); Usage & Cost reads Postgres (exact, per-team, retention-bounded). Expected, not a bug.
+- **No UI restructuring was needed for any of the four placeholders** — the plan's own test of whether they were designed right. Request Logs needed *zero* frontend change: it already read `cache_hit` with a null-vs-false distinction and already had the filter wired.
+
+### Two plan conflicts worth stating out loud
+
+- **"Redis down → every request still succeeds" is not achievable, and the cache is not why.** Part 1 deliberately fails budget enforcement **closed** (money is not recoverable), so a team with a budget cap gets a 503. The logs show the ordering: the cache degraded to a miss and the request continued past it to the budget check. Part 1's rule wins.
+- **Mid-stream failures being uncacheable is code-verified, not measured.** Chaos injects at connection time and is absorbed by retry/fallback, so a genuine mid-stream provider failure could not be induced.

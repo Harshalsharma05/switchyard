@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/Harshalsharma05/switchyard/internal/budget"
+	"github.com/Harshalsharma05/switchyard/internal/cache"
 	"github.com/Harshalsharma05/switchyard/internal/provider"
 	"github.com/Harshalsharma05/switchyard/internal/ratelimit"
 	"github.com/Harshalsharma05/switchyard/internal/resilience"
@@ -88,6 +89,26 @@ type Handler struct {
 	retryConfig    resilience.Config
 	promMetrics    *telemetry.Metrics
 	log            *slog.Logger
+
+	// cache is nil unless WithCache was passed, which is the pre-Phase-7
+	// behaviour and a supported configuration.
+	cache    SemanticCache
+	cacheTTL cache.TTLPolicy
+}
+
+// Option configures a dependency added after Part 1.
+//
+// Variadic options rather than more positional parameters: NewRouter already
+// takes fourteen, and every Part 2 feature reaching the request path would
+// otherwise add another and churn every call site.
+type Option func(*Handler)
+
+// WithCache enables Step 7.3's semantic cache.
+func WithCache(c SemanticCache, ttl cache.TTLPolicy) Option {
+	return func(h *Handler) {
+		h.cache = c
+		h.cacheTTL = ttl
+	}
 }
 
 // NewHandler wires the handler with its dependencies. Nothing here reads
@@ -102,8 +123,8 @@ type Handler struct {
 // candidate is ever skipped, which is exactly how the chain behaved before
 // Step 7.4. chaos may be nil as well — Chaos.Apply is a no-op on a nil
 // receiver, so no harness means no injected faults.
-func NewHandler(resolver Resolver, limiter RateLimiter, budgetTracker BudgetTracker, calc CostCalculator, healthRecorder HealthRecorder, health HealthOracle, breakers Breakers, chaos *Chaos, retryConfig resilience.Config, promMetrics *telemetry.Metrics, log *slog.Logger) *Handler {
-	return &Handler{
+func NewHandler(resolver Resolver, limiter RateLimiter, budgetTracker BudgetTracker, calc CostCalculator, healthRecorder HealthRecorder, health HealthOracle, breakers Breakers, chaos *Chaos, retryConfig resilience.Config, promMetrics *telemetry.Metrics, log *slog.Logger, opts ...Option) *Handler {
+	h := &Handler{
 		resolver:       resolver,
 		limiter:        limiter,
 		budgetTracker:  budgetTracker,
@@ -116,6 +137,11 @@ func NewHandler(resolver Resolver, limiter RateLimiter, budgetTracker BudgetTrac
 		promMetrics:    promMetrics,
 		log:            log,
 	}
+
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
 // recordCost prices a finished request and stores it on metrics for Logger to
@@ -200,6 +226,22 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Step 7.3: consulted after authorization and before any reservation. A
+	// hit spends no provider tokens and no money, so it must not draw down the
+	// team's TPM bucket or budget.
+	cacheKey, cacheResult, cacheOn := h.consultCache(r, req)
+	if cacheResult.Hit {
+		// Step 7.5: a streaming request gets its hit replayed as SSE rather
+		// than as one lump, so the client's experience does not change based
+		// on whether the answer happened to be cached.
+		if req.Stream {
+			h.serveStreamFromCache(w, r, cacheResult.Entry)
+		} else {
+			h.serveFromCache(w, r, cacheResult.Entry)
+		}
+		return
+	}
+
 	reservation, ok := h.reserveTokens(w, r, req)
 	if !ok {
 		return
@@ -251,7 +293,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	if req.Stream {
-		actual = h.streamChatCompletions(w, r, chain, requested, chainBudget, req)
+		actual = h.streamChatCompletions(w, r, chain, requested, chainBudget, req, cacheKey, cacheResult, cacheOn)
 		return
 	}
 
@@ -345,6 +387,11 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	_, writeSpan := telemetry.Tracer().Start(r.Context(), "switchyard.response.write")
 	h.writeSuccess(w, r, resp)
 	writeSpan.End()
+
+	// After the write, so a cache store never delays the client's bytes.
+	if cacheOn {
+		h.storeInCache(r, cacheKey, cacheResult, resp)
+	}
 }
 
 // reserveTokens checks and reserves the team's TPM bucket ahead of a
@@ -619,7 +666,7 @@ func (h *Handler) decode(w http.ResponseWriter, r *http.Request) (chatRequest, b
 // reservation against. It is set by the deferred closure below rather than
 // at each individual return, since this function has several exit points and
 // every one of them needs the same fallback logic applied.
-func (h *Handler) streamChatCompletions(w http.ResponseWriter, r *http.Request, chain []resilience.Candidate, requested resilience.Candidate, chainBudget *chainBudget, req chatRequest) (actualTokens int) {
+func (h *Handler) streamChatCompletions(w http.ResponseWriter, r *http.Request, chain []resilience.Candidate, requested resilience.Candidate, chainBudget *chainBudget, req chatRequest, cacheKey cache.Key, cacheResult cache.Result, cacheOn bool) (actualTokens int) {
 	metrics := metricsFrom(r.Context())
 	requestID := RequestIDFrom(r.Context())
 
@@ -862,7 +909,7 @@ func (h *Handler) streamChatCompletions(w http.ResponseWriter, r *http.Request, 
 		h.recordCost(r.Context(), metrics, served.Model, usage)
 	}
 
-	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
+	if _, err := io.WriteString(w, sseDone); err != nil {
 		h.log.LogAttrs(r.Context(), slog.LevelInfo, "writing stream terminator",
 			slog.String("request_id", requestID), slog.Any("error", err))
 		return
@@ -877,6 +924,20 @@ func (h *Handler) streamChatCompletions(w http.ResponseWriter, r *http.Request, 
 		slog.Int("output_tokens", usage.OutputTokens),
 		slog.Int("content_bytes", content.Len()),
 	)
+
+	// Only a stream that reached [DONE] is stored: every mid-stream failure
+	// returns above, so a truncated response can never become a cache entry
+	// that is replayed forever. content was accumulated as chunks were
+	// forwarded, not buffered ahead of them, so streaming stayed streaming.
+	if cacheOn {
+		h.storeInCache(r, cacheKey, cacheResult, &provider.Response{
+			Content:      content.String(),
+			FinishReason: finish,
+			Usage:        usage,
+			Model:        served.Model,
+			Provider:     served.Provider,
+		})
+	}
 	return
 }
 

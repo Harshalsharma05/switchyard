@@ -86,6 +86,28 @@ function AttributionPanel({ title, state, empty, render }) {
   )
 }
 
+// Cache savings are priced from the real token counts on cache-hit rows, so
+// the headline is money genuinely not spent rather than an estimate. A null
+// panel means the gateway has no pricing table, not that savings were zero.
+function CacheAttribution({ data }) {
+  const c = data?.cache
+  if (!c) return <span className="attr-context">The semantic cache is not enabled on this gateway.</span>
+
+  const total = c.hits + c.misses
+  return (
+    <>
+      <span className={`attr-value num ${c.saved_micros > 0 ? 'attr-value-ok' : ''}`}>
+        {c.saved_micros > 0 ? `−${formatUSD(c.saved_usd)}` : formatUSD(0)}
+      </span>
+      <span className="attr-context">
+        {total === 0
+          ? 'no cache lookups in this range'
+          : `${c.hits} of ${total} lookups hit · ${(c.hit_rate * 100).toFixed(1)}% hit rate`}
+      </span>
+    </>
+  )
+}
+
 function FallbackAttribution({ data }) {
   const { net_usd: net, extra_usd: extra, saved_usd: saved } = data.fallback
   const tone = net > 0 ? 'warn' : net < 0 ? 'ok' : 'flat'
@@ -193,10 +215,9 @@ export default function UsageCost() {
         <div className="attr-row">
           <AttributionPanel
             title="Saved by cache"
-            state={{ loading: false, error: null, data: null }}
-            render={() => (
-              <span className="attr-context">Wired up in Phase 7 (semantic cache).</span>
-            )}
+            state={attribution}
+            empty="The request log is not configured, so cache savings cannot be attributed."
+            render={(data) => <CacheAttribution data={data} />}
           />
           <AttributionPanel
             title="Saved by routing"

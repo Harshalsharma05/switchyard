@@ -19,14 +19,28 @@ type fallbackAttrView struct {
 	NetUSD      float64 `json:"net_usd"`
 }
 
+// cacheAttrView is Step 7.6's savings panel.
+//
+// SavedMicros is priced from the real token counts on cache-hit rows, at the
+// served model's own price — not estimated from an average request. Requests
+// is the denominator that makes the number interpretable: savings without a
+// hit count says nothing about whether the cache is working.
+type cacheAttrView struct {
+	Hits        int64   `json:"hits"`
+	Misses      int64   `json:"misses"`
+	HitRate     float64 `json:"hit_rate"`
+	SavedMicros int64   `json:"saved_micros"`
+	SavedUSD    float64 `json:"saved_usd"`
+}
+
 type attributionView struct {
 	Range       string           `json:"range"`
 	GeneratedAt string           `json:"generated_at"`
 	Fallback    fallbackAttrView `json:"fallback"`
-	Cache       any              `json:"cache"` // null until Phase 7
+	Cache       *cacheAttrView   `json:"cache"`
 }
 
-func handleAttribution(reqLog RequestLogReader, authr KeyAuthenticator, log *slog.Logger) http.HandlerFunc {
+func handleAttribution(reqLog RequestLogReader, calc CostCalculator, authr KeyAuthenticator, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if reqLog == nil {
 			writeRequestLogDisabled(w, log)
@@ -66,6 +80,14 @@ func handleAttribution(reqLog RequestLogReader, authr KeyAuthenticator, log *slo
 			return
 		}
 
+		cacheView, err := cacheAttribution(r, reqLog, calc, spec.lookback, scope, log)
+		if err != nil {
+			log.ErrorContext(r.Context(), "summing cache attribution", slog.Any("error", err))
+			writeError(w, log, http.StatusInternalServerError, "internal_error",
+				"the gateway could not read the request log")
+			return
+		}
+
 		writeJSON(w, log, http.StatusOK, attributionView{
 			Range:       rangeKey,
 			GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano),
@@ -74,7 +96,41 @@ func handleAttribution(reqLog RequestLogReader, authr KeyAuthenticator, log *slo
 				SavedMicros: attr.SavedMicros, SavedUSD: microsToUSD(attr.SavedMicros),
 				NetMicros: attr.NetMicros(), NetUSD: microsToUSD(attr.NetMicros()),
 			},
-			Cache: nil,
+			Cache: cacheView,
 		})
 	}
+}
+
+// cacheAttribution prices the cache's savings, or returns nil when no pricing
+// table is wired — a null panel keeps Usage & Cost in its empty state rather
+// than showing a confident zero.
+func cacheAttribution(r *http.Request, reqLog RequestLogReader, calc CostCalculator, lookback time.Duration, scope string, log *slog.Logger) (*cacheAttrView, error) {
+	if calc == nil {
+		return nil, nil
+	}
+
+	saved, err := reqLog.CacheSavingsSince(r.Context(), time.Now().UTC().Add(-lookback), scope)
+	if err != nil {
+		return nil, err
+	}
+
+	view := &cacheAttrView{Hits: saved.Hits, Misses: saved.Misses}
+	if total := saved.Hits + saved.Misses; total > 0 {
+		view.HitRate = float64(saved.Hits) / float64(total)
+	}
+
+	for _, g := range saved.Groups {
+		micros, err := calc.Cost(g.Model, int(g.InputTokens), int(g.OutputTokens))
+		if err != nil {
+			// A model that has since left configs/providers.yaml has no price.
+			// Skipping it understates savings, which is the safe direction —
+			// far better than failing a report that is otherwise correct.
+			log.WarnContext(r.Context(), "pricing cache savings",
+				slog.String("model", g.Model), slog.Any("error", err))
+			continue
+		}
+		view.SavedMicros += micros
+	}
+	view.SavedUSD = microsToUSD(view.SavedMicros)
+	return view, nil
 }

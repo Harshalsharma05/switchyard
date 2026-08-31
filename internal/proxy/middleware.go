@@ -40,6 +40,14 @@ const (
 	// HeaderOverhead is the gateway's own latency in milliseconds: everything
 	// the request spent inside SwitchYard, excluding the provider call.
 	HeaderOverhead = "X-Switchyard-Overhead-Ms"
+
+	// HeaderCache reports which cache tier answered: "exact", "semantic", or
+	// "miss". Absent entirely when the cache was not consulted.
+	HeaderCache = "X-Switchyard-Cache"
+
+	// HeaderEmbedTime is the embedding call's cost, reported separately
+	// because it is excluded from HeaderOverhead — see requestMetrics.overhead.
+	HeaderEmbedTime = "X-Switchyard-Embed-Ms"
 )
 
 // maxRequestIDLen bounds an inbound X-Request-ID.
@@ -111,6 +119,17 @@ type requestMetrics struct {
 	// usage. nil otherwise, so the request-log column stays NULL for requests
 	// that did not fall back. Step 6.3's "cost shifted by fallback".
 	fallbackCostDeltaMicros *int64
+
+	// cacheHit is nil when the cache was not consulted, which is the state the
+	// request-log column distinguishes from a real false.
+	cacheHit  *bool
+	cacheTier string
+
+	// embedTime is time spent in the hosted embedding API. It is subtracted
+	// from overhead for the same reason providerTime is: both are round trips
+	// to an external service the gateway does not control. Reported on its own
+	// header so the exclusion is visible rather than hidden.
+	embedTime time.Duration
 }
 
 // metricsFrom returns the per-request metrics, or nil if Timing did not run.
@@ -122,7 +141,7 @@ func metricsFrom(ctx context.Context) *requestMetrics {
 // overhead is the time the request spent inside SwitchYard rather than waiting
 // on a provider. It is the project's headline number.
 func (m *requestMetrics) overhead() time.Duration {
-	d := time.Since(m.start) - m.providerTime
+	d := time.Since(m.start) - m.providerTime - m.embedTime
 	if d < 0 {
 		// Cannot happen with a monotonic clock, but a negative headline number
 		// would be worse than a zero.
@@ -146,6 +165,12 @@ func (m *requestMetrics) applyHeaders(h http.Header) {
 		// provider has no fallback outcome to report, and "false" there would
 		// claim more than the gateway knows.
 		h.Set(HeaderFallback, strconv.FormatBool(m.fellBack))
+	}
+	if m.cacheTier != "" {
+		h.Set(HeaderCache, m.cacheTier)
+	}
+	if m.embedTime > 0 {
+		h.Set(HeaderEmbedTime, formatMillis(m.embedTime))
 	}
 	h.Set(HeaderOverhead, formatMillis(m.overhead()))
 }

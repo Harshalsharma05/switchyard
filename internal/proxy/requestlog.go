@@ -57,6 +57,7 @@ func RequestLog(logger RequestLogger) func(http.Handler) http.Handler {
 				LatencyMS:               millis(time.Since(m.start)),
 				OverheadMS:              millis(m.overhead()),
 				Fallback:                m.fellBack,
+				CacheHit:                m.cacheHit,
 				TraceID:                 traceID,
 				FallbackCostDeltaMicros: m.fallbackCostDeltaMicros,
 			})

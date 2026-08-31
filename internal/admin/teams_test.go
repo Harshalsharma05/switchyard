@@ -97,7 +97,7 @@ func newTestAdminServer(t *testing.T, teams TeamStore, spend SpendReader, provid
 
 func newTestAdminServerWithReload(t *testing.T, teams TeamStore, spend SpendReader, providers ProviderLister, reload Reloader) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(NewRouter(func() bool { return true }, teams, spend, providers, fakeHealthReader{}, &fakeBreakerController{}, nil, reload, nil, nil, nil, testMetrics(t), discardLogger()))
+	srv := httptest.NewServer(NewRouter(func() bool { return true }, teams, spend, providers, fakeHealthReader{}, &fakeBreakerController{}, nil, reload, nil, nil, nil, nil, nil, testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)
 	return srv
 }

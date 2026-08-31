@@ -28,6 +28,7 @@ type Result struct {
 
 	RequestCount *float64
 	ErrorRate    *float64
+	CacheHitRate *float64
 	OverheadP50  *float64
 	OverheadP95  *float64
 	OverheadP99  *float64
@@ -165,10 +166,20 @@ func (s *Service) build(ctx context.Context, opts Options) Result {
 	r.OverheadP99 = q(overheadQuantile(0.99, win))
 	r.CostUSD = q(fmt.Sprintf("sum(increase(%s[%s])) / 1e6", cost, win))
 
+	// Cache hit rate counts every lookup as the denominator, including the
+	// cheap misses that never reached the semantic tier — excluding those would
+	// flatter the number by dropping the requests the cache could not help.
+	cacheAll := selector("switchyard_cache_lookups_total", teamSel)
+	cacheHits := selector("switchyard_cache_lookups_total", join(teamSel, `result="hit"`))
+	r.CacheHitRate = q(fmt.Sprintf("sum(increase(%s[%s])) / sum(increase(%s[%s]))", cacheHits, win, cacheAll, win))
+
 	// A ratio with no denominator comes back from Prometheus as no-data, which
 	// q already maps to nil — but guard the pathological case anyway.
 	if r.ErrorRate != nil && math.IsNaN(*r.ErrorRate) {
 		r.ErrorRate = nil
+	}
+	if r.CacheHitRate != nil && math.IsNaN(*r.CacheHitRate) {
+		r.CacheHitRate = nil
 	}
 
 	if series, err := s.buildSeries(ctx, opts, teamSel); err != nil {

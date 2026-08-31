@@ -37,7 +37,14 @@ function MetadataPanel({ meta, row, rowPending }) {
       <dt>Cost</dt>
       <dd>{row ? formatMicroDollars(row.cost_micros) : later}</dd>
       <dt>Cache</dt>
-      <dd className="pg-muted">not yet enabled</dd>
+      <dd>
+        {meta.cache == null
+          ? <span className="pg-muted">not enabled</span>
+          : meta.cache === 'miss'
+            ? <span className="pg-muted">miss</span>
+            : <span className="pg-fallback">{meta.cache} hit</span>}
+        {meta.embedMs != null && <span className="pg-unit"> · {formatMs(meta.embedMs)} ms embed</span>}
+      </dd>
     </dl>
   )
 }

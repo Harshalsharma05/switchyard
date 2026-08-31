@@ -22,6 +22,8 @@ import (
 
 	"github.com/Harshalsharma05/switchyard/internal/admin"
 	"github.com/Harshalsharma05/switchyard/internal/budget"
+	"github.com/Harshalsharma05/switchyard/internal/cache"
+	"github.com/Harshalsharma05/switchyard/internal/config"
 	"github.com/Harshalsharma05/switchyard/internal/health"
 	"github.com/Harshalsharma05/switchyard/internal/logstore"
 	"github.com/Harshalsharma05/switchyard/internal/proxy"
@@ -37,6 +39,7 @@ import (
 const (
 	defaultProvidersPath = "configs/providers.yaml"
 	defaultTeamsPath     = "configs/teams.yaml"
+	defaultCachePath     = "configs/cache.yaml"
 	defaultRedisAddr     = "localhost:6379"
 	defaultPublicAddr    = ":8080"
 	defaultAdminAddr     = ":9090"
@@ -397,6 +400,47 @@ func run() error {
 		HTTPTimeout:   durationOr("SWITCHYARD_SUMMARY_HTTP_TIMEOUT", defaultSummaryHTTPTimeout),
 	})
 
+	// Step 7.3's semantic cache. A missing configs/cache.yaml, or enabled:
+	// false, leaves semanticCache nil and the handler never consults one —
+	// the pre-Phase-7 behaviour, and a supported configuration.
+	//
+	// Failure to build the embedder is fatal rather than silently degrading:
+	// a cache that is configured on but never works would show up only as a
+	// hit rate of zero, which is exactly the kind of quiet wrong that a
+	// startup error prevents.
+	cachePath := envOr("SWITCHYARD_CACHE_CONFIG", defaultCachePath)
+	cacheCfg, err := config.LoadCache(cachePath)
+	if err != nil {
+		return fmt.Errorf("loading cache config: %w", err)
+	}
+
+	var (
+		semanticCache *cache.Cache
+		cacheStore    *cache.Store
+		cacheTuner    admin.CacheTuner
+	)
+	if cacheCfg.Enabled {
+		var embedder cache.Embedder
+		if cacheCfg.Look.SemanticEnabled {
+			embedder, err = cache.NewGemini(cacheCfg.Embed)
+			if err != nil {
+				return fmt.Errorf("building cache embedder: %w", err)
+			}
+		}
+
+		cacheStore = cache.NewStore(redisClient, cacheCfg.Store)
+		semanticCache = cache.New(cacheStore, embedder, cacheCfg.Look, log,
+			telemetry.NewCacheObserver(promMetrics, cacheCfg.Look.Threshold))
+		cacheTuner = cacheStore
+
+		log.Info("semantic cache enabled",
+			slog.Bool("semantic_tier", cacheCfg.Look.SemanticEnabled),
+			slog.Float64("threshold", float64(cacheCfg.Look.Threshold)),
+			slog.Duration("ttl_default", cacheCfg.TTL.Default),
+			slog.Int("ttl_rules", len(cacheCfg.TTL.Rules)),
+		)
+	}
+
 	// ready gates /readyz. It flips true once wiring is complete and false again
 	// the moment shutdown begins, so a load balancer stops sending new traffic
 	// while in-flight requests drain.
@@ -415,13 +459,13 @@ func run() error {
 		// (Step 5.2's passive samples), healthMonitor the read side Step 6.2's
 		// chain ordering consults to skip a down provider and sink a degraded
 		// one.
-		Handler:           proxy.NewRouter(store, store, limiter, budgetTracker, store, healthRecorder, healthMonitor, breakerRegistry, chaos, retryConfig, promMetrics, reqLog, log, isReady),
+		Handler:           proxy.NewRouter(store, store, limiter, budgetTracker, store, healthRecorder, healthMonitor, breakerRegistry, chaos, retryConfig, promMetrics, reqLog, log, isReady, cacheOptions(semanticCache, cacheCfg.TTL)...),
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
 
 	adminSrv := &http.Server{
 		Addr: envOr("SWITCHYARD_ADMIN_ADDR", defaultAdminAddr),
-		Handler: admin.NewRouter(isReady, store, budgetTracker, store, healthMonitor, breakerRegistry, chaosAdapter{chaos}, newReloader(store, providersPath, teamsPath), reqLogReader, store, summarySvc, promMetrics, log,
+		Handler: admin.NewRouter(isReady, store, budgetTracker, store, healthMonitor, breakerRegistry, chaosAdapter{chaos}, newReloader(store, providersPath, teamsPath), reqLogReader, store, summarySvc, cacheTuner, store, promMetrics, log,
 			proxy.Recoverer(log),
 			proxy.RequestID,
 			proxy.Logger(log),
@@ -625,4 +669,14 @@ func intOr(key string, fallback int) int {
 		return fallback
 	}
 	return i
+}
+
+// cacheOptions returns the handler option enabling the cache, or nothing when
+// no cache was built. A typed nil *cache.Cache would satisfy the interface and
+// panic on first use, so the nil check happens here rather than in the handler.
+func cacheOptions(c *cache.Cache, ttl cache.TTLPolicy) []proxy.Option {
+	if c == nil {
+		return nil
+	}
+	return []proxy.Option{proxy.WithCache(c, ttl)}
 }

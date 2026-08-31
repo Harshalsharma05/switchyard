@@ -1,0 +1,102 @@
+# SwitchYard semantic cache (Part 2, Phase 7).
+#
+# The cache runs in two tiers. The exact tier is a single Redis lookup keyed by
+# a hash of the request, costs well under a millisecond, and preserves the
+# gateway's p95 < 10ms overhead budget. The semantic tier runs only when the
+# exact tier misses, and it costs an embedding call.
+#
+# That split exists because it was measured, not assumed: scripts/embedbench
+# puts hosted Gemini embeddings at p95 711ms, p99 1.24s — 71x the entire
+# overhead budget. Re-run it before changing the embedding source.
+
+cache:
+  enabled: true
+
+  # Redis timeouts. The read path is deliberately impatient: a slow cache must
+  # degrade to a miss rather than add latency to a request it cannot help.
+  read_timeout: 50ms
+  write_timeout: 500ms
+
+  # Step 7.4's lifetime policy. Not all responses age equally, so a flat TTL
+  # either staled time-sensitive answers or throws away durable ones.
+  #
+  # Matching is a lowercase substring scan over the user's final message,
+  # first matching rule wins, in the order written here. It is a heuristic and
+  # it will misclassify — which is why a caller can override it per request
+  # with the X-Switchyard-Cache-TTL header (seconds; 0 means do not cache).
+  # An override beats every rule below, clamped to `max`.
+  ttl:
+    # Applied when nothing matches.
+    default: 1h
+
+    # Ceiling for any rule or caller override. A cached answer older than this
+    # is not worth the risk of being wrong.
+    max: 24h
+
+    rules:
+      # Never cached. These answers are wrong the moment they are stored, and
+      # a stale one is worse than a slow one.
+      - name: volatile
+        ttl: 0
+        patterns:
+          - "today"
+          - "right now"
+          - "current price"
+          - "stock price"
+          - "weather"
+          - "latest news"
+          - "breaking"
+          - "as of now"
+          - "this morning"
+          - "yesterday"
+          - "tomorrow"
+
+      # Recent-but-not-live: worth caching briefly.
+      - name: recent
+        ttl: 15m
+        patterns:
+          - "this week"
+          - "this month"
+          - "recently"
+          - "latest version"
+
+      # Durable factual and definitional answers. These do not change on a
+      # timescale the cache cares about.
+      - name: stable
+        ttl: 24h
+        patterns:
+          - "what is the capital"
+          - "define "
+          - "what does "
+          - "explain the difference"
+          - "formula for"
+          - "who wrote"
+          - "convert "
+
+  semantic:
+    # Turning this off leaves the exact tier running, which is the configuration
+    # that keeps the overhead budget intact.
+    enabled: true
+
+    # Cosine similarity required to serve a cached response. Measured
+    # separation on real probes: paraphrases 0.983, unrelated prompts 0.63.
+    # Sweep it with the admin tuning endpoint rather than guessing.
+    threshold: 0.93
+
+    # Caps the brute-force scan within one fingerprint bucket. Redis 7 has no
+    # vector index, so this is what keeps the scan bounded.
+    max_candidates: 100
+
+  embedding:
+    base_url: https://generativelanguage.googleapis.com/v1beta
+    api_key_env: GEMINI_API_KEY
+    model: gemini-embedding-001
+
+    # Gemini normalises only at its native 3072 dimensions; 768 is truncated
+    # via MRL and re-normalised in code. Changing this invalidates every stored
+    # embedding, since vectors of different lengths cannot be compared.
+    dimensions: 768
+
+    # Shorter than a provider timeout on purpose: an embedding call that has
+    # already blown the latency budget should be abandoned, not waited on.
+    timeout: 5s

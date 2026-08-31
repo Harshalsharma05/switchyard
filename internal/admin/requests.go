@@ -27,6 +27,14 @@ type RequestLogReader interface {
 	SpendByTeamSince(ctx context.Context, since time.Time) (map[string]int64, error)
 	CostSeries(ctx context.Context, q logstore.CostQuery) ([]logstore.CostCell, error)
 	FallbackCostSince(ctx context.Context, since time.Time, teamID string) (logstore.FallbackAttribution, error)
+	CacheSavingsSince(ctx context.Context, since time.Time, teamID string) (logstore.CacheSavings, error)
+}
+
+// CostCalculator prices what a cache hit would have cost had it been a real
+// provider call. Declared here, by the consumer, so this package depends on
+// turning tokens into money and not on how pricing was loaded.
+type CostCalculator interface {
+	Cost(model string, inputTokens, outputTokens int) (int64, error)
 }
 
 // KeyAuthenticator resolves a bearer token to a team. The admin listener has no

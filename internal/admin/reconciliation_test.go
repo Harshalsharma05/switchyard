@@ -13,7 +13,7 @@ func newReconServer(t *testing.T, spend SpendReader, reqLog RequestLogReader) *h
 	reg := requestLogRegistry(t) // acme = admin, globex = not
 	srv := httptest.NewServer(NewRouter(func() bool { return true },
 		reg, spend, fakeProviderLister{}, fakeHealthReader{}, &fakeBreakerController{},
-		nil, fakeReloader, reqLog, reg, nil, testMetrics(t), discardLogger()))
+		nil, fakeReloader, reqLog, reg, nil, nil, nil, testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)
 	return srv
 }

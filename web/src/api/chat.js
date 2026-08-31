@@ -20,6 +20,10 @@ function readMeta(resp) {
     servedModel: h.get('X-Switchyard-Served-Model'),
     overheadMs: numberOr(h.get('X-Switchyard-Overhead-Ms')),
     fallback: h.get('X-Switchyard-Fallback') === 'true',
+    // 'exact', 'semantic', or 'miss'. Absent when the gateway has no cache.
+    cache: h.get('X-Switchyard-Cache'),
+    // Embedding time, excluded from overheadMs above and reported separately.
+    embedMs: numberOr(h.get('X-Switchyard-Embed-Ms')),
   }
 }
 
