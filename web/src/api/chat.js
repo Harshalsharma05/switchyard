@@ -24,6 +24,10 @@ function readMeta(resp) {
     cache: h.get('X-Switchyard-Cache'),
     // Embedding time, excluded from overheadMs above and reported separately.
     embedMs: numberOr(h.get('X-Switchyard-Embed-Ms')),
+    // Step 8.3. Both null unless the caller asked to be routed, which is why
+    // absence reads as "not routed" rather than as a failure to decide.
+    routeTier: h.get('X-Switchyard-Route-Tier'),
+    routeReason: h.get('X-Switchyard-Route-Reason'),
   }
 }
 

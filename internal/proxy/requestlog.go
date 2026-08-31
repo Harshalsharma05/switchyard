@@ -60,6 +60,9 @@ func RequestLog(logger RequestLogger) func(http.Handler) http.Handler {
 				CacheHit:                m.cacheHit,
 				TraceID:                 traceID,
 				FallbackCostDeltaMicros: m.fallbackCostDeltaMicros,
+				RoutingTier:             m.routedTier,
+				RoutingReason:           m.routeReason,
+				RoutingSavingsMicros:    m.routingSavingsMicros,
 			})
 		})
 	}

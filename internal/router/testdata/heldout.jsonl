@@ -1,0 +1,50 @@
+{"label":"simple","prompt":"What is the largest ocean on Earth?"}
+{"label":"simple","prompt":"Who painted the Mona Lisa?"}
+{"label":"simple","prompt":"Convert 5 kilometers to miles."}
+{"label":"simple","prompt":"Define entropy."}
+{"label":"simple","prompt":"Translate 'where is the station' into German."}
+{"label":"simple","prompt":"What year was the first iPhone released?"}
+{"label":"simple","prompt":"How many bones are in the human body?"}
+{"label":"simple","prompt":"What is a semaphore?"}
+{"label":"simple","prompt":"What does API stand for?"}
+{"label":"simple","prompt":"What is the freezing point of water in Kelvin?"}
+{"label":"simple","prompt":"Give me an antonym for 'scarce'."}
+{"label":"simple","prompt":"What is 3 to the power of 7?"}
+{"label":"simple","prompt":"When did World War II end?"}
+{"label":"simple","prompt":"What is the capital of Australia?"}
+{"label":"simple","prompt":"Correct the grammar: She don't like coffee."}
+{"label":"simple","prompt":"What is the chemical formula for table salt?"}
+{"label":"simple","prompt":"Name the three states of matter."}
+{"label":"simple","prompt":"Format this as JSON: name Alice, age 30"}
+{"label":"simple","prompt":"What is the difference between a list and a tuple in Python?"}
+{"label":"simple","prompt":"Who is the author of The Old Man and the Sea?"}
+{"label":"complex","prompt":"Explain why two-phase commit does not scale across regions, and describe what you would use instead."}
+{"label":"complex","prompt":"Debug this test, it passes locally and fails in CI:\n```go\nfunc TestExpiry(t *testing.T) {\n    c := New()\n    c.Set('k', 'v', time.Millisecond)\n    time.Sleep(time.Millisecond)\n    if _, ok := c.Get('k'); ok { t.Fatal('expected miss') }\n}\n```"}
+{"label":"complex","prompt":"Design a retry policy for calls to a flaky payment provider. It must not amplify load during an outage, must bound total attempts across the whole chain, and should surface a clear error to the caller."}
+{"label":"complex","prompt":"Compare gRPC and REST for internal service-to-service communication in a polyglot estate, and recommend one."}
+{"label":"complex","prompt":"Refactor this component so state lives in one place, without changing the rendered output:\n```jsx\nfunction Panel({items}) {\n  const [a, setA] = useState(0);\n  const [b, setB] = useState(0);\n  return <div>{a + b}</div>;\n}\n```"}
+{"label":"complex","prompt":"Analyze these p99 latency numbers before and after the deploy and tell me whether the regression is real or noise. Return a table with metric, before, after, and verdict.\np50 12ms to 13ms, p95 44ms to 51ms, p99 90ms to 210ms, sample size 1200 and 900."}
+{"label":"complex","prompt":"Walk me through designing an idempotency key scheme for a payments API, covering collisions, retention, and what happens on a partial failure."}
+{"label":"complex","prompt":"Prove that any comparison sort requires at least n log n comparisons in the worst case."}
+{"label":"complex","prompt":"Implement a bounded worker pool in Go that drains cleanly on context cancellation, must not leak goroutines, and should expose queue depth."}
+{"label":"complex","prompt":"Why is this Docker build taking eight minutes? Here is the Dockerfile:\n```\nFROM node:20\nWORKDIR /app\nCOPY . .\nRUN npm install\nRUN npm run build\n```"}
+{"label":"complex","prompt":"Design a strategy for rolling out a breaking API change to 200 external customers over six months."}
+{"label":"complex","prompt":"Evaluate whether we should adopt Kubernetes given a team of four, twelve services, and a current Compose deployment. Cover the trade-offs honestly."}
+{"label":"complex","prompt":"Given this incident timeline, determine the root cause and write the five whys.\n```\n14:02 error rate alerts fire\n14:04 on-call paged\n14:09 rollback started\n14:21 error rate normal\n```"}
+{"label":"complex","prompt":"Optimize this hot loop. It must produce identical output, must not allocate, and should be measurably faster:\n```go\nout := []string{}\nfor _, x := range xs {\n    out = append(out, strings.ToLower(x))\n}\n```"}
+{"label":"complex","prompt":"Derive the expected number of comparisons for quicksort on a random permutation."}
+{"label":"complex","prompt":"Critique our database schema and suggest normalisation improvements:\n```sql\nCREATE TABLE orders (id int, customer_name text, customer_email text, item_1 text, item_2 text, item_3 text);\n```"}
+{"label":"complex","prompt":"Explain why adding more retries made our outage longer, step by step."}
+{"label":"complex","prompt":"Design an algorithm to deduplicate a stream of events with at-least-once delivery. Constraints: 100k events per second, at most 1GB of memory, no external store."}
+{"label":"complex","prompt":"Compare the trade-offs of optimistic and pessimistic locking for a booking system with high contention on a few rows."}
+{"label":"complex","prompt":"Here is our gateway config. Identify every setting that would break under a network partition and explain the failure mode of each.\n```yaml\nredis:\n  timeout: 50ms\nbudget:\n  fail_mode: closed\nhealth:\n  interval: 10s\n```"}
+{"label":"simple","prompt":"Compare these two numbers and tell me which is larger: 5 and 7."}
+{"label":"simple","prompt":"Is 'optimise' the British spelling of 'optimize'?"}
+{"label":"simple","prompt":"Translate 'step by step' into Spanish."}
+{"label":"simple","prompt":"What does the word 'strategy' mean?"}
+{"label":"simple","prompt":"What framework is this?\n```\nimport React from 'react';\n```"}
+{"label":"simple","prompt":"Count the words in this sentence: the quick brown fox jumps over the lazy dog."}
+{"label":"complex","prompt":"Write a production-ready Terraform module for a VPC with three private subnets, NAT gateways in two availability zones, and flow logs shipped to S3."}
+{"label":"complex","prompt":"Our nightly batch job silently produces half the rows it used to. Nothing errors. Where would you look first and what would you check at each stage?"}
+{"label":"complex","prompt":"Our checkout flow loses about 2% of orders somewhere between the payment callback and the fulfilment queue. Find the likely places that can drop a message and tell me what to instrument."}
+{"label":"complex","prompt":"Rewrite this 300-word product description for three different audiences: a CTO, a procurement officer, and an end user, keeping the same factual claims in each."}

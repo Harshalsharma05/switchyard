@@ -65,7 +65,7 @@ func (f *fakeBreakerController) calls() []string {
 func newTestAdminServerWithHealth(t *testing.T, reader HealthReader) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(NewRouter(func() bool { return true },
-		testTeamStore(t), &fakeSpendReader{}, fakeProviderLister{}, reader, &fakeBreakerController{}, nil, fakeReloader, nil, nil, nil, nil, nil, testMetrics(t), discardLogger()))
+		testTeamStore(t), &fakeSpendReader{}, fakeProviderLister{}, reader, &fakeBreakerController{}, nil, fakeReloader, nil, nil, nil, nil, nil, nil, testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -187,7 +187,7 @@ func TestListProviderHealthEmptyIsAnEmptyArray(t *testing.T) {
 func newTestAdminServerWithBreakers(t *testing.T, providers ProviderLister, resetter BreakerController) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(NewRouter(func() bool { return true },
-		testTeamStore(t), &fakeSpendReader{}, providers, fakeHealthReader{}, resetter, nil, fakeReloader, nil, nil, nil, nil, nil, testMetrics(t), discardLogger()))
+		testTeamStore(t), &fakeSpendReader{}, providers, fakeHealthReader{}, resetter, nil, fakeReloader, nil, nil, nil, nil, nil, nil, testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -288,7 +288,7 @@ func TestListProviderHealthIncludesBreakerStates(t *testing.T) {
 	}}
 	srv := httptest.NewServer(NewRouter(func() bool { return true },
 		testTeamStore(t), &fakeSpendReader{}, fakeProviderLister{}, reader, breakers,
-		nil, fakeReloader, nil, nil, nil, nil, nil, testMetrics(t), discardLogger()))
+		nil, fakeReloader, nil, nil, nil, nil, nil, nil, testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)
 
 	resp, err := http.Get(srv.URL + "/admin/providers/health")

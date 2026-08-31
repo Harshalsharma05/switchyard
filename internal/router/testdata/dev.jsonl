@@ -1,0 +1,61 @@
+{"label":"simple","prompt":"What is the capital of France?"}
+{"label":"simple","prompt":"Who wrote Pride and Prejudice?"}
+{"label":"simple","prompt":"Convert 72 degrees Fahrenheit to Celsius."}
+{"label":"simple","prompt":"Define photosynthesis."}
+{"label":"simple","prompt":"Translate 'good morning' into Japanese."}
+{"label":"simple","prompt":"What year did the Berlin Wall fall?"}
+{"label":"simple","prompt":"How many continents are there?"}
+{"label":"simple","prompt":"What is a mutex?"}
+{"label":"simple","prompt":"Spell the word 'accommodate'."}
+{"label":"simple","prompt":"What does the term 'idempotent' mean?"}
+{"label":"simple","prompt":"When was the Eiffel Tower built?"}
+{"label":"simple","prompt":"List the planets in the solar system."}
+{"label":"simple","prompt":"What is the boiling point of water at sea level?"}
+{"label":"simple","prompt":"Give me a synonym for 'happy'."}
+{"label":"simple","prompt":"What is 15% of 240?"}
+{"label":"simple","prompt":"Who is the current secretary-general of the United Nations?"}
+{"label":"simple","prompt":"Summarize this in one sentence: the meeting was moved to Thursday because the room was double booked."}
+{"label":"simple","prompt":"What is the chemical symbol for gold?"}
+{"label":"simple","prompt":"Fix the spelling in this sentence: I recieved the pakage yesterday."}
+{"label":"simple","prompt":"What is the difference between HTTP and HTTPS?"}
+{"label":"simple","prompt":"Capitalize each word in: hello world from switchyard"}
+{"label":"simple","prompt":"What time zone is Tokyo in?"}
+{"label":"simple","prompt":"Convert this list to uppercase: apple, banana, cherry"}
+{"label":"simple","prompt":"What is the plural of 'cactus'?"}
+{"label":"simple","prompt":"Name three primary colors."}
+{"label":"simple","prompt":"What does CPU stand for?"}
+{"label":"simple","prompt":"What is the HTTP status code for 'Not Found'?"}
+{"label":"simple","prompt":"Rewrite this sentence to be more concise: In light of the fact that it was raining, we decided to stay indoors."}
+{"label":"simple","prompt":"What is the currency of Japan?"}
+{"label":"simple","prompt":"How do you say 'thank you' in Portuguese?"}
+{"label":"simple","prompt":"What is the atomic number of carbon?"}
+{"label":"simple","prompt":"Turn this into a bullet list: eggs, milk, bread"}
+{"label":"complex","prompt":"Explain why a distributed system might prefer eventual consistency over strong consistency, and describe a concrete scenario where that choice causes user-visible problems."}
+{"label":"complex","prompt":"Debug this function, it returns the wrong result for empty input:\n```python\ndef mean(xs):\n    return sum(xs) / len(xs)\n```"}
+{"label":"complex","prompt":"Design a rate limiter for a multi-tenant API gateway. It must be fair across tenants, must survive a Redis outage, and should add under 5ms of latency. Explain the trade-offs of your approach."}
+{"label":"complex","prompt":"Compare the trade-offs between a token bucket and a leaky bucket rate limiter for bursty traffic, and recommend one for an API gateway."}
+{"label":"complex","prompt":"Refactor this handler to remove the duplicated error handling, without changing its behaviour:\n```go\nfunc h(w http.ResponseWriter, r *http.Request) {\n    if err := a(); err != nil { http.Error(w, err.Error(), 500); return }\n    if err := b(); err != nil { http.Error(w, err.Error(), 500); return }\n}\n```"}
+{"label":"complex","prompt":"Analyze the following quarterly revenue figures and identify the three most likely drivers of the decline. Return your answer as a table with columns driver, evidence, and confidence.\nQ1 4.2M, Q2 4.0M, Q3 3.1M, Q4 2.8M. Headcount flat. Churn up 4 points. Two competitors launched."}
+{"label":"complex","prompt":"Walk me through how you would migrate a monolith to microservices for a team of six engineers. Cover data ownership, deployment, and rollback."}
+{"label":"complex","prompt":"Prove that the sum of the first n odd integers equals n squared."}
+{"label":"complex","prompt":"Implement a thread-safe LRU cache in Go. It must support Get and Put in O(1), must not allocate on the hot path, and should expose hit and miss counters."}
+{"label":"complex","prompt":"Why does my Postgres query use a sequential scan instead of the index? Here is the schema and the EXPLAIN output:\n```\nCREATE INDEX idx_team ON requests(team_id);\nSeq Scan on requests  (cost=0.00..18334.00 rows=2 width=244)\n  Filter: ((team_id)::text = 'acme'::text)\n```"}
+{"label":"complex","prompt":"Design a schema for a request log table that supports filtering by team, time range, and status, and explain which indexes you would create and why."}
+{"label":"complex","prompt":"Evaluate the pros and cons of server-sent events versus WebSockets for a live dashboard, given that the client is a React app behind a corporate proxy."}
+{"label":"complex","prompt":"Given this stack trace, determine the root cause and propose a fix:\n```\npanic: runtime error: invalid memory address or nil pointer dereference\n[signal SIGSEGV: segmentation violation code=0x1 addr=0x0]\nmain.(*Handler).ServeHTTP(0x0, ...)\n```"}
+{"label":"complex","prompt":"Write a step by step plan to reduce our cloud bill by 30% without degrading p99 latency. Include what you would measure before and after."}
+{"label":"complex","prompt":"Critique this API design and suggest improvements:\n```yaml\npaths:\n  /getUserById:\n    post:\n      parameters:\n        - name: id\n```"}
+{"label":"complex","prompt":"Explain why the circuit breaker pattern can make an outage worse if the half-open state allows unlimited probes, and describe how to fix it."}
+{"label":"complex","prompt":"Optimize this SQL query. It must return identical rows, must not add new indexes, and should run in under 100ms:\n```sql\nSELECT * FROM orders o WHERE o.customer_id IN (SELECT id FROM customers WHERE region = 'EU') ORDER BY o.created_at DESC;\n```"}
+{"label":"complex","prompt":"Derive the time complexity of this recursive function and explain each step of the derivation."}
+{"label":"complex","prompt":"Compare three approaches to schema migration in a zero-downtime deployment, and recommend one with justification."}
+{"label":"complex","prompt":"Design an algorithm to detect duplicate images at scale. Constraints: 50 million images, must run nightly, no GPU budget."}
+{"label":"complex","prompt":"Here is our on-call runbook. Rewrite it so a new engineer can follow it during an incident, keeping every command exact and flagging anything ambiguous.\n```\n1. ssh into bastion\n2. check the dashboard\n3. if it looks bad, roll back\n```"}
+{"label":"simple","prompt":"What does the word 'analyze' mean?"}
+{"label":"simple","prompt":"Spell the word 'algorithm'."}
+{"label":"simple","prompt":"What is a debugger?"}
+{"label":"simple","prompt":"What language is this?\n```\nprint('hello world')\n```"}
+{"label":"simple","prompt":"Sort this list alphabetically: Norway, Chile, Kenya, Japan, Brazil, Canada, Egypt, France, Ghana, India, Jordan, Latvia, Mexico, Nepal, Oman, Peru, Qatar, Rwanda, Serbia, Turkey, Uganda, Vietnam, Yemen, Zambia, Austria, Belgium, Croatia, Denmark, Estonia, Finland."}
+{"label":"complex","prompt":"Should we shard the database by tenant or by time range? We have 400 tenants, the largest is 60% of traffic, and queries are almost always time-bounded."}
+{"label":"complex","prompt":"Our p99 doubled after the last deploy and nothing in the diff looks related. Where do I start?"}
+{"label":"complex","prompt":"Turn our 12-step manual deployment checklist into a single idempotent script that is safe to re-run halfway through."}

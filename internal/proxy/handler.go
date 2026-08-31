@@ -50,6 +50,11 @@ type Resolver interface {
 	// served — and one hot-reloadable source (cmd/gateway's configStore)
 	// already answers both.
 	TierFor(model string) []resilience.Candidate
+
+	// TierNamed returns a tier's candidates by its configs/providers.yaml
+	// name, which is what Step 8.2's routing has to work from: a routed
+	// request names a tier, not a model, so TierFor has nothing to key on.
+	TierNamed(name string) []resilience.Candidate
 }
 
 // CostCalculator is the slice of budget.Calculator this package needs.
@@ -94,6 +99,10 @@ type Handler struct {
 	// behaviour and a supported configuration.
 	cache    SemanticCache
 	cacheTTL cache.TTLPolicy
+
+	// routing is nil unless WithRouting was passed, which is the pre-Phase-8
+	// behaviour and a supported configuration.
+	routing ComplexityRouter
 }
 
 // Option configures a dependency added after Part 1.
@@ -109,6 +118,11 @@ func WithCache(c SemanticCache, ttl cache.TTLPolicy) Option {
 		h.cache = c
 		h.cacheTTL = ttl
 	}
+}
+
+// WithRouting enables Step 8.2's cost-aware routing.
+func WithRouting(r ComplexityRouter) Option {
+	return func(h *Handler) { h.routing = r }
 }
 
 // NewHandler wires the handler with its dependencies. Nothing here reads
@@ -163,21 +177,56 @@ func (h *Handler) recordCost(ctx context.Context, metrics *requestMetrics, model
 	}
 	metrics.costMicros = cost
 
+	// Placed here, not at recordCost's call sites, because it depends on the
+	// costMicros just set — and because a cache hit deliberately never reaches
+	// recordCost, which is what keeps routing from claiming savings the cache
+	// panel has already counted. Attributing one avoided spend to both would
+	// double-count it.
+	h.recordRoutingSavings(ctx, metrics, usage)
+
 	// When a fallback served this request, price the requested model against
 	// the same real usage and keep the signed difference — the durable form of
 	// the estimate Part 1 only logs (Step 6.3). A pricing failure on the
 	// counterfactual is left nil, exactly like the primary cost above: cost
 	// accounting never fails a request that already succeeded.
-	if metrics.fellBack && metrics.requestedModel != "" && metrics.requestedModel != model {
-		want, err := h.calc.Cost(metrics.requestedModel, usage.InputTokens, usage.OutputTokens)
+	// baselineModel, not requestedModel: a routed request's requestedModel is
+	// "auto" or a tier name, which has no price. The chain started from the
+	// routed model, so that is what the counterfactual is worth comparing to.
+	baseline := metrics.baselineModel()
+	if metrics.fellBack && baseline != "" && baseline != model {
+		want, err := h.calc.Cost(baseline, usage.InputTokens, usage.OutputTokens)
 		if err != nil {
 			h.log.ErrorContext(ctx, "pricing fallback counterfactual",
-				slog.String("requested_model", metrics.requestedModel), slog.Any("error", err))
+				slog.String("baseline_model", baseline), slog.Any("error", err))
 			return
 		}
 		delta := cost - want
 		metrics.fallbackCostDeltaMicros = &delta
 	}
+}
+
+// recordRoutingSavings prices Step 8.4's counterfactual: what the top tier's
+// declared head would have cost for this request's real token usage, against
+// what was actually spent.
+//
+// Runs only for a routed request, and only once usage is final — an estimate
+// against reserved tokens would make the headline number a projection, which
+// is exactly what the step forbids. A pricing failure leaves it unrecorded
+// rather than zero: absent is honest, zero is a claim.
+func (h *Handler) recordRoutingSavings(ctx context.Context, metrics *requestMetrics, usage provider.Usage) {
+	if metrics == nil || metrics.routedTier == "" || metrics.routeBaselineModel == "" {
+		return
+	}
+
+	baseline, err := h.calc.Cost(metrics.routeBaselineModel, usage.InputTokens, usage.OutputTokens)
+	if err != nil {
+		h.log.ErrorContext(ctx, "pricing routing counterfactual",
+			slog.String("baseline_model", metrics.routeBaselineModel), slog.Any("error", err))
+		return
+	}
+
+	saved := baseline - metrics.costMicros
+	metrics.routingSavingsMicros = &saved
 }
 
 // ChatCompletions serves POST /v1/chat/completions, streaming and
@@ -197,6 +246,13 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if m := metricsFrom(r.Context()); m != nil {
 		m.requestedModel = req.Model
 		m.stream = req.Stream
+	}
+
+	// Step 8.2: before authorization, because routing decides which model is
+	// being authorized. Only a caller who asked to be routed reaches past the
+	// first line of route(); an explicit model is never overridden.
+	if !h.route(w, r, &req) {
+		return
 	}
 
 	if !h.authorizeModel(w, r, req.Model) {

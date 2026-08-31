@@ -38,6 +38,11 @@ type liveConfig struct {
 	// path only ever asks this one question and a linear scan of every tier
 	// would put configs/providers.yaml's size on the hot path.
 	tiers map[string][]resilience.Candidate
+
+	// tierNames is the same tiers keyed by tier name instead of by model.
+	// Step 8.2's routing starts from a tier the policy named, so it has no
+	// model to key on; both indexes share the same backing slices.
+	tierNames map[string][]resilience.Candidate
 }
 
 // configStore is the atomic swap point behind every hot-reloadable
@@ -93,6 +98,12 @@ func (s *configStore) TierFor(model string) []resilience.Candidate {
 	return s.current.Load().tiers[model]
 }
 
+// TierNamed returns a tier by its configs/providers.yaml name. Same sharing
+// rule as TierFor: the slice is read-only for every caller.
+func (s *configStore) TierNamed(name string) []resilience.Candidate {
+	return s.current.Load().tierNames[name]
+}
+
 func (s *configStore) Authenticate(rawKey string) (*auth.Team, error) {
 	return s.current.Load().authRegistry.Authenticate(rawKey)
 }
@@ -140,6 +151,8 @@ func loadLiveConfig(providersPath, teamsPath string) (*liveConfig, int, int, err
 		return nil, 0, 0, fmt.Errorf("building auth registry: %w", err)
 	}
 
+	byModel, byName := indexTiers(providers.Tiers)
+
 	pricing := make(map[string]budget.Pricing, len(providers.Pricing))
 	for model, p := range providers.Pricing {
 		pricing[model] = budget.Pricing{InputPer1M: p.InputPer1M, OutputPer1M: p.OutputPer1M}
@@ -149,7 +162,8 @@ func loadLiveConfig(providersPath, teamsPath string) (*liveConfig, int, int, err
 		registry:     registry,
 		authRegistry: authRegistry,
 		calc:         budget.NewCalculator(pricing),
-		tiers:        indexTiers(providers.Tiers),
+		tiers:        byModel,
+		tierNames:    byName,
 	}, len(providers.Configs), len(teams), nil
 }
 
@@ -163,22 +177,24 @@ func loadLiveConfig(providersPath, teamsPath string) (*liveConfig, int, int, err
 // The conversion happens in cmd/gateway rather than internal/config for the
 // same reason the pricing conversion above does: config's job is to validate
 // the file, and mapping its output onto another package's types is wiring.
-func indexTiers(tiers map[string][]config.TierEntry) map[string][]resilience.Candidate {
+func indexTiers(tiers map[string][]config.TierEntry) (byModel, byName map[string][]resilience.Candidate) {
 	if len(tiers) == 0 {
-		return nil
+		return nil, nil
 	}
 
-	out := make(map[string][]resilience.Candidate)
-	for _, entries := range tiers {
+	byModel = make(map[string][]resilience.Candidate)
+	byName = make(map[string][]resilience.Candidate, len(tiers))
+	for name, entries := range tiers {
 		candidates := make([]resilience.Candidate, 0, len(entries))
 		for _, e := range entries {
 			candidates = append(candidates, resilience.Candidate{Provider: e.Provider, Model: e.Model})
 		}
+		byName[name] = candidates
 		for _, c := range candidates {
-			out[c.Model] = candidates
+			byModel[c.Model] = candidates
 		}
 	}
-	return out
+	return byModel, byName
 }
 
 // newReloader returns the closure admin.NewRouter calls for POST

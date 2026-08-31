@@ -56,6 +56,9 @@ type stubResolver struct {
 	// one provider for every model, no tier, no fallback.
 	byModel map[string]provider.Provider
 	tier    []resilience.Candidate
+
+	// tiersByName is Step 8.2's addition, used only by the routing tests.
+	tiersByName map[string][]resilience.Candidate
 }
 
 func (s stubResolver) ForModel(model string) (provider.Provider, error) {
@@ -74,6 +77,10 @@ func (s stubResolver) ForModel(model string) (provider.Provider, error) {
 
 func (s stubResolver) TierFor(string) []resilience.Candidate {
 	return s.tier
+}
+
+func (s stubResolver) TierNamed(name string) []resilience.Candidate {
+	return s.tiersByName[name]
 }
 
 // DefaultMaxTokensFor is fixed rather than configurable per test: every test

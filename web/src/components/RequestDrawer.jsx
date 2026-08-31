@@ -51,8 +51,15 @@ function RequestDetail({ r }) {
               <span className="num">{r.requested_model} → {r.served_model}</span>
             </Row>
           )}
+          <Row label="Cost-aware routing">
+            {r.routing_tier
+              ? <span className="rd-flag num">{r.routing_tier} tier</span>
+              : <span className="rd-muted">not routed — model named by caller</span>}
+          </Row>
+          {r.routing_reason && (
+            <Row label="Rationale"><span className="num rd-break">{r.routing_reason}</span></Row>
+          )}
         </dl>
-        <p className="rd-note">The full routing rationale and candidate chain are recorded from Phase 8.</p>
       </section>
 
       <section className="rd-sec">

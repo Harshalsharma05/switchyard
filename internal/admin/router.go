@@ -31,7 +31,7 @@ type Middleware func(http.Handler) http.Handler
 // Route paths carry an explicit /admin prefix even though the whole listener
 // is already the admin port, leaving room for /metrics and future operator
 // endpoints to live at the root without colliding with this namespace.
-func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers ProviderLister, healthReader HealthReader, breakers BreakerController, chaos ChaosController, reload Reloader, requestLog RequestLogReader, authr KeyAuthenticator, summarySvc SummaryService, cacheTuner CacheTuner, costCalc CostCalculator, metrics *telemetry.Metrics, log *slog.Logger, middleware ...Middleware) http.Handler {
+func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers ProviderLister, healthReader HealthReader, breakers BreakerController, chaos ChaosController, reload Reloader, requestLog RequestLogReader, authr KeyAuthenticator, summarySvc SummaryService, cacheTuner CacheTuner, costCalc CostCalculator, routing RoutingInfo, metrics *telemetry.Metrics, log *slog.Logger, middleware ...Middleware) http.Handler {
 	r := chi.NewRouter()
 
 	for _, mw := range middleware {
@@ -46,7 +46,7 @@ func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers 
 	// /admin/me is the frontend's first call on load; the request-log routes
 	// pin a non-admin to its own rows internally. Neither is behind the admin
 	// gate — any valid key reaches them.
-	r.Get("/admin/me", handleMe(authr, spend, log))
+	r.Get("/admin/me", handleMe(authr, spend, routing, log))
 	r.Get("/admin/summary", handleSummary(summarySvc, healthReader, cacheTuner != nil, authr, log))
 	r.Get("/admin/requests", listRequests(requestLog, authr, log))
 	r.Get("/admin/requests/{id}", getRequest(requestLog, authr, log))

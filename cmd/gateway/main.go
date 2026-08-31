@@ -29,6 +29,7 @@ import (
 	"github.com/Harshalsharma05/switchyard/internal/proxy"
 	"github.com/Harshalsharma05/switchyard/internal/ratelimit"
 	"github.com/Harshalsharma05/switchyard/internal/resilience"
+	"github.com/Harshalsharma05/switchyard/internal/router"
 	"github.com/Harshalsharma05/switchyard/internal/summary"
 	"github.com/Harshalsharma05/switchyard/internal/telemetry"
 )
@@ -40,6 +41,7 @@ const (
 	defaultProvidersPath = "configs/providers.yaml"
 	defaultTeamsPath     = "configs/teams.yaml"
 	defaultCachePath     = "configs/cache.yaml"
+	defaultRouterPath    = "configs/router.yaml"
 	defaultRedisAddr     = "localhost:6379"
 	defaultPublicAddr    = ":8080"
 	defaultAdminAddr     = ":9090"
@@ -441,6 +443,29 @@ func run() error {
 		)
 	}
 
+	// Step 8.2's cost-aware routing. A missing configs/router.yaml, or
+	// enabled: false, leaves complexityRouter nil and every request is served
+	// by the model the caller named — the pre-Phase-8 behaviour.
+	routerPath := envOr("SWITCHYARD_ROUTER_CONFIG", defaultRouterPath)
+	routerCfg, err := config.LoadRouter(routerPath)
+	if err != nil {
+		return fmt.Errorf("loading router config: %w", err)
+	}
+
+	var complexityRouter *router.Router
+	if routerCfg.Enabled {
+		if err := validateRoutingPolicy(store, routerCfg.Policy); err != nil {
+			return err
+		}
+		complexityRouter = router.New(router.NewClassifier(routerCfg.Classifier), routerCfg.Policy)
+
+		log.Info("cost-aware routing enabled",
+			slog.String("simple_tier", routerCfg.Policy.Simple),
+			slog.String("complex_tier", routerCfg.Policy.Complex),
+			slog.Float64("threshold", routerCfg.Classifier.Threshold),
+		)
+	}
+
 	// ready gates /readyz. It flips true once wiring is complete and false again
 	// the moment shutdown begins, so a load balancer stops sending new traffic
 	// while in-flight requests drain.
@@ -459,13 +484,13 @@ func run() error {
 		// (Step 5.2's passive samples), healthMonitor the read side Step 6.2's
 		// chain ordering consults to skip a down provider and sink a degraded
 		// one.
-		Handler:           proxy.NewRouter(store, store, limiter, budgetTracker, store, healthRecorder, healthMonitor, breakerRegistry, chaos, retryConfig, promMetrics, reqLog, log, isReady, cacheOptions(semanticCache, cacheCfg.TTL)...),
+		Handler:           proxy.NewRouter(store, store, limiter, budgetTracker, store, healthRecorder, healthMonitor, breakerRegistry, chaos, retryConfig, promMetrics, reqLog, log, isReady, append(cacheOptions(semanticCache, cacheCfg.TTL), routerOptions(complexityRouter)...)...),
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
 
 	adminSrv := &http.Server{
 		Addr: envOr("SWITCHYARD_ADMIN_ADDR", defaultAdminAddr),
-		Handler: admin.NewRouter(isReady, store, budgetTracker, store, healthMonitor, breakerRegistry, chaosAdapter{chaos}, newReloader(store, providersPath, teamsPath), reqLogReader, store, summarySvc, cacheTuner, store, promMetrics, log,
+		Handler: admin.NewRouter(isReady, store, budgetTracker, store, healthMonitor, breakerRegistry, chaosAdapter{chaos}, newReloader(store, providersPath, teamsPath), reqLogReader, store, summarySvc, cacheTuner, store, complexityRouter, promMetrics, log,
 			proxy.Recoverer(log),
 			proxy.RequestID,
 			proxy.Logger(log),
@@ -674,6 +699,34 @@ func intOr(key string, fallback int) int {
 // cacheOptions returns the handler option enabling the cache, or nothing when
 // no cache was built. A typed nil *cache.Cache would satisfy the interface and
 // panic on first use, so the nil check happens here rather than in the handler.
+// validateRoutingPolicy fails startup when the policy cannot work: a tier
+// providers.yaml does not declare, or a real model whose name collides with a
+// routing keyword and would therefore be unreachable by its own name.
+//
+// A startup error rather than a runtime one, for the same reason a broken
+// cache is: a policy that silently routes nowhere shows up only as a feature
+// that never fires.
+func validateRoutingPolicy(store *configStore, p router.Policy) error {
+	for _, tier := range []string{p.Simple, p.Complex} {
+		if len(store.TierNamed(tier)) == 0 {
+			return fmt.Errorf("routing policy names tier %q, which configs/providers.yaml does not declare", tier)
+		}
+	}
+	for _, reserved := range []string{router.AutoModel, p.Simple, p.Complex} {
+		if _, err := store.ForModel(reserved); err == nil {
+			return fmt.Errorf("model %q collides with a routing keyword; rename it in configs/providers.yaml", reserved)
+		}
+	}
+	return nil
+}
+
+func routerOptions(r *router.Router) []proxy.Option {
+	if r == nil {
+		return nil
+	}
+	return []proxy.Option{proxy.WithRouting(r)}
+}
+
 func cacheOptions(c *cache.Cache, ttl cache.TTLPolicy) []proxy.Option {
 	if c == nil {
 		return nil

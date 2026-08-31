@@ -17,8 +17,9 @@ const insertSQL = `
 INSERT INTO requests (
 	id, ts, team_id, requested_model, served_model, provider, status_code,
 	input_tokens, output_tokens, cost_micros, latency_ms, overhead_ms,
-	fallback, cache_hit, quality_score, trace_id, fallback_cost_delta_micros
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+	fallback, cache_hit, quality_score, trace_id, fallback_cost_delta_micros,
+	routing_tier, routing_reason, routing_savings_micros
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
 ON CONFLICT (id) DO NOTHING`
 
 // Record is one request-log row. Empty strings are stored as NULL; CacheHit
@@ -45,6 +46,17 @@ type Record struct {
 	// model's real cost minus what the requested model would have cost for the
 	// same token usage. Negative when the fallback was cheaper.
 	FallbackCostDeltaMicros *int64
+
+	// RoutingTier and RoutingReason are set only when Step 8.2's routing chose
+	// the model. Both empty means the caller named a model and routing never
+	// ran, which the NULL columns keep distinct from "ran and chose nothing".
+	RoutingTier   string
+	RoutingReason string
+
+	// RoutingSavingsMicros is what routing avoided spending on this request:
+	// the top tier's price for the same real usage, minus what was spent. Zero
+	// when routing chose the top tier; nil when routing never ran.
+	RoutingSavingsMicros *int64
 }
 
 type Config struct {
@@ -177,6 +189,8 @@ func (w *Writer) flush(ctx context.Context, batch []Record) []Record {
 			rec.LatencyMS, rec.OverheadMS, rec.Fallback,
 			rec.CacheHit, rec.QualityScore, nullable(rec.TraceID),
 			rec.FallbackCostDeltaMicros,
+			nullable(rec.RoutingTier), nullable(rec.RoutingReason),
+			rec.RoutingSavingsMicros,
 		)
 	}
 

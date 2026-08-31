@@ -28,6 +28,15 @@ function MetadataPanel({ meta, row, rowPending }) {
         {meta.servedModel ?? '—'}
         {meta.fallback && <span className="pg-fallback">fallback</span>}
       </dd>
+      <dt>Routing</dt>
+      <dd>
+        {meta.routeTier == null
+          ? <span className="pg-muted">not routed — model named by caller</span>
+          : <>
+              <span className="pg-fallback">{meta.routeTier} tier</span>
+              {meta.routeReason && <span className="pg-unit"> · {meta.routeReason}</span>}
+            </>}
+      </dd>
       <dt>Gateway overhead</dt>
       <dd>{formatMs(row?.overhead_ms ?? meta.overheadMs)}<span className="pg-unit"> ms</span></dd>
       <dt>Latency</dt>
@@ -114,6 +123,10 @@ function ErrorPanel({ error, budget, partial }) {
 export default function Playground() {
   const { me, getKey } = useAuth()
   const models = me?.allowed_models ?? []
+  // What this gateway accepts in `model` beyond real model names — "auto" and
+  // each routable tier. Empty when routing is off, so the selector simply does
+  // not offer it; the tier names come from the API, never from here.
+  const routingOptions = me?.routing_options ?? []
 
   const [prompt, setPrompt] = useState('')
   const [model, setModel] = useState(models[0] ?? '')
@@ -224,12 +237,27 @@ export default function Playground() {
                   className="pg-select"
                   value={model}
                   onChange={(e) => setModel(e.target.value)}
-                  disabled={models.length === 0}
+                  disabled={models.length === 0 && routingOptions.length === 0}
                 >
-                  {models.length === 0 && <option value="">no models allowed</option>}
-                  {models.map((m) => (
-                    <option key={m} value={m}>{m}</option>
-                  ))}
+                  {models.length === 0 && routingOptions.length === 0 && (
+                    <option value="">no models allowed</option>
+                  )}
+                  {routingOptions.length > 0 && (
+                    <optgroup label="Cost-aware routing">
+                      {routingOptions.map((o) => (
+                        <option key={o} value={o}>
+                          {o === 'auto' ? 'auto — classify, then choose a tier' : `${o} — pin this tier`}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {models.length > 0 && (
+                    <optgroup label="Models">
+                      {models.map((m) => (
+                        <option key={m} value={m}>{m}</option>
+                      ))}
+                    </optgroup>
+                  )}
                 </select>
               </label>
 

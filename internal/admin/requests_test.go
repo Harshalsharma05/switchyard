@@ -32,8 +32,10 @@ type fakeRequestLogReader struct {
 	fallbackAttr logstore.FallbackAttribution
 	fallbackErr  error
 
-	cacheSavings    logstore.CacheSavings
-	cacheSavingsErr error
+	cacheSavings      logstore.CacheSavings
+	routingSavings    logstore.RoutingSavings
+	routingSavingsErr error
+	cacheSavingsErr   error
 }
 
 func (f *fakeRequestLogReader) Query(_ context.Context, filter logstore.Filter) (logstore.Page, error) {
@@ -58,6 +60,11 @@ func (f *fakeRequestLogReader) CostSeries(_ context.Context, q logstore.CostQuer
 func (f *fakeRequestLogReader) CacheSavingsSince(_ context.Context, _ time.Time, teamID string) (logstore.CacheSavings, error) {
 	f.gotTeamID = teamID
 	return f.cacheSavings, f.cacheSavingsErr
+}
+
+func (f *fakeRequestLogReader) RoutingSavingsSince(_ context.Context, _ time.Time, teamID string) (logstore.RoutingSavings, error) {
+	f.gotTeamID = teamID
+	return f.routingSavings, f.routingSavingsErr
 }
 
 func (f *fakeRequestLogReader) FallbackCostSince(_ context.Context, _ time.Time, teamID string) (logstore.FallbackAttribution, error) {
@@ -94,7 +101,7 @@ func newRequestLogServer(t *testing.T, reader RequestLogReader) *httptest.Server
 	srv := httptest.NewServer(NewRouter(func() bool { return true },
 		testTeamStore(t), &fakeSpendReader{}, fakeProviderLister{}, fakeHealthReader{},
 		&fakeBreakerController{}, nil, fakeReloader, reader, requestLogRegistry(t),
-		nil, nil, nil, testMetrics(t), discardLogger()))
+		nil, nil, nil, nil, testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)
 	return srv
 }

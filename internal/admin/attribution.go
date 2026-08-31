@@ -1,7 +1,7 @@
 // Cost attribution (Part 2, Step 6.3). GET /admin/attribution reports what
 // resilience cost: the fallback cost delta, split into what fallbacks added
-// and what they saved, over a range. Cache and routing savings are null until
-// Phases 7 and 8 wire them. Team-scoped like /admin/costs.
+// and what they saved, over a range. Cache savings arrived in Phase 7 and
+// routing savings in Step 8.4. Team-scoped like /admin/costs.
 package admin
 
 import (
@@ -33,11 +33,26 @@ type cacheAttrView struct {
 	SavedUSD    float64 `json:"saved_usd"`
 }
 
+// routingAttrView is Step 8.4's savings panel.
+//
+// SavedMicros sums per-request deltas computed at decision time against real
+// token counts — never a projection over traffic that was never routed.
+// Downgraded and Routed together say how much saving came from how much
+// traffic: a large figure over three requests is not a trend.
+type routingAttrView struct {
+	Routed        int64   `json:"routed"`
+	Downgraded    int64   `json:"downgraded"`
+	DowngradeRate float64 `json:"downgrade_rate"`
+	SavedMicros   int64   `json:"saved_micros"`
+	SavedUSD      float64 `json:"saved_usd"`
+}
+
 type attributionView struct {
 	Range       string           `json:"range"`
 	GeneratedAt string           `json:"generated_at"`
 	Fallback    fallbackAttrView `json:"fallback"`
 	Cache       *cacheAttrView   `json:"cache"`
+	Routing     *routingAttrView `json:"routing"`
 }
 
 func handleAttribution(reqLog RequestLogReader, calc CostCalculator, authr KeyAuthenticator, log *slog.Logger) http.HandlerFunc {
@@ -88,6 +103,24 @@ func handleAttribution(reqLog RequestLogReader, calc CostCalculator, authr KeyAu
 			return
 		}
 
+		routed, err := reqLog.RoutingSavingsSince(r.Context(), time.Now().UTC().Add(-spec.lookback), scope)
+		if err != nil {
+			log.ErrorContext(r.Context(), "summing routing attribution", slog.Any("error", err))
+			writeError(w, log, http.StatusInternalServerError, "internal_error",
+				"the gateway could not read the request log")
+			return
+		}
+
+		routingView := &routingAttrView{
+			Routed:      routed.Routed,
+			Downgraded:  routed.Downgraded,
+			SavedMicros: routed.SavedMicros,
+			SavedUSD:    microsToUSD(routed.SavedMicros),
+		}
+		if routed.Routed > 0 {
+			routingView.DowngradeRate = float64(routed.Downgraded) / float64(routed.Routed)
+		}
+
 		writeJSON(w, log, http.StatusOK, attributionView{
 			Range:       rangeKey,
 			GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano),
@@ -96,7 +129,8 @@ func handleAttribution(reqLog RequestLogReader, calc CostCalculator, authr KeyAu
 				SavedMicros: attr.SavedMicros, SavedUSD: microsToUSD(attr.SavedMicros),
 				NetMicros: attr.NetMicros(), NetUSD: microsToUSD(attr.NetMicros()),
 			},
-			Cache: cacheView,
+			Cache:   cacheView,
+			Routing: routingView,
 		})
 	}
 }

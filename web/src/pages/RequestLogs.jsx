@@ -131,6 +131,7 @@ export default function RequestLogs() {
                 {isAdmin && <th>Team</th>}
                 <th>Provider</th>
                 <th>Model</th>
+                <th>Routing</th>
                 <th>Status</th>
                 <th className="ta-r">Latency</th>
                 <th className="ta-r">Overhead</th>
@@ -157,6 +158,11 @@ export default function RequestLogs() {
                   {isAdmin && <td>{r.team_id}</td>}
                   <td>{r.provider || '—'}</td>
                   <td><ModelCell requested={r.requested_model} served={r.served_model} /></td>
+                  <td>
+                    {r.routing_tier
+                      ? <span className="logs-flag" title={r.routing_reason}>{r.routing_tier}</span>
+                      : <span className="logs-muted">—</span>}
+                  </td>
                   <td><StatusCode code={r.status_code} /></td>
                   <td className="num ta-r">{formatMs(r.latency_ms, 0)}<span className="logs-unit">ms</span></td>
                   <td className="num ta-r">{formatMs(r.overhead_ms)}<span className="logs-unit">ms</span></td>

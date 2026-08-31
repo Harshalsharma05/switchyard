@@ -67,6 +67,13 @@ type chainFailure struct {
 // future call site forget it — the allowlist is the one input here that must
 // never be silently absent.
 func (h *Handler) chainFor(ctx context.Context, requested resilience.Candidate) []resilience.Candidate {
+	return h.buildChain(ctx, requested, h.resolver.TierFor(requested.Model))
+}
+
+// buildChain is chainFor with the tier supplied rather than looked up, so
+// Step 8.2's routing gets the identical allowlist and health rules while
+// starting from a tier name instead of a requested model.
+func (h *Handler) buildChain(ctx context.Context, requested resilience.Candidate, tier []resilience.Candidate) []resilience.Candidate {
 	var allowed func(providerName, model string) bool
 	if team := TeamFrom(ctx); team != nil {
 		// Both halves, not just the model: a team's allowed_providers is what
@@ -85,7 +92,7 @@ func (h *Handler) chainFor(ctx context.Context, requested resilience.Candidate) 
 
 	return resilience.BuildChain(resilience.ChainInput{
 		Requested: requested,
-		Tier:      h.resolver.TierFor(requested.Model),
+		Tier:      tier,
 		StatusOf:  statusOf,
 		Allowed:   allowed,
 	})

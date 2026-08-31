@@ -108,6 +108,28 @@ function CacheAttribution({ data }) {
   )
 }
 
+// Routing savings sum per-request deltas computed at decision time against
+// real token counts, so this is money genuinely not spent. Deliberately not a
+// projection over unrouted traffic — routing takes credit only for requests it
+// actually decided.
+function RoutingAttribution({ data }) {
+  const r = data?.routing
+  if (!r) return <span className="attr-context">Cost-aware routing is not enabled on this gateway.</span>
+
+  return (
+    <>
+      <span className={`attr-value num ${r.saved_micros > 0 ? 'attr-value-ok' : ''}`}>
+        {r.saved_micros > 0 ? `−${formatUSD(r.saved_usd)}` : formatUSD(0)}
+      </span>
+      <span className="attr-context">
+        {r.routed === 0
+          ? 'no routed requests in this range'
+          : `${r.downgraded} of ${r.routed} routed down · ${(r.downgrade_rate * 100).toFixed(1)}% downgraded`}
+      </span>
+    </>
+  )
+}
+
 function FallbackAttribution({ data }) {
   const { net_usd: net, extra_usd: extra, saved_usd: saved } = data.fallback
   const tone = net > 0 ? 'warn' : net < 0 ? 'ok' : 'flat'
@@ -221,10 +243,9 @@ export default function UsageCost() {
           />
           <AttributionPanel
             title="Saved by routing"
-            state={{ loading: false, error: null, data: null }}
-            render={() => (
-              <span className="attr-context">Wired up in Phase 8 (cost-aware routing).</span>
-            )}
+            state={attribution}
+            empty="The request log is not configured, so routing savings cannot be attributed."
+            render={(data) => <RoutingAttribution data={data} />}
           />
           <AttributionPanel
             title="Shifted by fallback"

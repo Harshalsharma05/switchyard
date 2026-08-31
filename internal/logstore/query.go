@@ -85,7 +85,8 @@ type Page struct {
 const selectColumns = `
 	id, ts, team_id, requested_model, served_model, provider, status_code,
 	input_tokens, output_tokens, cost_micros, latency_ms, overhead_ms,
-	fallback, cache_hit, quality_score, trace_id, fallback_cost_delta_micros`
+	fallback, cache_hit, quality_score, trace_id, fallback_cost_delta_micros,
+	routing_tier, routing_reason, routing_savings_micros`
 
 // Query returns one page of rows, newest first.
 func (w *Writer) Query(ctx context.Context, f Filter) (Page, error) {
@@ -356,6 +357,46 @@ func (w *Writer) FallbackCostSince(ctx context.Context, since time.Time, teamID 
 	return a, nil
 }
 
+// RoutingSavings is what cost-aware routing avoided spending over a range.
+//
+// Downgraded counts requests routed below the top tier — the ones that could
+// save anything. Routed is the denominator: savings without it says nothing
+// about how much traffic the classifier actually handled.
+type RoutingSavings struct {
+	SavedMicros int64
+	Routed      int64
+	Downgraded  int64
+}
+
+// RoutingSavingsSince totals the per-request routing savings from `since` to
+// now. It reads only live detail rows, like FallbackCostSince: every supported
+// range sits inside the retention window, so the daily rollup is not consulted.
+//
+// Rows where routing_savings_micros IS NULL are excluded rather than counted
+// as zero — those are requests whose caller named a model, and routing cannot
+// take credit for traffic it never saw.
+func (w *Writer) RoutingSavingsSince(ctx context.Context, since time.Time, teamID string) (RoutingSavings, error) {
+	args := []any{since.UTC()}
+	where := "ts >= $1 AND routing_savings_micros IS NOT NULL"
+	if teamID != "" {
+		args = append(args, teamID)
+		where += " AND team_id = $2"
+	}
+
+	sql := `
+		SELECT
+			COALESCE(SUM(routing_savings_micros), 0),
+			COUNT(*),
+			COUNT(*) FILTER (WHERE routing_savings_micros > 0)
+		FROM requests WHERE ` + where
+
+	var rs RoutingSavings
+	if err := w.pool.QueryRow(ctx, sql, args...).Scan(&rs.SavedMicros, &rs.Routed, &rs.Downgraded); err != nil {
+		return RoutingSavings{}, fmt.Errorf("summing routing savings: %w", err)
+	}
+	return rs, nil
+}
+
 // ErrNotFound is returned by Get when no row has that id.
 var ErrNotFound = fmt.Errorf("request not found")
 
@@ -389,12 +430,13 @@ type scanner interface{ Scan(dest ...any) error }
 
 func scanRecord(s scanner) (Record, error) {
 	var rec Record
-	var requested, served, provider, traceID *string
+	var requested, served, provider, traceID, routingTier, routingReason *string
 	if err := s.Scan(
 		&rec.ID, &rec.Timestamp, &rec.TeamID, &requested, &served, &provider,
 		&rec.StatusCode, &rec.InputTokens, &rec.OutputTokens, &rec.CostMicros,
 		&rec.LatencyMS, &rec.OverheadMS, &rec.Fallback, &rec.CacheHit,
 		&rec.QualityScore, &traceID, &rec.FallbackCostDeltaMicros,
+		&routingTier, &routingReason, &rec.RoutingSavingsMicros,
 	); err != nil {
 		return Record{}, fmt.Errorf("scanning request log row: %w", err)
 	}
@@ -402,6 +444,8 @@ func scanRecord(s scanner) (Record, error) {
 	rec.ServedModel = deref(served)
 	rec.Provider = deref(provider)
 	rec.TraceID = deref(traceID)
+	rec.RoutingTier = deref(routingTier)
+	rec.RoutingReason = deref(routingReason)
 	return rec, nil
 }
 

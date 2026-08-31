@@ -517,3 +517,92 @@ Each adapter wraps the caller's `ctx` with `context.WithTimeout(ctx, cfg.Timeout
 
 - **"Redis down → every request still succeeds" is not achievable, and the cache is not why.** Part 1 deliberately fails budget enforcement **closed** (money is not recoverable), so a team with a budget cap gets a 503. The logs show the ordering: the cache degraded to a miss and the request continued past it to the budget check. Part 1's rule wins.
 - **Mid-stream failures being uncacheable is code-verified, not measured.** Chaos injects at connection time and is absorbed by retry/fallback, so a genuine mid-stream provider failure could not be induced.
+
+---
+
+## Phase 8 — Cost-Aware Routing
+
+### Step 8.1 — Complexity classification
+
+- **The classifier is lexical and never calls a model.** A classifier that spends an LLM call to save an LLM call defeats the purpose on both cost and latency — the same argument `cache.yaml`'s TTL rules already make. Measured: **6.6µs per classification, 768 B, 12 allocs** (`go test ./internal/router -bench BenchmarkClassify`). That is 0.066% of the 10ms overhead budget.
+- **It emits an ordinal (`Simple`/`Complex`), never a tier name.** `internal/router` does not know a tier is called `fast`; that string lives in `providers.yaml`. The level → tier mapping is config and arrives in 8.2. Rejected emitting tier names directly, which would have hardcoded a config value into Go.
+- **Two levels, because `providers.yaml` has exactly two tiers.** A third level would have had nowhere real to route and would have made hand-labelling — and therefore the accuracy number — much less reliable, since the middle class is where labellers disagree. `Complexity` is an ordinal, so a third is additive.
+- **Weighted feature score with a configurable threshold, not a rule cascade.** Signals accumulate, so a prompt that is mildly complex on four axes routes up; a first-match cascade would let a single rule decide and would be tuned by reordering rules instead of turning a dial. The score is one loggable number, the same shape as the cache's similarity threshold.
+- **Every signal saturates.** Without a cap, one pasted document outweighs every other feature and everything routes up. Saturation points are config (`scales`), not constants.
+
+### Tuning and what the accuracy number is worth
+
+- **Dev set (61 prompts) for tuning, held-out set (50) for the reported number. Result: 88% held-out**, against the plan's ~80% bar. Reproduce with `go test ./internal/router -run TestClassifierAccuracy -v`, which loads the *shipped* `configs/router.yaml` — the number describes the classifier that actually runs, not test constants.
+- **The first version scored 85% and the error profile was wrong, which mattered more than the score.** Every single miss was a false negative — complex prompts scored as simple. For this feature that is the harmful direction: a false negative downgrades a hard prompt and produces a worse answer, while a false positive only costs money. Cause: `reasoning_matches: 2` meant a single reasoning verb only reached half signal strength, and most genuinely complex prompts fire exactly one.
+- **Setting `reasoning_matches: 1` makes one reasoning verb sufficient on its own.** Deliberate: it biases the classifier toward routing *up*, which is the safe direction given the asymmetric cost of the two errors.
+- **That fix scored 100% on both sets, and 100% was treated as a defect in the evaluation, not a result.** A perfect score on prompts I wrote and labelled myself means the classes were trivially separable. Adversarial cases were added to both sets — simple prompts quoting a reasoning verb ("What does the word 'analyze' mean?"), complex prompts containing no lexicon hit at all — which moved the honest number to 86%, then 88% after two dev-motivated lexicon additions.
+- **Tuning stopped at 88% on purpose.** The six remaining held-out misses are the real limitation of a lexical classifier: complex prompts with no reasoning verb, no explicit constraint, and unremarkable length ("Our nightly batch job silently produces half the rows it used to"). Closing them means stuffing the lexicon until the eval passes, which is fitting the test set. Step 9.3's feedback loop is the principled place to fix this — low quality scores on downgraded requests become labelled examples.
+- **Known weakness, stated rather than hidden: the labelled set was written and labelled by the same person.** It is self-confirming to a degree no split can remove, and the 88% should be read as "the heuristic separates the classes I could think of", not as a population estimate.
+- **Two remaining false positives are the safe kind** — "Compare these two numbers: 5 and 7" routes up and costs a fraction of a cent more.
+
+### Config
+
+- **Weights, saturation scales, and all four lexicons live in `configs/router.yaml`**, matching the precedent `cache.yaml` set. A threshold is a limit, and CLAUDE.md puts limits in configs.
+- **A missing file means routing is off**, exactly as a missing `cache.yaml` means the cache is off. Pre-Phase-8 behaviour stays a supported configuration.
+- **Two validations exist to catch config that loads cleanly and then silently does nothing**: a non-positive scale (which would zero its feature) and an uppercase lexicon pattern (which could never match, since scanning is case-folded). Both would look correct in review.
+- **Assistant turns are counted but not scanned.** A verbose model answer must not classify the follow-up turn — prior output is not the request being classified.
+
+### Step 8.2 — Routing policy
+
+- **Routing is opt-in through the `model` field itself: `"auto"` classifies and picks a tier, a tier name (`"fast"`, `"frontier"`) pins one, and any real model name is honoured exactly.** One field, so "explicit beats inferred" is structural rather than a rule — the ambiguous case (caller names a model *and* asks to be routed) cannot be expressed. Rejected an opt-in header, which was the Phase 7 precedent but would have created exactly that ambiguity and forced an invented tiebreak.
+- **`route()` returns before the classifier is consulted when the caller named a model.** Silently downgrading a request someone made on purpose is a correctness violation, not an optimisation, so it is short-circuited rather than checked afterwards.
+- **Routing runs before `authorizeModel` and `resolve`**, so everything downstream — the allowlist check, the cache key, the TPM and budget reservations — sees the model that will actually be called rather than the keyword the caller sent. A routed request's cache key therefore keys on the chosen model, which is correct: a different model is a different response.
+- **Within a tier, providers.yaml's declared order is preference order** — routing takes the head of the chain `BuildChain` already produces. The cost-awareness lives in the *tier* decision, which is also exactly where 8.4 measures savings (top tier vs actual). Rejected picking the cheapest by priced estimate: ollama is free, so every simple prompt would land on a local 3B model that providers.yaml documents as a last-resort fallback — the savings number would look spectacular and quality would collapse. Worth noting both rules pick the same model under today's config, because declared order already is price order.
+- **Routing and fallback share one chain builder.** `chainFor` was split into `buildChain`, which takes the tier as a parameter, so routing inherits the allowlist and health rules rather than reimplementing them. A second implementation of "which candidates may this team use" is exactly where the two would drift apart.
+- **Candidate selection reads `Breaker.State()`, never `Allow()`.** `Allow` claims the single half-open probe slot; spending a probe on a routing *decision* would steal it from the call that follows. When every candidate's breaker is open, selection returns the chain head anyway — the same rule `BuildChain` already applies to health: a signal, not a verdict.
+- **An inferred tier may escalate upward when the team may use nothing in it; a pinned tier may not.** Routing up costs more and never costs capability, so it is the safe direction to fail in — but a caller who named a tier gets that tier's answer, including its refusal (403). That asymmetry is "explicit beats inferred" applied a second time.
+- **An undeclared tier is a 500, an empty-after-allowlist tier is a 403.** Different causes deserve different answers: the first is a config mismatch the operator must fix, the second is an authorization fact about the calling team.
+- **Startup rejects a policy that cannot work**: a tier providers.yaml does not declare, or a real model whose name collides with `auto` or a tier name and would therefore be unreachable by its own name. Same reasoning as the cache's fatal embedder error — a policy that silently routes nowhere shows up only as a feature that never fires.
+- **The fallback counterfactual is priced against `baselineModel()`, not `requestedModel`.** A routed request's `requestedModel` is `"auto"`, which has no price; the chain started from the routed model, so that is what a fallback's cost delta is worth comparing against.
+- **Measured hot-path cost: 6.5µs to classify plus 238ns to select a candidate**, ~0.07% of the 10ms overhead budget (`BenchmarkClassify`, `BenchmarkSelectCandidate`).
+
+### Step 8.3 — Transparency
+
+- **The decision and its rationale ship together, on every routed response**: `X-Switchyard-Route-Tier` and `X-Switchyard-Route-Reason`. A cost optimiser that shows *what* it chose but not *why* is not auditable, and the rationale is the only thing that makes a surprising downgrade arguable rather than mysterious.
+- **Both headers are absent when routing did not run**, following `X-Switchyard-Cache`'s convention rather than `X-Switchyard-Fallback`'s. Fallback is always *possible*, so its header is always present including `false`; routing only runs on opt-in, so absence is a real answer — "you named a model" — not a negative a caller has to infer.
+- **The rationale is stored in Postgres, not recomputed.** The prompt that produced it is not in the request log and never will be (migration 0001's hard boundary), so without a stored string Request Logs could show that a decision happened but never explain it. The string is derived feature counts and a score — it reveals nothing the existing `input_tokens` column does not.
+- **Stored as one text column, not decomposed into tier + score + level.** The score lives inside the reason string: readable now, not queryable. Phase 9.3 may want to query by score when it turns low-quality downgrades into classifier training examples; promoting it to its own column is a later migration, and building it now would be building ahead of the phase.
+- **`routing_tier` and `routing_reason` are both NULL for an unrouted request** — the same not-applicable-versus-false convention `cache_hit` and `quality_score` already use, and the reason the UI can say "model named by caller" rather than showing a blank.
+- **`GET /admin/me` now reports `routing_options`, and the Playground's model selector is built from it.** The frontend must not contain the string `"fast"`: tier names are `providers.yaml` config, and a UI that hardcodes them silently breaks when the config changes. An empty list means routing is off, so the selector omits the group rather than offering controls that would fail.
+- **The Playground needed a way to *make* a routed request, not just display one.** Surfacing a decision that can never be triggered from the screen would satisfy the letter of the step and none of its point.
+- **No CSS and no layout changed.** Every new element reuses the existing `logs-flag` / `rd-flag` / `pg-fallback` classes, and Phase 5's drawer already had a Routing section carrying the placeholder note "recorded from Phase 8" — which was replaced with real data, not rebuilt. That is the plan's own test of whether the placeholder was designed right, and it passed.
+- **The placeholder note promised more than this step delivers, so it was deleted rather than kept.** It said "rationale and candidate chain"; only the rationale is stored. Leaving the sentence would have claimed a feature that does not exist.
+
+### Overhead with cache and routing both on the hot path — measured
+
+Reproduce (full stack up via `docker compose -f deploy/docker-compose.yml up -d`):
+
+```powershell
+$env:SWITCHYARD_API_KEY = "sk-switchyard-dev-acme-9f2b1c"
+go run ./scripts/overheadbench -n 40 -rpm 45 -mode miss -model auto
+```
+
+| Configuration | p50 | p95 | p99 |
+|---|---|---|---|
+| Cache miss, routing on (`model: auto`), n=40 | 4.15ms | **6.20ms** | 13.38ms |
+| Cache miss, routing off (explicit model), n=40 | 4.42ms | **5.94ms** | 5.97ms |
+| Cache exact hit, routing on, n=28 | 1.82ms | **2.93ms** | 2.95ms |
+
+- **p95 6.20ms with cache and routing both active, against the 10ms budget.** Phase 7 measured 6.74ms for the same semantic-miss path without routing; Part 1's cache-off baseline was 4.09ms.
+- **Routing's own cost is not measurable end to end.** The A/B is 6.20ms vs 5.94ms — a 0.26ms gap against a component benchmark of 6.75µs, so that gap is run-to-run variance, not the classifier. The honest claim is "routing adds nothing detectable at this resolution", not "routing costs 0.26ms".
+- **The p99 13.38ms on the routed run is a single outlier** in 40 samples, and the control run's p99 is 5.97ms. One sample is not a distribution; it needs the Phase 10 k6 run at volume before anything is claimed about the tail.
+- **A cache hit is roughly half the overhead of a miss** (2.93ms vs 6.20ms) and pays no embedding call at all — the two misses in the hit run were the only requests that embedded.
+- **`scripts/overheadbench` is now committed, which closes a Phase 7 gap.** That phase's 6.74ms figure came from an ad-hoc run and no script, against CLAUDE.md's rule that every number comes from a committed script. Phase 10 reuses this rather than inventing a third methodology.
+- **The measurement bit me first, which is why the script defaults changed.** An initial `-max-tokens 16` truncated every response, `cache.Cacheable` correctly refused to store a truncated answer, and `-mode hit` produced thirty consecutive misses. The default is now 128 with a comment saying why — a tight token cap silently measures a cache that never stores anything.
+
+### Step 8.4 — Savings measurement
+
+- **The counterfactual baseline is the top tier's *declared* head, not what health would have picked.** A health-aware baseline moves with unrelated provider outages: a week where Groq's breaker tripped would price the baseline against Gemini at 10x, showing a spectacular saving that routing had nothing to do with. A fixed reference is the only one comparable week to week.
+- **The delta is stored per row at decision time, mirroring `fallback_cost_delta_micros`** rather than priced at query time like cache savings. Both precedents existed; the deciding argument is that a stored delta is historically accurate — a later provider price change does not silently rewrite past savings.
+- **Computed in `recordCost`, after real token counts land.** Pricing it against the reserved-token estimate would make the headline number a projection, which is exactly what the step forbids.
+- **A cache hit records no routing savings, and that is the anti-double-counting mechanism.** A cache hit never reaches `recordCost`, so a routed request served from cache leaves `routing_savings_micros` NULL. The full avoided spend is already counted by the cache panel; attributing the same money to routing as well would inflate the combined figure. Verified in the live data: 3 of 20 routed requests were cache hits and are NULL in both the column and the routing denominator.
+- **Zero and NULL mean different things and both are load-bearing.** Zero: routing ran and chose the top tier, saving nothing. NULL: routing never ran (the caller named a model), or the baseline could not be priced. A pricing failure records NULL rather than zero — absent is honest, zero is a claim.
+- **`routed` is reported next to `saved`** because savings without a denominator is uninterpretable: a large figure over three requests is not a trend.
+- **Verified end to end against real logged data, not asserted.** 20 routed requests through the Compose stack: 15 downgraded at 45 micro-dollars saved each, 2 routed up at 0, 3 cache hits at NULL. The arithmetic checks by hand — 86 input + 128 output tokens costs 44µ¢ on `gpt-oss-20b` and 89µ¢ on `gpt-oss-120b`, so the stored 45 is exactly the gap.
+- **The measured downgrade rate was 88%** (15 of 17 provider-served routed requests), against a classifier whose held-out accuracy is 88%. Those two numbers are unrelated and it would be easy to conflate them: the downgrade rate is a property of the *traffic mix*, not of classifier quality.
+- **No UI restructuring again.** The "Saved by routing" panel existed from Phase 6 with the placeholder "Wired up in Phase 8"; it became a data change, like all four of Phase 7's placeholders.

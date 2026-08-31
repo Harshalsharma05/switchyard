@@ -48,6 +48,17 @@ const (
 	// HeaderEmbedTime is the embedding call's cost, reported separately
 	// because it is excluded from HeaderOverhead — see requestMetrics.overhead.
 	HeaderEmbedTime = "X-Switchyard-Embed-Ms"
+
+	// HeaderRouteTier names the providers.yaml tier Step 8.2's routing chose.
+	// Absent when the caller named a model, which is the same
+	// absence-means-not-applicable convention HeaderCache uses: routing only
+	// runs on opt-in, so there is no decision to report otherwise.
+	HeaderRouteTier = "X-Switchyard-Route-Tier"
+
+	// HeaderRouteReason is the classifier's rationale — the features that
+	// fired and the score they produced. A cost optimiser that hides its
+	// decisions is not defensible, so the "why" ships with the "what".
+	HeaderRouteReason = "X-Switchyard-Route-Reason"
 )
 
 // maxRequestIDLen bounds an inbound X-Request-ID.
@@ -120,6 +131,25 @@ type requestMetrics struct {
 	// that did not fall back. Step 6.3's "cost shifted by fallback".
 	fallbackCostDeltaMicros *int64
 
+	// routedModel, routedTier and routeReason are set only when Step 8.2's
+	// routing chose the model. requestedModel keeps the caller's own value —
+	// "auto" or a tier name — so the two together record what was asked for
+	// and what was decided.
+	routedModel string
+	routedTier  string
+	routeReason string
+
+	// routeBaselineModel is the top tier's declared head at decision time —
+	// the counterfactual Step 8.4 prices savings against. Deliberately not
+	// health-aware: a baseline that moved with provider outages would make the
+	// savings figure incomparable between weeks.
+	routeBaselineModel string
+
+	// routingSavingsMicros is set by recordCost once real token counts exist:
+	// what the baseline would have cost minus what was actually spent. Zero
+	// when routing chose the top tier anyway; nil when routing never ran.
+	routingSavingsMicros *int64
+
 	// cacheHit is nil when the cache was not consulted, which is the state the
 	// request-log column distinguishes from a real false.
 	cacheHit  *bool
@@ -130,6 +160,16 @@ type requestMetrics struct {
 	// to an external service the gateway does not control. Reported on its own
 	// header so the exclusion is visible rather than hidden.
 	embedTime time.Duration
+}
+
+// baselineModel is the model a fallback's counterfactual is priced against:
+// the model the chain actually started from, which is the routed one when
+// routing chose it and the caller's own model otherwise.
+func (m *requestMetrics) baselineModel() string {
+	if m.routedModel != "" {
+		return m.routedModel
+	}
+	return m.requestedModel
 }
 
 // metricsFrom returns the per-request metrics, or nil if Timing did not run.
@@ -165,6 +205,10 @@ func (m *requestMetrics) applyHeaders(h http.Header) {
 		// provider has no fallback outcome to report, and "false" there would
 		// claim more than the gateway knows.
 		h.Set(HeaderFallback, strconv.FormatBool(m.fellBack))
+	}
+	if m.routedTier != "" {
+		h.Set(HeaderRouteTier, m.routedTier)
+		h.Set(HeaderRouteReason, m.routeReason)
 	}
 	if m.cacheTier != "" {
 		h.Set(HeaderCache, m.cacheTier)

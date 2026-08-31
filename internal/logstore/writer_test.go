@@ -100,21 +100,25 @@ func TestWriterRoundTrip(t *testing.T) {
 	delta := int64(-742)
 	want.Fallback = true
 	want.FallbackCostDeltaMicros = &delta
+	want.RoutingTier = "fast"
+	want.RoutingReason = "tokens=41 reasoning=1 score=1.05"
 	w.Write(want)
 
 	cancel()
 	w.Wait(5 * time.Second)
 
 	var got Record
-	var requested, served, prov, traceID *string
+	var requested, served, prov, traceID, routingTier, routingReason *string
 	err := pool.QueryRow(ctx, `
 		SELECT id, ts, team_id, requested_model, served_model, provider, status_code,
 		       input_tokens, output_tokens, cost_micros, latency_ms, overhead_ms,
-		       fallback, cache_hit, quality_score, trace_id, fallback_cost_delta_micros
+		       fallback, cache_hit, quality_score, trace_id, fallback_cost_delta_micros,
+		       routing_tier, routing_reason
 		FROM requests WHERE id = $1`, want.ID).Scan(
 		&got.ID, &got.Timestamp, &got.TeamID, &requested, &served, &prov, &got.StatusCode,
 		&got.InputTokens, &got.OutputTokens, &got.CostMicros, &got.LatencyMS, &got.OverheadMS,
-		&got.Fallback, &got.CacheHit, &got.QualityScore, &traceID, &got.FallbackCostDeltaMicros)
+		&got.Fallback, &got.CacheHit, &got.QualityScore, &traceID, &got.FallbackCostDeltaMicros,
+		&routingTier, &routingReason)
 	if err != nil {
 		t.Fatalf("reading row back: %v", err)
 	}
@@ -143,6 +147,14 @@ func TestWriterRoundTrip(t *testing.T) {
 	// Nullable until Phases 7 and 9 — never a fabricated false or zero.
 	if got.CacheHit != nil || got.QualityScore != nil {
 		t.Errorf("cache_hit/quality_score = %v/%v, want NULL", got.CacheHit, got.QualityScore)
+	}
+	// Step 8.3: the rationale is stored verbatim, because the prompt that
+	// produced it is not in this table and never will be.
+	if routingTier == nil || *routingTier != want.RoutingTier {
+		t.Errorf("routing_tier = %v, want %q", routingTier, want.RoutingTier)
+	}
+	if routingReason == nil || *routingReason != want.RoutingReason {
+		t.Errorf("routing_reason = %v, want %q", routingReason, want.RoutingReason)
 	}
 }
 

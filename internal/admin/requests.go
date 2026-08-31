@@ -28,6 +28,7 @@ type RequestLogReader interface {
 	CostSeries(ctx context.Context, q logstore.CostQuery) ([]logstore.CostCell, error)
 	FallbackCostSince(ctx context.Context, since time.Time, teamID string) (logstore.FallbackAttribution, error)
 	CacheSavingsSince(ctx context.Context, since time.Time, teamID string) (logstore.CacheSavings, error)
+	RoutingSavingsSince(ctx context.Context, since time.Time, teamID string) (logstore.RoutingSavings, error)
 }
 
 // CostCalculator prices what a cache hit would have cost had it been a real
@@ -64,6 +65,15 @@ type requestView struct {
 	CacheHit       *bool    `json:"cache_hit"`
 	QualityScore   *float64 `json:"quality_score"`
 	TraceID        string   `json:"trace_id,omitempty"`
+
+	// Omitted entirely when routing did not run, so the UI can distinguish
+	// "the caller named a model" from any routed outcome.
+	RoutingTier   string `json:"routing_tier,omitempty"`
+	RoutingReason string `json:"routing_reason,omitempty"`
+
+	// Null when routing did not run. Zero is a real answer: routing chose the
+	// top tier anyway and saved nothing.
+	RoutingSavingsMicros *int64 `json:"routing_savings_micros"`
 }
 
 type requestsPageView struct {
@@ -73,23 +83,26 @@ type requestsPageView struct {
 
 func toRequestView(r logstore.Record) requestView {
 	return requestView{
-		ID:             r.ID,
-		Timestamp:      r.Timestamp.UTC().Format(time.RFC3339Nano),
-		TeamID:         r.TeamID,
-		RequestedModel: r.RequestedModel,
-		ServedModel:    r.ServedModel,
-		Provider:       r.Provider,
-		StatusCode:     r.StatusCode,
-		InputTokens:    r.InputTokens,
-		OutputTokens:   r.OutputTokens,
-		CostMicros:     r.CostMicros,
-		CostUSD:        float64(r.CostMicros) / microsPerUSD,
-		LatencyMS:      r.LatencyMS,
-		OverheadMS:     r.OverheadMS,
-		Fallback:       r.Fallback,
-		CacheHit:       r.CacheHit,
-		QualityScore:   r.QualityScore,
-		TraceID:        r.TraceID,
+		ID:                   r.ID,
+		Timestamp:            r.Timestamp.UTC().Format(time.RFC3339Nano),
+		TeamID:               r.TeamID,
+		RequestedModel:       r.RequestedModel,
+		ServedModel:          r.ServedModel,
+		Provider:             r.Provider,
+		StatusCode:           r.StatusCode,
+		InputTokens:          r.InputTokens,
+		OutputTokens:         r.OutputTokens,
+		CostMicros:           r.CostMicros,
+		CostUSD:              float64(r.CostMicros) / microsPerUSD,
+		LatencyMS:            r.LatencyMS,
+		OverheadMS:           r.OverheadMS,
+		Fallback:             r.Fallback,
+		CacheHit:             r.CacheHit,
+		QualityScore:         r.QualityScore,
+		TraceID:              r.TraceID,
+		RoutingTier:          r.RoutingTier,
+		RoutingReason:        r.RoutingReason,
+		RoutingSavingsMicros: r.RoutingSavingsMicros,
 	}
 }
 

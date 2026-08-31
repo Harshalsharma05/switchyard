@@ -29,7 +29,7 @@ func summaryServer(t *testing.T, svc SummaryService, health HealthReader) *httpt
 	reg := requestLogRegistry(t) // acme = admin, globex = not
 	srv := httptest.NewServer(NewRouter(func() bool { return true },
 		reg, &fakeSpendReader{}, fakeProviderLister{}, health, &fakeBreakerController{},
-		nil, fakeReloader, nil, reg, svc, nil, nil, testMetrics(t), discardLogger()))
+		nil, fakeReloader, nil, reg, svc, nil, nil, nil, testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)
 	return srv
 }

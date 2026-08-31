@@ -1,0 +1,144 @@
+# SwitchYard cost-aware routing (Part 2, Phase 8).
+#
+# The classifier (8.1) sorts prompts into complexity levels; the policy (8.2)
+# maps each level onto a tier already declared in providers.yaml.
+#
+# The classifier is lexical and runs in microseconds. It deliberately does not
+# call a model: a classifier that spends an LLM call to save an LLM call
+# defeats the purpose on both cost and latency, the same argument the cache's
+# TTL rules make in cache.yaml.
+
+router:
+  enabled: true
+
+  # Step 8.2. Level -> tier name in providers.yaml. This is the only place the
+  # classifier's vocabulary meets the provider config's; internal/router knows
+  # no model or provider names at all.
+  #
+  # Routing applies only when the caller asks for it:
+  #   model: "auto"      -> classify, then use the tier named here
+  #   model: "fast"      -> caller pinned a tier; classifier not consulted
+  #   model: "<a model>" -> honoured exactly, never routed
+  #
+  # Startup rejects a tier named here that providers.yaml does not declare,
+  # and any real model whose name collides with "auto" or a tier name.
+  policy:
+    simple: fast
+    complex: frontier
+
+  classifier:
+    # Each feature produces a signal in [0,1]; the weighted sum is compared to
+    # this threshold. At or above it, the prompt is `complex`.
+    #
+    # Tune against the labelled set:
+    #   go test ./internal/router -run TestClassifierAccuracy -v
+    threshold: 1.0
+
+    weights:
+      length: 0.8
+      reasoning: 1.0
+      constraints: 0.8
+      context: 0.7
+      format: 0.4
+
+      # Negative on purpose. Trivial lookups often borrow a reasoning verb
+      # ("explain the difference between a list and a tuple") and need pulling
+      # back below the threshold.
+      simple: -1.0
+
+    # Saturation points: the raw feature value at which its signal reaches 1.0
+    # and stops growing. Without these a single very long prompt would swamp
+    # every other signal.
+    scales:
+      length_tokens: 350
+      reasoning_matches: 1
+      constraint_matches: 3
+      format_matches: 1
+
+    # Lowercase substrings, scanned over the system and user messages only.
+    # Assistant turns are prior model output, not the request being classified.
+    lexicon:
+      # Work that needs multi-step reasoning, synthesis, or generation.
+      reasoning:
+        - "explain why"
+        - "why does"
+        - "why is"
+        - "analyze"
+        - "analyse"
+        - "compare"
+        - "contrast"
+        - "trade-off"
+        - "tradeoff"
+        - "prove"
+        - "derive"
+        - "design a"
+        - "architect"
+        - "debug"
+        - "refactor"
+        - "optimize"
+        - "optimise"
+        - "step by step"
+        - "reason through"
+        - "evaluate"
+        - "critique"
+        - "implement"
+        - "walk me through"
+        - "root cause"
+        - "how would you"
+        - "should we"
+        - "should i"
+        - "pros and cons"
+        - "algorithm"
+        - "strategy"
+
+      # Each constraint is another thing the answer has to satisfy at once.
+      # Counted alongside bulleted and numbered lines, which spell out the
+      # same thing structurally.
+      constraints:
+        - "must "
+        - "should "
+        - "ensure "
+        - "requirement"
+        - "constraint"
+        - "do not "
+        - "don't use"
+        - "without using"
+        - "at most"
+        - "at least"
+        - "make sure"
+        - "avoid "
+        - "no more than"
+        - "subject to"
+
+      # Structured output is harder to get right than prose.
+      format:
+        - "json"
+        - "as a table"
+        - "csv"
+        - "yaml"
+        - "markdown"
+        - "bullet point"
+        - "in the format"
+        - "schema"
+        - "return a list"
+
+      # Recall and single-step transformation. These are what the cheap tier
+      # exists for.
+      simple:
+        - "what is the capital"
+        - "capital of"
+        - "what is a "
+        - "what does the term"
+        - "what does the word"
+        - "who wrote"
+        - "who is the"
+        - "when did"
+        - "when was"
+        - "define "
+        - "definition of"
+        - "translate "
+        - "convert "
+        - "what year"
+        - "how many"
+        - "what time"
+        - "spell "
