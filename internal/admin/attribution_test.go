@@ -160,7 +160,7 @@ func attributionBody(t *testing.T, reader RequestLogReader, calc CostCalculator)
 	srv := httptest.NewServer(NewRouter(func() bool { return true },
 		testTeamStore(t), &fakeSpendReader{}, fakeProviderLister{}, fakeHealthReader{},
 		&fakeBreakerController{}, nil, fakeReloader, reader, requestLogRegistry(t),
-		nil, nil, calc, nil, testMetrics(t), discardLogger()))
+		nil, nil, calc, nil, QualityFeedbackConfig{}, false, testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)
 
 	resp := getWithKey(t, srv, "/admin/attribution?range=24h", "acme-key")

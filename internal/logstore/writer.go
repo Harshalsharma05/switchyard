@@ -57,6 +57,11 @@ type Record struct {
 	// the top tier's price for the same real usage, minus what was spent. Zero
 	// when routing chose the top tier; nil when routing never ran.
 	RoutingSavingsMicros *int64
+
+	// QualitySampleReason is why Phase 9 sampled this request for scoring
+	// ("downgraded", "near_threshold_cache_hit", ...). Empty until a score
+	// is written, and always empty when QualityScore is nil.
+	QualitySampleReason string
 }
 
 type Config struct {

@@ -45,6 +45,10 @@ type Result struct {
 	// the eventual response without paying for a second embedding call.
 	Embedding []float32
 
+	// Threshold is the similarity bar this lookup applied, echoed back so a
+	// caller can tell how close a hit or miss came without knowing the config.
+	Threshold float32
+
 	// Latency is the wall time this lookup cost, hit or miss.
 	Latency time.Duration
 
@@ -198,6 +202,7 @@ func (c *Cache) recordHit(ctx context.Context, id string) {
 }
 
 func (c *Cache) finish(team string, r Result) Result {
+	r.Threshold = c.cfg.Threshold
 	c.obs.ObserveLookup(team, string(r.Tier), r.Hit, r.Similarity, r.Latency)
 	return r
 }

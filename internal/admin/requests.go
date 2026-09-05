@@ -29,6 +29,7 @@ type RequestLogReader interface {
 	FallbackCostSince(ctx context.Context, since time.Time, teamID string) (logstore.FallbackAttribution, error)
 	CacheSavingsSince(ctx context.Context, since time.Time, teamID string) (logstore.CacheSavings, error)
 	RoutingSavingsSince(ctx context.Context, since time.Time, teamID string) (logstore.RoutingSavings, error)
+	QualityFeedbackSince(ctx context.Context, since time.Time, teamID string, lowScore float64, exampleLimit int) (logstore.QualityFeedback, error)
 }
 
 // CostCalculator prices what a cache hit would have cost had it been a real
@@ -48,23 +49,24 @@ type KeyAuthenticator interface {
 // --- wire shape ---------------------------------------------------------
 
 type requestView struct {
-	ID             string   `json:"id"`
-	Timestamp      string   `json:"timestamp"`
-	TeamID         string   `json:"team_id"`
-	RequestedModel string   `json:"requested_model,omitempty"`
-	ServedModel    string   `json:"served_model,omitempty"`
-	Provider       string   `json:"provider,omitempty"`
-	StatusCode     int      `json:"status_code"`
-	InputTokens    int      `json:"input_tokens"`
-	OutputTokens   int      `json:"output_tokens"`
-	CostMicros     int64    `json:"cost_micros"`
-	CostUSD        float64  `json:"cost_usd"`
-	LatencyMS      float64  `json:"latency_ms"`
-	OverheadMS     float64  `json:"overhead_ms"`
-	Fallback       bool     `json:"fallback"`
-	CacheHit       *bool    `json:"cache_hit"`
-	QualityScore   *float64 `json:"quality_score"`
-	TraceID        string   `json:"trace_id,omitempty"`
+	ID                  string   `json:"id"`
+	Timestamp           string   `json:"timestamp"`
+	TeamID              string   `json:"team_id"`
+	RequestedModel      string   `json:"requested_model,omitempty"`
+	ServedModel         string   `json:"served_model,omitempty"`
+	Provider            string   `json:"provider,omitempty"`
+	StatusCode          int      `json:"status_code"`
+	InputTokens         int      `json:"input_tokens"`
+	OutputTokens        int      `json:"output_tokens"`
+	CostMicros          int64    `json:"cost_micros"`
+	CostUSD             float64  `json:"cost_usd"`
+	LatencyMS           float64  `json:"latency_ms"`
+	OverheadMS          float64  `json:"overhead_ms"`
+	Fallback            bool     `json:"fallback"`
+	CacheHit            *bool    `json:"cache_hit"`
+	QualityScore        *float64 `json:"quality_score"`
+	QualitySampleReason string   `json:"quality_sample_reason,omitempty"`
+	TraceID             string   `json:"trace_id,omitempty"`
 
 	// Omitted entirely when routing did not run, so the UI can distinguish
 	// "the caller named a model" from any routed outcome.
@@ -99,6 +101,7 @@ func toRequestView(r logstore.Record) requestView {
 		Fallback:             r.Fallback,
 		CacheHit:             r.CacheHit,
 		QualityScore:         r.QualityScore,
+		QualitySampleReason:  r.QualitySampleReason,
 		TraceID:              r.TraceID,
 		RoutingTier:          r.RoutingTier,
 		RoutingReason:        r.RoutingReason,

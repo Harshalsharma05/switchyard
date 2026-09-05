@@ -40,6 +40,10 @@ func TestNewMetricsRegistersEveryFamily(t *testing.T) {
 	m.CacheSimilarity.Observe(0.95)
 	m.CacheNearMisses.Observe(0.9)
 
+	m.QualitySamplesTotal.WithLabelValues("downgraded", "scored").Inc()
+	m.QualityScore.WithLabelValues("acme").Observe(4)
+	m.QualityQueueDepth.Set(0)
+
 	families, err := m.Registry().Gather()
 	if err != nil {
 		t.Fatalf("Gather: %v", err)
@@ -73,6 +77,9 @@ func TestNewMetricsRegistersEveryFamily(t *testing.T) {
 		"switchyard_cache_lookup_seconds",
 		"switchyard_cache_similarity",
 		"switchyard_cache_near_miss_similarity",
+		"switchyard_quality_samples_total",
+		"switchyard_quality_score",
+		"switchyard_quality_queue_depth",
 	}
 
 	got := map[string]bool{}

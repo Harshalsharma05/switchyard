@@ -6,6 +6,7 @@ import { useCallback, useState } from 'react'
 import { fetchMe } from '../api/session.js'
 import { fetchTeams } from '../api/teams.js'
 import { fetchAttribution, fetchCosts, fetchReconciliation } from '../api/usage.js'
+import { fetchQualityFeedback } from '../api/quality.js'
 import { Card } from '../components/primitives.jsx'
 import { CostTrendChart } from '../components/charts.jsx'
 import SpendCard from '../components/SpendCard.jsx'
@@ -147,6 +148,84 @@ function FallbackAttribution({ data }) {
   )
 }
 
+
+// Response quality feedback (Phase 9.3). Two loops, surfaced not automated:
+// near-threshold cache hits that scored badly say the similarity threshold may
+// be too permissive; downgraded responses that scored badly are candidate
+// classifier mislabels. Admin-only — the endpoint 403s a non-admin key.
+function QualityLoop({ loop }) {
+  if (!loop) return null
+  const st = loop.stat
+  return (
+    <div className="attr">
+      <span className="attr-title">{loop.reason.replace(/_/g, ' ')}</span>
+      {st ? (
+        <span className="attr-value num">
+          {st.avg_score.toFixed(2)}<span className="ql-unit"> avg</span>
+          {st.low_scored > 0 && <span className="ql-bad"> · {st.low_scored} low</span>}
+        </span>
+      ) : (
+        <span className="attr-value num ql-none">—</span>
+      )}
+      <span className="attr-context">{loop.signal}</span>
+    </div>
+  )
+}
+
+function QualityFeedbackCard({ getKey, range }) {
+  const load = useCallback((signal) => fetchQualityFeedback(getKey(), { range, signal }), [getKey, range])
+  const fb = usePolling(load, {
+    interval: 30000,
+    ignoreError: (e) => e.type === 'request_log_disabled' || e.status === 403,
+  })
+  const d = fb.data
+
+  return (
+    <Card title="Response quality" className="usage-placeholder">
+      <p className="attr-caption">
+        A sample of responses is scored 1–5 by an LLM judge. These two signals inform a
+        deliberate adjustment to the cache threshold or the classifier — the gateway never retunes itself.
+      </p>
+      {fb.loading && !d ? (
+        <Loading rows={2} />
+      ) : fb.error && !d ? (
+        <EmptyState>
+          {fb.error.status === 403
+            ? 'Quality feedback is admin-only.'
+            : 'The request log is not configured, so quality feedback is unavailable.'}
+        </EmptyState>
+      ) : (
+        <>
+          <div className="attr-row">
+            <QualityLoop loop={d?.cache} />
+            <QualityLoop loop={d?.routing} />
+          </div>
+          {d?.examples?.length > 0 && (
+            <div className="ql-examples">
+              <span className="attr-title">Downgrades that scored low — candidate mislabels</span>
+              <table className="table ql-table">
+                <thead>
+                  <tr><th>Request</th><th>Served model</th><th className="ta-r">Score</th><th>Classifier rationale</th></tr>
+                </thead>
+                <tbody>
+                  {d.examples.map((e) => (
+                    <tr key={e.request_id}>
+                      <td className="num" title={e.request_id}>{e.request_id.slice(0, 10)}…</td>
+                      <td className="num">{e.served_model}</td>
+                      <td className="num ta-r ql-bad">{e.quality_score.toFixed(1)}</td>
+                      <td className="num">{e.routing_reason || '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      )}
+    </Card>
+  )
+}
+
 export default function UsageCost() {
   const { getKey, isAdmin } = useAuth()
   const [range, setRange] = useState('7d')
@@ -255,6 +334,8 @@ export default function UsageCost() {
           />
         </div>
       </Card>
+
+      {isAdmin && <QualityFeedbackCard getKey={getKey} range={range} />}
 
       {isAdmin && (
         <Card title="Team management" className="usage-placeholder">

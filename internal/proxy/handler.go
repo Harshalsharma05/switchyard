@@ -103,6 +103,10 @@ type Handler struct {
 	// routing is nil unless WithRouting was passed, which is the pre-Phase-8
 	// behaviour and a supported configuration.
 	routing ComplexityRouter
+
+	// quality is nil unless WithQuality was passed. Nil means no request is
+	// ever sampled — the pre-Phase-9 behaviour.
+	quality QualityVerifier
 }
 
 // Option configures a dependency added after Part 1.
@@ -295,6 +299,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		} else {
 			h.serveFromCache(w, r, cacheResult.Entry)
 		}
+		h.considerQuality(r, req, cacheResult.Entry.Model, cacheResult.Entry.Provider, cacheResult.Entry.Response, cacheResult)
 		return
 	}
 
@@ -448,6 +453,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if cacheOn {
 		h.storeInCache(r, cacheKey, cacheResult, resp)
 	}
+	h.considerQuality(r, req, resp.Model, resp.Provider, resp.Content, cacheResult)
 }
 
 // reserveTokens checks and reserves the team's TPM bucket ahead of a
@@ -994,6 +1000,7 @@ func (h *Handler) streamChatCompletions(w http.ResponseWriter, r *http.Request, 
 			Provider:     served.Provider,
 		})
 	}
+	h.considerQuality(r, req, served.Model, served.Provider, content.String(), cacheResult)
 	return
 }
 

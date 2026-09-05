@@ -26,7 +26,9 @@ import (
 	"github.com/Harshalsharma05/switchyard/internal/config"
 	"github.com/Harshalsharma05/switchyard/internal/health"
 	"github.com/Harshalsharma05/switchyard/internal/logstore"
+	"github.com/Harshalsharma05/switchyard/internal/provider"
 	"github.com/Harshalsharma05/switchyard/internal/proxy"
+	"github.com/Harshalsharma05/switchyard/internal/quality"
 	"github.com/Harshalsharma05/switchyard/internal/ratelimit"
 	"github.com/Harshalsharma05/switchyard/internal/resilience"
 	"github.com/Harshalsharma05/switchyard/internal/router"
@@ -42,6 +44,7 @@ const (
 	defaultTeamsPath     = "configs/teams.yaml"
 	defaultCachePath     = "configs/cache.yaml"
 	defaultRouterPath    = "configs/router.yaml"
+	defaultQualityPath   = "configs/quality.yaml"
 	defaultRedisAddr     = "localhost:6379"
 	defaultPublicAddr    = ":8080"
 	defaultAdminAddr     = ":9090"
@@ -466,6 +469,40 @@ func run() error {
 		)
 	}
 
+	// Step 9.2's async quality worker. It needs the request log to write
+	// scores onto, so it stays off whenever Postgres is unconfigured — there
+	// is nowhere to put a score without it.
+	qualityPath := envOr("SWITCHYARD_QUALITY_CONFIG", defaultQualityPath)
+	qualityCfg, err := config.LoadQuality(qualityPath)
+	if err != nil {
+		return fmt.Errorf("loading quality config: %w", err)
+	}
+
+	var qualityWorker *quality.Worker
+	switch {
+	case !qualityCfg.Enabled:
+	case logWriter == nil:
+		log.Warn("quality verification disabled: it requires the request log (POSTGRES_PASSWORD)")
+	default:
+		// Resolved through the store, not captured once, so the judge follows
+		// a hot reload of providers.yaml. A routing keyword ("auto", a tier)
+		// is not a real model and fails here, which is the startup rejection.
+		if _, err := store.ForModel(qualityCfg.Judge.Model); err != nil {
+			return fmt.Errorf("quality judge model %q: %w", qualityCfg.Judge.Model, err)
+		}
+		judge := quality.NewJudge(
+			func(m string) (provider.Provider, error) { return store.ForModel(m) },
+			qualityCfg.Judge.Model, qualityCfg.Judge.Timeout)
+		qualityWorker = quality.NewWorker(qualityCfg.Worker, quality.NewSampler(qualityCfg.Sampling),
+			judge, logWriter, promMetrics, log)
+
+		log.Info("async quality verification enabled",
+			slog.String("judge_model", qualityCfg.Judge.Model),
+			slog.Float64("routed_rate", qualityCfg.Sampling.RoutedRate),
+			slog.Int("concurrency", qualityCfg.Worker.Concurrency),
+		)
+	}
+
 	// ready gates /readyz. It flips true once wiring is complete and false again
 	// the moment shutdown begins, so a load balancer stops sending new traffic
 	// while in-flight requests drain.
@@ -484,13 +521,16 @@ func run() error {
 		// (Step 5.2's passive samples), healthMonitor the read side Step 6.2's
 		// chain ordering consults to skip a down provider and sink a degraded
 		// one.
-		Handler:           proxy.NewRouter(store, store, limiter, budgetTracker, store, healthRecorder, healthMonitor, breakerRegistry, chaos, retryConfig, promMetrics, reqLog, log, isReady, append(cacheOptions(semanticCache, cacheCfg.TTL), routerOptions(complexityRouter)...)...),
+		Handler:           proxy.NewRouter(store, store, limiter, budgetTracker, store, healthRecorder, healthMonitor, breakerRegistry, chaos, retryConfig, promMetrics, reqLog, log, isReady, append(append(cacheOptions(semanticCache, cacheCfg.TTL), routerOptions(complexityRouter)...), qualityOptions(qualityWorker)...)...),
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
 
 	adminSrv := &http.Server{
 		Addr: envOr("SWITCHYARD_ADMIN_ADDR", defaultAdminAddr),
-		Handler: admin.NewRouter(isReady, store, budgetTracker, store, healthMonitor, breakerRegistry, chaosAdapter{chaos}, newReloader(store, providersPath, teamsPath), reqLogReader, store, summarySvc, cacheTuner, store, complexityRouter, promMetrics, log,
+		Handler: admin.NewRouter(isReady, store, budgetTracker, store, healthMonitor, breakerRegistry, chaosAdapter{chaos}, newReloader(store, providersPath, teamsPath), reqLogReader, store, summarySvc, cacheTuner, store, complexityRouter,
+			admin.QualityFeedbackConfig{LowScoreThreshold: qualityCfg.Feedback.LowScoreThreshold, ExampleLimit: qualityCfg.Feedback.ExampleLimit},
+			qualityWorker != nil,
+			promMetrics, log,
 			proxy.Recoverer(log),
 			proxy.RequestID,
 			proxy.Logger(log),
@@ -554,6 +594,22 @@ func run() error {
 		logWriter.Wait(durationOr("SWITCHYARD_REQUESTLOG_FLUSH_TIMEOUT", defaultRequestLogFlushTimeout) + time.Second)
 	}
 
+	// The quality worker shares the flusher's lifecycle: requests finishing
+	// during the HTTP drain still sample, and their scores still need writing.
+	qualityCtx, cancelQuality := context.WithCancel(context.Background())
+	defer cancelQuality()
+	if qualityWorker != nil {
+		go qualityWorker.Run(qualityCtx)
+	}
+
+	drainQuality := func() {
+		if qualityWorker == nil {
+			return
+		}
+		cancelQuality()
+		qualityWorker.Wait(3 * time.Second)
+	}
+
 	ready.Store(true)
 	log.Info("gateway started",
 		slog.String("public_addr", publicSrv.Addr),
@@ -568,6 +624,7 @@ func run() error {
 		// traffic it will never finish serving.
 		ready.Store(false)
 		_ = shutdown(publicSrv, adminSrv, log)
+		drainQuality()
 		drainLog()
 		return err
 	case <-ctx.Done():
@@ -580,6 +637,7 @@ func run() error {
 	ready.Store(false)
 
 	err = shutdown(publicSrv, adminSrv, log)
+	drainQuality()
 	drainLog()
 	return err
 }
@@ -732,4 +790,11 @@ func cacheOptions(c *cache.Cache, ttl cache.TTLPolicy) []proxy.Option {
 		return nil
 	}
 	return []proxy.Option{proxy.WithCache(c, ttl)}
+}
+
+func qualityOptions(w *quality.Worker) []proxy.Option {
+	if w == nil {
+		return nil
+	}
+	return []proxy.Option{proxy.WithQuality(w)}
 }

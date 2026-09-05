@@ -54,6 +54,12 @@ function MetadataPanel({ meta, row, rowPending }) {
             : <span className="pg-fallback">{meta.cache} hit</span>}
         {meta.embedMs != null && <span className="pg-unit"> · {formatMs(meta.embedMs)} ms embed</span>}
       </dd>
+      <dt>Quality</dt>
+      <dd>
+        {row?.quality_score != null
+          ? <span className="num">{row.quality_score.toFixed(2)}<span className="pg-unit"> / 5</span></span>
+          : <span className="pg-muted">scored asynchronously — appears in Request Logs once judged</span>}
+      </dd>
     </dl>
   )
 }

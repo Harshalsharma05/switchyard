@@ -16,14 +16,16 @@ import (
 // tests assert on scoping: what matters is the TeamID the handler resolved,
 // not what a stub database would return for it.
 type fakeRequestLogReader struct {
-	gotFilter   logstore.Filter
-	gotID       string
-	gotTeamID   string
-	page        logstore.Page
-	record      logstore.Record
-	getErr      error
-	spendByTeam map[string]int64
-	spendErr    error
+	qualityFeedback    logstore.QualityFeedback
+	qualityFeedbackErr error
+	gotFilter          logstore.Filter
+	gotID              string
+	gotTeamID          string
+	page               logstore.Page
+	record             logstore.Record
+	getErr             error
+	spendByTeam        map[string]int64
+	spendErr           error
 
 	gotCostQuery logstore.CostQuery
 	costCells    []logstore.CostCell
@@ -72,6 +74,11 @@ func (f *fakeRequestLogReader) FallbackCostSince(_ context.Context, _ time.Time,
 	return f.fallbackAttr, f.fallbackErr
 }
 
+func (f *fakeRequestLogReader) QualityFeedbackSince(_ context.Context, _ time.Time, teamID string, _ float64, _ int) (logstore.QualityFeedback, error) {
+	f.gotTeamID = teamID
+	return f.qualityFeedback, f.qualityFeedbackErr
+}
+
 // requestLogRegistry mirrors testTeamStore but marks acme as admin, which is
 // the distinction every scoping test in this file turns on.
 func requestLogRegistry(t *testing.T) *auth.Registry {
@@ -101,7 +108,7 @@ func newRequestLogServer(t *testing.T, reader RequestLogReader) *httptest.Server
 	srv := httptest.NewServer(NewRouter(func() bool { return true },
 		testTeamStore(t), &fakeSpendReader{}, fakeProviderLister{}, fakeHealthReader{},
 		&fakeBreakerController{}, nil, fakeReloader, reader, requestLogRegistry(t),
-		nil, nil, nil, nil, testMetrics(t), discardLogger()))
+		nil, nil, nil, nil, QualityFeedbackConfig{}, false, testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)
 	return srv
 }

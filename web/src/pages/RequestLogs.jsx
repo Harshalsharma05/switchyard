@@ -138,6 +138,7 @@ export default function RequestLogs() {
                 <th className="ta-r">Tokens</th>
                 <th className="ta-r">Cost</th>
                 <th>Cache</th>
+                <th className="ta-r">Quality</th>
                 <th>Fallback</th>
               </tr>
             </thead>
@@ -172,6 +173,11 @@ export default function RequestLogs() {
                     {r.cache_hit == null
                       ? <span className="logs-muted">—</span>
                       : <span className={r.cache_hit ? 'logs-flag' : 'logs-muted'}>{r.cache_hit ? 'hit' : 'miss'}</span>}
+                  </td>
+                  <td className="num ta-r">
+                    {r.quality_score == null
+                      ? <span className="logs-muted">—</span>
+                      : <span title={r.quality_sample_reason ? `sampled: ${r.quality_sample_reason.replace(/_/g, ' ')}` : undefined}>{r.quality_score.toFixed(1)}</span>}
                   </td>
                   <td>{r.fallback ? <span className="logs-flag">fallback</span> : <span className="logs-muted">—</span>}</td>
                 </tr>

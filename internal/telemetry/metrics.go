@@ -56,6 +56,13 @@ type Metrics struct {
 	CacheSimilarity     prometheus.Histogram
 	CacheNearMisses     prometheus.Histogram
 
+	// Phase 9's async quality verification. QualitySamplesTotal is labelled
+	// by sampling reason and outcome so "the sampled proportion matches
+	// configuration" is checkable straight from the metric.
+	QualitySamplesTotal *prometheus.CounterVec
+	QualityScore        *prometheus.HistogramVec
+	QualityQueueDepth   prometheus.Gauge
+
 	RequestLogQueueDepth        prometheus.Gauge
 	RetentionLastSweepTimestamp prometheus.Gauge
 }
@@ -208,6 +215,22 @@ func NewMetrics() (*Metrics, error) {
 		Buckets: similarityBuckets,
 	})
 
+	m.QualitySamplesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "switchyard_quality_samples_total",
+		Help: "Sampled responses by reason (downgraded, near_threshold_cache_hit, flagged, routed_sample) and outcome (enqueued, dropped, scored, error).",
+	}, []string{"reason", "outcome"})
+
+	m.QualityScore = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "switchyard_quality_score",
+		Help:    "LLM-as-judge score (1-5) of sampled responses, by team.",
+		Buckets: []float64{1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5},
+	}, []string{"team"})
+
+	m.QualityQueueDepth = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "switchyard_quality_queue_depth",
+		Help: "Samples waiting to be scored. Sustained growth means the judge cannot keep up and samples are being dropped.",
+	})
+
 	collectors := []prometheus.Collector{
 		m.RequestsTotal, m.ErrorsTotal, m.RetriesTotal, m.FallbacksTotal,
 		m.RatelimitRejectionsTotal, m.BudgetRejectionsTotal, m.BreakerTransitionsTotal,
@@ -219,6 +242,7 @@ func NewMetrics() (*Metrics, error) {
 		m.RetentionLastSweepTimestamp,
 		m.CacheLookupsTotal, m.CacheDegradedTotal, m.CacheLookupDuration,
 		m.CacheSimilarity, m.CacheNearMisses,
+		m.QualitySamplesTotal, m.QualityScore, m.QualityQueueDepth,
 	}
 	for _, c := range collectors {
 		if err := m.registry.Register(c); err != nil {

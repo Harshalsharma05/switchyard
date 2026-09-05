@@ -6,7 +6,7 @@ import { fetchProviderHealth } from '../api/health.js'
 import { fetchRequests } from '../api/requests.js'
 import { fetchSummary } from '../api/summary.js'
 import { Card, KpiCard } from '../components/primitives.jsx'
-import { OverheadChart, TrafficChart } from '../components/charts.jsx'
+import { OverheadChart, QualityChart, TrafficChart } from '../components/charts.jsx'
 import ProviderHealthPanel from '../components/ProviderHealthPanel.jsx'
 import BreakerPanel from '../components/BreakerPanel.jsx'
 import LiveFeed from '../components/LiveFeed.jsx'
@@ -99,6 +99,17 @@ export default function Overview() {
             context={`in the last ${range}`}
             empty="No spend in this window"
           />
+          <KpiCard
+            label="Avg quality"
+            value={s?.quality?.enabled ? kpi(s.quality.avg_score, (v) => v.toFixed(2)) : null}
+            unit="/ 5"
+            context={
+              s?.quality?.scored != null
+                ? `${formatCount(s.quality.scored)} scored in the last ${range}`
+                : 'async judge score'
+            }
+            empty="Not yet enabled"
+          />
         </div>
       )}
 
@@ -117,6 +128,10 @@ export default function Overview() {
 
           <Card title="Gateway overhead">
             <OverheadChart points={s?.series?.overhead} range={range} />
+          </Card>
+
+          <Card title="Response quality">
+            <QualityChart points={s?.series?.quality} range={range} />
           </Card>
         </div>
 

@@ -74,3 +74,16 @@
 @media (max-width: 900px) {
   .attr-row { grid-template-columns: 1fr; }
 }
+
+/* Response quality feedback (Phase 9.3). */
+.ql-unit { font-size: 12px; color: var(--text-muted); font-weight: 400; }
+.ql-bad { color: var(--status-warn); }
+.ql-none { color: var(--text-muted); }
+.ql-examples {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+.ql-table { width: 100%; font-size: 12px; }
+.ql-table th { font-weight: 500; color: var(--text-secondary); }

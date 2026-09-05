@@ -1,0 +1,51 @@
+# SwitchYard async quality verification (Part 2, Phase 9).
+#
+# A background worker scores a sample of responses with an LLM-as-judge and
+# writes the score onto the request-log row. It runs entirely off the request
+# path: a slow or failing judge is invisible to callers, and a full queue
+# drops samples rather than blocking.
+#
+# The sampling policy is deliberately explicit and configured, not hard-coded:
+# a quality number is only interpretable if you know which requests it was
+# measured over.
+
+quality:
+  enabled: true
+
+  sampling:
+    # Fraction of routed responses scored for their own sake. Downgraded-tier
+    # responses and near-threshold cache hits are always scored and do not
+    # count against this rate.
+    routed_rate: 0.10
+
+    # A semantic cache hit whose cosine similarity is within this band above
+    # the configured threshold is always scored. Just over the line is exactly
+    # where a subtly wrong cached answer slips through, so it is the cache's
+    # riskiest output and the one most worth checking.
+    near_threshold_band: 0.03
+
+  worker:
+    # Samples buffered ahead of the judge. Small on purpose: a backlog this
+    # deep means the judge cannot keep up, and a dropped sample is cheaper
+    # than an unbounded queue.
+    queue_size: 256
+    # Concurrent judge calls. Each one is a full model round trip.
+    concurrency: 4
+    score_timeout: 20s
+
+  judge:
+    # Must be a real model from configs/providers.yaml, never "auto" or a tier
+    # name. A capable model grades more consistently; this is not the place to
+    # save money, since only a sample of traffic reaches it.
+    model: openai/gpt-oss-120b
+    timeout: 20s
+
+  feedback:
+    # Step 9.3. A score at or below this (on the judge's 1-5 scale) counts as
+    # "low" in both feedback loops. The gateway never retunes the cache
+    # threshold or the classifier on its own — it surfaces the signal at
+    # GET /admin/quality/feedback and a human adjusts deliberately.
+    low_score_threshold: 3
+    # How many low-scoring downgraded requests the routing loop lists as
+    # candidate classifier mislabels.
+    example_limit: 20

@@ -84,9 +84,14 @@ function RequestDetail({ r }) {
         <dl className="rd-list">
           <Row label="Quality score">
             {r.quality_score == null
-              ? <span className="rd-muted">Not yet enabled</span>
-              : <span className="num">{r.quality_score.toFixed(2)}</span>}
+              ? <span className="rd-muted">not scored — sampling is deliberate, not every response</span>
+              : <span className="num">{r.quality_score.toFixed(2)}<span className="rd-unit"> / 5</span></span>}
           </Row>
+          {r.quality_sample_reason && (
+            <Row label="Sampled because">
+              <span className="num">{r.quality_sample_reason.replace(/_/g, ' ')}</span>
+            </Row>
+          )}
           <Row label="Cache">
             {r.cache_hit == null
               ? <span className="rd-muted">Not yet enabled</span>

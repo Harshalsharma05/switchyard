@@ -86,7 +86,7 @@ const selectColumns = `
 	id, ts, team_id, requested_model, served_model, provider, status_code,
 	input_tokens, output_tokens, cost_micros, latency_ms, overhead_ms,
 	fallback, cache_hit, quality_score, trace_id, fallback_cost_delta_micros,
-	routing_tier, routing_reason, routing_savings_micros`
+	routing_tier, routing_reason, routing_savings_micros, quality_sample_reason`
 
 // Query returns one page of rows, newest first.
 func (w *Writer) Query(ctx context.Context, f Filter) (Page, error) {
@@ -430,13 +430,13 @@ type scanner interface{ Scan(dest ...any) error }
 
 func scanRecord(s scanner) (Record, error) {
 	var rec Record
-	var requested, served, provider, traceID, routingTier, routingReason *string
+	var requested, served, provider, traceID, routingTier, routingReason, qualityReason *string
 	if err := s.Scan(
 		&rec.ID, &rec.Timestamp, &rec.TeamID, &requested, &served, &provider,
 		&rec.StatusCode, &rec.InputTokens, &rec.OutputTokens, &rec.CostMicros,
 		&rec.LatencyMS, &rec.OverheadMS, &rec.Fallback, &rec.CacheHit,
 		&rec.QualityScore, &traceID, &rec.FallbackCostDeltaMicros,
-		&routingTier, &routingReason, &rec.RoutingSavingsMicros,
+		&routingTier, &routingReason, &rec.RoutingSavingsMicros, &qualityReason,
 	); err != nil {
 		return Record{}, fmt.Errorf("scanning request log row: %w", err)
 	}
@@ -446,6 +446,7 @@ func scanRecord(s scanner) (Record, error) {
 	rec.TraceID = deref(traceID)
 	rec.RoutingTier = deref(routingTier)
 	rec.RoutingReason = deref(routingReason)
+	rec.QualitySampleReason = deref(qualityReason)
 	return rec, nil
 }
 
@@ -522,4 +523,120 @@ func (w *Writer) CacheSavingsSince(ctx context.Context, since time.Time, teamID 
 		return CacheSavings{}, fmt.Errorf("reading cache savings: %w", err)
 	}
 	return out, nil
+}
+
+// SetQualityScore writes Phase 9's async score onto an already-logged row.
+//
+// The row is written by the buffered flusher and the score arrives seconds
+// later from the judge, so by the time this runs the row is almost always
+// present; when it is not (a very fast judge, a dropped row) the UPDATE
+// touches nothing and the caller treats that as a benign miss rather than an
+// error — an unscored request is exactly what the sampling policy already
+// tolerates.
+func (w *Writer) SetQualityScore(ctx context.Context, id string, score float64, reason string) (bool, error) {
+	tag, err := w.pool.Exec(ctx,
+		"UPDATE requests SET quality_score = $1, quality_sample_reason = $2 WHERE id = $3",
+		score, nullable(reason), id)
+	if err != nil {
+		return false, fmt.Errorf("setting quality score for %q: %w", id, err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// QualityReasonStat aggregates the async scores for one sampling reason.
+// LowScored counts rows at or below the caller's low-score cutoff — the ones
+// Step 9.3's feedback loops are about.
+type QualityReasonStat struct {
+	Reason    string
+	Scored    int64
+	AvgScore  float64
+	LowScored int64
+	MinScore  float64
+	MaxScore  float64
+}
+
+// QualityExample is one low-scoring downgraded request: a candidate classifier
+// mislabel. The prompt is not stored, so the row is identified by ID and trace
+// ID for follow-up rather than carrying its own content.
+type QualityExample struct {
+	ID            string
+	Timestamp     time.Time
+	ServedModel   string
+	RoutingTier   string
+	RoutingReason string
+	QualityScore  float64
+	TraceID       string
+}
+
+// QualityFeedback is the whole Step 9.3 picture over a range.
+type QualityFeedback struct {
+	Reasons  []QualityReasonStat
+	Examples []QualityExample
+}
+
+// QualityFeedbackSince aggregates async quality scores by sampling reason, and
+// pulls a bounded list of the low-scoring downgraded requests. Live detail
+// rows only, like the other attribution queries — every supported range sits
+// inside the retention window, and the rollup carries no quality at all.
+func (w *Writer) QualityFeedbackSince(ctx context.Context, since time.Time, teamID string, lowScore float64, exampleLimit int) (QualityFeedback, error) {
+	args := []any{since.UTC(), lowScore}
+	where := "ts >= $1 AND quality_score IS NOT NULL"
+	if teamID != "" {
+		args = append(args, teamID)
+		where += " AND team_id = $3"
+	}
+
+	statSQL := `
+		SELECT COALESCE(quality_sample_reason, 'unspecified'),
+		       COUNT(*), AVG(quality_score),
+		       COUNT(*) FILTER (WHERE quality_score <= $2),
+		       MIN(quality_score), MAX(quality_score)
+		FROM requests WHERE ` + where + `
+		GROUP BY 1 ORDER BY 1`
+
+	rows, err := w.pool.Query(ctx, statSQL, args...)
+	if err != nil {
+		return QualityFeedback{}, fmt.Errorf("aggregating quality feedback: %w", err)
+	}
+	defer rows.Close()
+
+	var fb QualityFeedback
+	for rows.Next() {
+		var s QualityReasonStat
+		if err := rows.Scan(&s.Reason, &s.Scored, &s.AvgScore, &s.LowScored, &s.MinScore, &s.MaxScore); err != nil {
+			return QualityFeedback{}, fmt.Errorf("scanning quality feedback row: %w", err)
+		}
+		fb.Reasons = append(fb.Reasons, s)
+	}
+	if err := rows.Err(); err != nil {
+		return QualityFeedback{}, fmt.Errorf("reading quality feedback rows: %w", err)
+	}
+
+	if exampleLimit <= 0 {
+		return fb, nil
+	}
+
+	exArgs := append(args[:0:0], args...)
+	exArgs = append(exArgs, exampleLimit)
+	exSQL := `
+		SELECT id, ts, COALESCE(served_model, ''), COALESCE(routing_tier, ''),
+		       COALESCE(routing_reason, ''), quality_score, COALESCE(trace_id, '')
+		FROM requests WHERE ` + where + `
+		  AND quality_sample_reason = 'downgraded' AND quality_score <= $2
+		ORDER BY ts DESC LIMIT $` + strconv.Itoa(len(exArgs))
+
+	exRows, err := w.pool.Query(ctx, exSQL, exArgs...)
+	if err != nil {
+		return QualityFeedback{}, fmt.Errorf("listing low-quality downgrades: %w", err)
+	}
+	defer exRows.Close()
+
+	for exRows.Next() {
+		var e QualityExample
+		if err := exRows.Scan(&e.ID, &e.Timestamp, &e.ServedModel, &e.RoutingTier, &e.RoutingReason, &e.QualityScore, &e.TraceID); err != nil {
+			return QualityFeedback{}, fmt.Errorf("scanning low-quality downgrade: %w", err)
+		}
+		fb.Examples = append(fb.Examples, e)
+	}
+	return fb, exRows.Err()
 }

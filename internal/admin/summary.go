@@ -30,6 +30,7 @@ type summaryView struct {
 	OverheadMS  summaryOverheadView   `json:"overhead_ms"`
 	Cost        summaryCostView       `json:"cost"`
 	Cache       summaryCacheView      `json:"cache"`
+	Quality     summaryQualityView    `json:"quality"`
 	Providers   []summaryProviderView `json:"providers"`
 	Series      *summarySeriesView    `json:"series"`
 }
@@ -41,11 +42,17 @@ type summarySeriesView struct {
 	StepSeconds int                    `json:"step_seconds"`
 	Traffic     []summaryTrafficPoint  `json:"traffic"`
 	Overhead    []summaryOverheadPoint `json:"overhead"`
+	Quality     []summaryQualityPoint  `json:"quality"`
 }
 
 type summaryTrafficPoint struct {
 	T     string  `json:"t"`
 	Value float64 `json:"value"`
+}
+
+type summaryQualityPoint struct {
+	T   string   `json:"t"`
+	Avg *float64 `json:"avg"`
 }
 
 type summaryOverheadPoint struct {
@@ -81,6 +88,15 @@ type summaryCacheView struct {
 	HitRate *float64 `json:"hit_rate"`
 }
 
+// summaryQualityView carries Overview's quality KPI. Enabled is the config
+// fact — does this gateway score responses at all — kept separate from AvgScore
+// so Overview shows "not enabled" rather than a zero when scoring is off.
+type summaryQualityView struct {
+	Enabled  bool     `json:"enabled"`
+	AvgScore *float64 `json:"avg_score"`
+	Scored   *float64 `json:"scored"`
+}
+
 type summaryProviderView struct {
 	Provider         string  `json:"provider"`
 	Status           string  `json:"status"`
@@ -88,7 +104,7 @@ type summaryProviderView struct {
 	P99LatencyMillis float64 `json:"p99_latency_ms"`
 }
 
-func toSummaryView(res summary.Result, health HealthReader, cacheEnabled bool) summaryView {
+func toSummaryView(res summary.Result, health HealthReader, cacheEnabled, qualityEnabled bool) summaryView {
 	v := summaryView{
 		Range:       res.Range,
 		GeneratedAt: res.GeneratedAt.Format(time.RFC3339Nano),
@@ -97,6 +113,7 @@ func toSummaryView(res summary.Result, health HealthReader, cacheEnabled bool) s
 		OverheadMS:  summaryOverheadView{P50: res.OverheadP50, P95: res.OverheadP95, P99: res.OverheadP99},
 		Cost:        summaryCostView{TotalUSD: res.CostUSD},
 		Cache:       summaryCacheView{Enabled: cacheEnabled, HitRate: res.CacheHitRate},
+		Quality:     summaryQualityView{Enabled: qualityEnabled, AvgScore: res.QualityAvg, Scored: res.QualityScored},
 		Providers:   []summaryProviderView{},
 	}
 	if health != nil {
@@ -124,6 +141,9 @@ func toSummaryView(res summary.Result, health HealthReader, cacheEnabled bool) s
 				T: p.T.Format(time.RFC3339), P50: p.P50, P95: p.P95, P99: p.P99,
 			})
 		}
+		for _, p := range res.Series.Quality {
+			sv.Quality = append(sv.Quality, summaryQualityPoint{T: p.T.Format(time.RFC3339), Avg: p.Avg})
+		}
 		v.Series = sv
 	}
 	return v
@@ -131,7 +151,7 @@ func toSummaryView(res summary.Result, health HealthReader, cacheEnabled bool) s
 
 // --- handler ----------------------------------------------------------
 
-func handleSummary(svc SummaryService, health HealthReader, cacheEnabled bool, authr KeyAuthenticator, log *slog.Logger) http.HandlerFunc {
+func handleSummary(svc SummaryService, health HealthReader, cacheEnabled, qualityEnabled bool, authr KeyAuthenticator, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if svc == nil {
 			writeError(w, log, http.StatusServiceUnavailable, "summary_disabled",
@@ -168,6 +188,6 @@ func handleSummary(svc SummaryService, health HealthReader, cacheEnabled bool, a
 		}
 
 		res := svc.Build(r.Context(), summary.Options{Range: rng, TeamID: scope})
-		writeJSON(w, log, http.StatusOK, toSummaryView(res, health, cacheEnabled))
+		writeJSON(w, log, http.StatusOK, toSummaryView(res, health, cacheEnabled, qualityEnabled))
 	}
 }

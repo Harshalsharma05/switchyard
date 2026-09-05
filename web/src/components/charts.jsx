@@ -10,6 +10,7 @@ import ChartTooltip from './ChartTooltip.jsx'
 import { EmptyState } from './states.jsx'
 import { formatAxisTime, formatCount, formatMs, formatUSD } from '../utils/format.js'
 
+
 const HEIGHT = 200
 
 // Request volume per bucket. Bars because the value is a discrete count over a
@@ -144,5 +145,35 @@ export function CostTrendChart({ data, range }) {
         </BarChart>
       </ResponsiveContainer>
     </>
+  )
+}
+
+// Async judge score per bucket, 1-5. A line with a fixed 1-5 domain so a dip
+// reads against the scale, not against the window's own min and max. Gaps
+// where nothing was scored are honest — connectNulls is off.
+export function QualityChart({ points, range }) {
+  if (!points?.length) {
+    return <EmptyState>No responses have been scored in this window yet.</EmptyState>
+  }
+  const data = points.map((p) => ({ t: formatAxisTime(p.t, range), avg: p.avg }))
+
+  return (
+    <ResponsiveContainer width="100%" height={HEIGHT}>
+      <LineChart data={data} margin={CHART_MARGIN}>
+        <CartesianGrid {...GRID_PROPS} />
+        <XAxis dataKey="t" {...AXIS_PROPS} minTickGap={32} />
+        <YAxis {...AXIS_PROPS} width={28} domain={[1, 5]} ticks={[1, 2, 3, 4, 5]} />
+        <Tooltip cursor={CURSOR_PROPS} content={<ChartTooltip formatValue={(v) => v.toFixed(2)} />} />
+        <Line
+          type="monotone"
+          dataKey="avg"
+          name="avg score"
+          stroke="var(--chart-series-2)"
+          strokeWidth={1.5}
+          dot={false}
+          activeDot={{ r: 3 }}
+        />
+      </LineChart>
+    </ResponsiveContainer>
   )
 }

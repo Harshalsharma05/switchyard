@@ -29,10 +29,17 @@ type Result struct {
 	RequestCount *float64
 	ErrorRate    *float64
 	CacheHitRate *float64
-	OverheadP50  *float64
-	OverheadP95  *float64
-	OverheadP99  *float64
-	CostUSD      *float64
+
+	// QualityAvg is the mean async judge score in the window, QualityScored
+	// the number of responses scored. Both nil until the worker has scored
+	// anything — Overview shows an empty state, not a zero.
+	QualityAvg    *float64
+	QualityScored *float64
+
+	OverheadP50 *float64
+	OverheadP95 *float64
+	OverheadP99 *float64
+	CostUSD     *float64
 
 	// Series is the time-series behind Overview's two charts. Nil when
 	// Prometheus is unreachable or a range query failed — the charts then show
@@ -47,6 +54,14 @@ type Series struct {
 	StepSeconds int
 	Traffic     []TrafficPoint
 	Overhead    []OverheadPoint
+	Quality     []QualityPoint
+}
+
+// QualityPoint is the mean judge score in one step-wide bucket. Avg is nil
+// for a bucket in which nothing was scored.
+type QualityPoint struct {
+	T   time.Time
+	Avg *float64
 }
 
 // TrafficPoint is the request count in one step-wide bucket.
@@ -173,6 +188,17 @@ func (s *Service) build(ctx context.Context, opts Options) Result {
 	cacheHits := selector("switchyard_cache_lookups_total", join(teamSel, `result="hit"`))
 	r.CacheHitRate = q(fmt.Sprintf("sum(increase(%s[%s])) / sum(increase(%s[%s]))", cacheHits, win, cacheAll, win))
 
+	// Quality: the judge score histogram carries a team label, so a non-admin
+	// sees its own responses' scores. Sum over count is the mean; both come
+	// from the same histogram so they cannot disagree about the denominator.
+	qSum := selector("switchyard_quality_score_sum", teamSel)
+	qCount := selector("switchyard_quality_score_count", teamSel)
+	r.QualityScored = q(fmt.Sprintf("sum(increase(%s[%s]))", qCount, win))
+	r.QualityAvg = q(fmt.Sprintf("sum(increase(%s[%s])) / sum(increase(%s[%s]))", qSum, win, qCount, win))
+	if r.QualityAvg != nil && math.IsNaN(*r.QualityAvg) {
+		r.QualityAvg = nil
+	}
+
 	// A ratio with no denominator comes back from Prometheus as no-data, which
 	// q already maps to nil — but guard the pathological case anyway.
 	if r.ErrorRate != nil && math.IsNaN(*r.ErrorRate) {
@@ -243,6 +269,19 @@ func (s *Service) buildSeries(ctx context.Context, opts Options, teamSel string)
 	sort.Slice(order, func(i, j int) bool { return order[i] < order[j] })
 	for _, k := range order {
 		out.Overhead = append(out.Overhead, *byTime[k])
+	}
+
+	qPoints, err := s.prom.queryRange(ctx, fmt.Sprintf(
+		"sum(rate(%s[%s])) / sum(rate(%s[%s]))",
+		selector("switchyard_quality_score_sum", teamSel), stepExpr,
+		selector("switchyard_quality_score_count", teamSel), stepExpr),
+		start, end, step)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range qPoints {
+		v := p.V
+		out.Quality = append(out.Quality, QualityPoint{T: p.T, Avg: &v})
 	}
 	return out, nil
 }
