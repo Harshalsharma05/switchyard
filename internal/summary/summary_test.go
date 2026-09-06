@@ -141,12 +141,12 @@ func TestBuildCachesWithinTTL(t *testing.T) {
 }
 
 func TestValidRange(t *testing.T) {
-	for _, ok := range []string{"1h", "24h", "7d"} {
+	for _, ok := range []string{"1h", "24h", "7d", "30d"} {
 		if !ValidRange(ok) {
 			t.Errorf("ValidRange(%q) = false", ok)
 		}
 	}
-	for _, bad := range []string{"", "2h", "30d", "1H"} {
+	for _, bad := range []string{"", "2h", "90d", "1H"} {
 		if ValidRange(bad) {
 			t.Errorf("ValidRange(%q) = true", bad)
 		}

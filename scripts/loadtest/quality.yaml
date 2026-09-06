@@ -1,0 +1,27 @@
+# Quality config for the load runs.
+#
+# Sampling is deliberately tiny: routed_rate 0.02 keeps judge calls to a
+# trickle under 60 req/s, enough to prove the worker adds zero request-path
+# latency and that scores land on the right rows, without turning the run
+# into a Groq bill. Downgraded-tier and near-threshold-hit sampling still
+# always fire, as the policy requires.
+
+quality:
+  enabled: true
+
+  sampling:
+    routed_rate: 0.02
+    near_threshold_band: 0.03
+
+  worker:
+    queue_size: 64
+    concurrency: 2
+    score_timeout: 20s
+
+  judge:
+    model: openai/gpt-oss-20b
+    timeout: 20s
+
+  feedback:
+    low_score_threshold: 3
+    example_limit: 20

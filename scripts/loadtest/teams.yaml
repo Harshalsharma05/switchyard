@@ -13,6 +13,9 @@ teams:
   - id: loadtest-realtime
     name: Load Test Realtime
     api_key_hash: df61f3af3268373f651a9c54356e1d4c364302a899362457447fe1199cef5cbd
+    # Admin so the run can pull /admin/reconciliation and /admin/quality/feedback
+    # for the results doc. The other two teams stay non-admin.
+    is_admin: true
     allowed_providers:
       - mock-primary
       - mock-fallback
@@ -20,6 +23,7 @@ teams:
       - mock-fast
       - mock-fast-b
       - mock-frontier
+      - mock-frontier-b
     rate_limits:
       rpm: 6000
       tpm: 5000000

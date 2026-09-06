@@ -170,7 +170,7 @@ func handleSummary(svc SummaryService, health HealthReader, cacheEnabled, qualit
 		}
 		if !summary.ValidRange(rng) {
 			writeError(w, log, http.StatusBadRequest, "invalid_request_error",
-				"range must be one of 1h, 24h, 7d")
+				"range must be one of 1h, 24h, 7d, 30d")
 			return
 		}
 

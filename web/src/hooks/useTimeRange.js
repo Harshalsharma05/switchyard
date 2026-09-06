@@ -3,7 +3,7 @@
 // scoped to the signed-in shell.
 import { createContext, useContext } from 'react'
 
-export const RANGES = ['1h', '24h', '7d']
+export const RANGES = ['1h', '24h', '7d', '30d']
 
 export const TimeRangeContext = createContext(null)
 

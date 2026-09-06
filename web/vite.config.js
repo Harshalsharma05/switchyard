@@ -6,8 +6,8 @@ import { defineConfig } from 'vite'
 //   :9090  admin    -> /admin/*   (summary, request logs, teams, chaos, ...)
 // The frontend calls same-origin relative paths (/v1/..., /admin/...) so no
 // CORS handling is needed and no port is baked into the app. In production
-// (Phase 10) the built assets are served behind the same origin as these
-// paths, so the app code stays identical.
+// web/nginx.conf does the same job — serves the built assets and proxies
+// /v1 and /admin to the two gateway ports — so the app code stays identical.
 export default defineConfig({
   plugins: [react()],
   server: {

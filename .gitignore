@@ -44,6 +44,7 @@ go.work.sum
 /scripts/results/
 /scripts/loadtest/logs/
 k6-summary.json
+k6-semantic-summary.json
 
 # --- Editors and OS ----------------------------------------------------------
 .vscode/

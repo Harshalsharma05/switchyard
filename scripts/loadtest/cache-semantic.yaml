@@ -1,0 +1,26 @@
+# Cache config for the semantic mini-run (scripts/loadtest-semantic.js).
+#
+# Semantic tier on, real Gemini embeddings. Kept to a short, low-rate run
+# because every exact-tier miss pays one embedding round trip — see
+# DECISIONS.md, Phase 10.
+
+cache:
+  enabled: true
+  read_timeout: 50ms
+  write_timeout: 500ms
+
+  ttl:
+    default: 1h
+    max: 24h
+
+  semantic:
+    enabled: true
+    threshold: 0.93
+    max_candidates: 100
+
+  embedding:
+    base_url: https://generativelanguage.googleapis.com/v1beta
+    api_key_env: GEMINI_API_KEY
+    model: gemini-embedding-001
+    dimensions: 768
+    timeout: 5s

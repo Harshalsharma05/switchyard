@@ -439,6 +439,14 @@ Each adapter wraps the caller's `ctx` with `context.WithTimeout(ctx, cfg.Timeout
 
 ---
 
+## Phase 5 — Request Logs
+
+- **No new backend decisions.** The table is a frontend view over Phase 1's query API — cursor pagination (not offset, because the table grows to 30 days of rows), always-server-side filtering, and server-enforced team scoping are all decided there.
+- **Filters and the range live in the URL query string (`useSearchParams`), not component state.** A filtered view then survives a refresh, is shareable as a link, and puts back/forward navigation between filter states in the browser for free. This is the only Phase-5-specific choice and it has no alternative worth arguing.
+- **The row drawer deep-links to Jaeger by trace ID.** Going from a row in the product to the full distributed trace of that exact request is the payoff of stamping the trace ID onto every log row in Phase 1.
+
+---
+
 ## Phase 6 — Usage & Cost
 
 - **Redis is the source of truth for spend; the request log is an independent cross-check, not a second ledger.** Spend cards read `budget.Spent` (Redis) directly. `GET /admin/reconciliation` (admin-only) sums logged `cost_micros` per team for the month and surfaces any drift beyond a $0.01 tolerance rather than hiding it — the tolerance absorbs in-flight reservations and estimate→reconcile rounding.
@@ -644,3 +652,23 @@ go run ./scripts/overheadbench -n 40 -rpm 45 -mode miss -model auto
 - **Playground shows the score only if the async row has caught up, which it usually has not.** The judge takes seconds to tens of seconds and `awaitRequestRow` polls for ~5s, so the metadata panel almost always reads "scored asynchronously — appears in Request Logs once judged". Pretending otherwise (a spinner that resolves to nothing) would be worse.
 - **Request Logs gets a Quality column and the drawer shows the sampling reason.** The column is the score to one decimal or an em dash; hovering gives the reason. "Not scored" in the drawer says *why* — "sampling is deliberate, not every response" — so a mostly-empty column does not read as a broken feature.
 - **The two feedback loops live on Usage & Cost, admin-only.** DESIGN.md says nothing about quality, so placement was a judgement call: the loops are cost-vs-correctness signals and sit naturally beside cost attribution and the budget reconciliation strip. The card renders the plain-English `signal` sentences from Step 9.3 plus the mislabel example table; a non-admin key 403s and the card shows "admin-only" rather than an error.
+
+## Phase 10 — Final Load Test, Demo & Wrap
+
+### Step 10.1 — Rerun the load test
+
+- **Two runs, not one: a 60 req/s main run with the exact cache tier only, and a separate low-rate semantic mini-run.** With `semantic.enabled: true` every exact-tier miss embeds, and there is no per-request opt-out of the lookup — a full main run would be ~5,000 real Gemini embedding calls, a quota risk and a spend for no extra signal. The split keeps the headline overhead comparison against Part 1 clean and isolates what each run measures.
+- **Baseline / batch / budget / routed traffic sends `X-Switchyard-Cache-TTL: 0`.** k6's `__ITER` is per-VU under `constant-arrival-rate`, so `"load test message N"` is a pool of ~100 strings, not unique prompts. Part 1 had no cache so it didn't matter; with the exact cache on, an earlier run had the cache absorb the whole workload — budget never exhausted, the outage produced no fallback, every row cost `$0`. The header keeps that traffic provider-bound while still paying the lookup on the hot path, which is what the overhead number should include.
+- **The env flushes Redis and truncates the request log on every start.** The monthly budget counter persists otherwise. Part 1's 530-of-540 402 rate was almost certainly a pre-loaded counter, not a clean measurement; from zero the budget-capped team hits `$0.0198` of its `$0.02` cap and denies 147.
+- **Both Part 1 k6 reporting bugs fixed at the source, not with a caption.** `handleSummary()` computes the `p(95)<10` verdict from the trend value instead of trusting k6 v2.2.0's `--summary-export`; `http.setResponseCallback(http.expectedStatuses(...))` makes `http_req_failed` count only genuine gateway failures (it now reads 0.00%), with the deliberate 429/402/503 in their own counters.
+- **Fallback cost delta is `$0` and left that way.** The mock fallback models are priced identically to the primaries they back. Re-pricing them to force a non-zero "cost shifted by fallback" would have distorted the routing-savings arithmetic in the same run; the honest note is that with real, differently-priced providers the delta is the price gap × fallback volume.
+- **The quality judge scored 61 of 284 samples; the rest errored under Groq's rate limit.** Reported as the Phase 9 guarantee holding — the worker recorded each error and moved on, queue depth returned to 0, and `http_req_failed` stayed 0.00% — not hidden. A high-downgrade workload needs more judge concurrency or a rate cap on downgrade sampling.
+
+### Step 10.2 — Production build and serving
+
+- **nginx container, not the SPA embedded in the gateway binary.** The frontend calls same-origin `/v1/*` (public port) and `/admin/*` (admin port); production needs one origin that composes both. Embedding the SPA would mean either mounting the admin API on the public port or running an in-process reverse proxy from public to admin — both weaken the two-port separation CLAUDE.md treats as load-bearing. nginx is the conventional reverse-proxy-in-front: it serves the built assets and proxies each path to the right port, so the app code stays byte-identical to the Vite dev setup and the gateway stays a pure two-port API.
+- **The `/v1/` proxy location sets `proxy_buffering off`.** SSE from `/v1/chat/completions` must still flush per chunk through nginx — the same "streaming stays streaming" rule the gateway itself follows.
+
+### Step 10.3 — Demo script
+
+- **`demo.sh` performs every API action itself and prints the parallel UI narration, rather than being a list of clicks.** A recorded walkthrough cannot depend on a human clicking the right thing at the right moment; doing the chaos POST, the budget PATCH and the request bursts in the script makes each scene reproducible and doubles as a smoke test. It now requires the full compose stack — Postgres for Request Logs and Usage & Cost, Prometheus for Overview — so the preflight checks for those and refuses a bare `go run`.

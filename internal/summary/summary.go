@@ -87,7 +87,7 @@ type Options struct {
 	TeamID string
 }
 
-var validRanges = map[string]bool{"1h": true, "24h": true, "7d": true}
+var validRanges = map[string]bool{"1h": true, "24h": true, "7d": true, "30d": true}
 
 // ValidRange reports whether r is an accepted ?range= value.
 func ValidRange(r string) bool { return validRanges[r] }
@@ -319,6 +319,8 @@ func windowStep(r string) (window, step time.Duration) {
 		return 24 * time.Hour, 15 * time.Minute
 	case "7d":
 		return 7 * 24 * time.Hour, 2 * time.Hour
+	case "30d":
+		return 30 * 24 * time.Hour, 12 * time.Hour
 	default:
 		return time.Hour, time.Minute
 	}

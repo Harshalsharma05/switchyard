@@ -56,7 +56,8 @@ services:
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
-      - "--storage.tsdb.retention.time=15d"
+      # 32d so Overview's 30d range has a full window of history to query.
+      - "--storage.tsdb.retention.time=32d"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
@@ -223,6 +224,22 @@ services:
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
     depends_on:
       - prometheus
+
+  # Part 2, Phase 10: the console. Built from web/ (Vite -> nginx) and served
+  # by nginx, which is the single public origin — it proxies /v1 to the
+  # gateway's public port and /admin to its admin port, so `docker compose up`
+  # brings up the whole system including the UI with no extra steps. Open
+  # http://localhost:3001. Waits for the gateway to be healthy so a first load
+  # never hits a 502.
+  web:
+    build:
+      context: ../web
+      dockerfile: Dockerfile
+    ports:
+      - "3001:80"
+    depends_on:
+      gateway:
+        condition: service_healthy
 
 volumes:
   redis-data:

@@ -1,0 +1,17 @@
+# Cache config for the main load run (scripts/loadtest.js).
+#
+# Exact tier only: semantic is off, so no request pays an embedding round trip
+# and the p95 overhead stays comparable to Part 1. The semantic tier is
+# exercised separately by scripts/loadtest-semantic.js against cache-semantic.yaml.
+
+cache:
+  enabled: true
+  read_timeout: 50ms
+  write_timeout: 500ms
+
+  ttl:
+    default: 1h
+    max: 24h
+
+  semantic:
+    enabled: false

@@ -5,57 +5,67 @@
 </p>
 
 <p align="center">
-  Per-team authentication, rate limiting, budget enforcement, health-aware failover,<br/>
-  circuit breaking, and full observability — behind one OpenAI-compatible endpoint.
+  Per-team auth, rate limiting, budget enforcement, health-aware failover, circuit breaking,<br/>
+  a semantic cache, cost-aware routing, async quality checks, and full observability —<br/>
+  behind one OpenAI-compatible endpoint, with a console over all of it.
 </p>
 
 <p align="center">
   <img alt="Go" src="https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white">
-  <img alt="Gateway overhead p95" src="https://img.shields.io/badge/gateway%20overhead%20p95-2.84ms-brightgreen">
+  <img alt="Gateway overhead p95" src="https://img.shields.io/badge/gateway%20overhead%20p95-4.03ms-brightgreen">
+  <img alt="Genuine failure rate under load" src="https://img.shields.io/badge/http__req__failed-0.00%25-brightgreen">
   <img alt="Race detector" src="https://img.shields.io/badge/go%20test%20--race-clean-brightgreen">
-  <img alt="Dependencies" src="https://img.shields.io/badge/web%20framework-none%20(net%2Fhttp%20%2B%20chi)-blue">
-  <img alt="Status" src="https://img.shields.io/badge/status-Part%201%20%C2%B7%20Phase%2011-orange">
+  <!-- <img alt="Dependencies" src="https://img.shields.io/badge/web%20framework-none%20(net%2Fhttp%20%2B%20chi)-blue">
+  <img alt="Status" src="https://img.shields.io/badge/status-Part%202%20complete-brightgreen"> -->
+  <img alt="License" src="https://img.shields.io/badge/license-MIT-blue">
 </p>
 
 ---
 
 ## The problem
 
-The moment more than one team inside a company starts calling LLM APIs directly, the same four things break at once: nobody knows which team spent the money, one team's runaway retry loop exhausts the shared rate limit for everyone, a provider outage takes down every feature that depends on it with no automatic path to a working alternative, and no one can answer "why was that request slow?" because there is no trace spanning the call. SwitchYard sits between your services and OpenAI, Anthropic, and Ollama, and solves all four in the request path — while adding **~3ms** to it.
+The moment more than one team inside a company calls LLM APIs directly, the same four things break at once: nobody knows which team spent the money, one team's runaway retry loop exhausts the shared rate limit for everyone, a provider outage takes down every feature that depends on it with no automatic path to a working alternative, and no one can answer "why was that request slow?" because there is no trace spanning the call. A shared client library fixes none of them — it runs in each service's process and can't enforce a global limit or fail over on policy it doesn't own. SwitchYard sits between your services and OpenAI, Anthropic, and Ollama and solves all four in the request path — while adding **~4 ms** to it. Part 2 layers on a semantic cache, cost-aware routing, async quality verification, and a five-screen console.
+
+A [case study](CASE_STUDY.md) frames the whole project — the problem, the architecture, the numbers, and the one decision worth defending hardest.
 
 ## Highlights
 
 | | |
 |---|---|
-| **Drop-in OpenAI wire format** | Point your existing SDK at SwitchYard by changing one base URL. No client rewrite, no new SDK. |
+| **Drop-in OpenAI wire format** | Point your existing SDK at SwitchYard by changing one base URL. No client rewrite. |
 | **Per-team keys, limits, and budgets** | Each team gets its own API key, RPM/TPM limits, model allowlist, and monthly USD cap — all in YAML, hot-reloadable without a restart. |
 | **Token-bucket rate limiting** | Atomic check-and-consume in a single Redis round trip via Lua. Lazy refill, so no background timers and no drift across replicas. Burst-tolerant by design. |
 | **Real budget enforcement** | Costs tracked in integer micro-dollars — never floats. Reserve the worst case up front, reconcile against actual usage after. 80% warns, 100% blocks with a `402`. |
-| **Health-aware failover** | Active pings plus passive signals from live traffic. Down providers are skipped, degraded ones deprioritized, and requests fall back down a configured model tier. |
+| **Health-aware failover** | Active pings plus passive signals from live traffic. Down providers skipped, degraded ones deprioritized, requests fall back down a configured model tier. |
 | **Circuit breaker per provider+model** | One bad model doesn't take out a whole provider. Half-open admits exactly **one** probe — held as a distributed lock, so five replicas can't send five "single" probes. |
-| **Retry with full jitter** | Only retries what's actually retryable. Honors the provider's own `Retry-After` over its computed backoff. Total attempts bounded across the whole chain, not per layer. |
-| **Streaming stays streaming** | SSE chunks flush as they arrive — never buffered. Client disconnect cancels the upstream call, so you stop paying for a stream nobody is reading. |
+| **Semantic cache** | Two tiers: an exact Redis-key lookup (sub-millisecond) then a Gemini-embedded nearest-neighbour search. Identical prompts hit instantly; paraphrases hit at a tuned similarity threshold. Fails to a miss, never an error. |
+| **Cost-aware routing** | A lexical complexity classifier (microseconds, never an LLM call) routes `model: "auto"` requests to the cheapest capable tier. An explicitly named model is never silently downgraded. |
+| **Async quality verification** | An LLM-as-judge scores a sampled slice of routed and cached responses — entirely off the request path, drops the sample rather than blocking. |
+| **Streaming stays streaming** | SSE chunks flush as they arrive, never buffered — through the gateway and through nginx. Client disconnect cancels the upstream call. A cached stream is replayed as chunks. |
 | **Compliance over availability** | A team is *never* routed to a provider its allowlist forbids — even when that provider is the only healthy one left. It gets an error instead. |
-| **Observability as a first-class feature** | OpenTelemetry traces (retries and fallbacks appear as distinguishable sibling spans), Prometheus metrics on a separate admin port, and three provisioned Grafana dashboards. |
+| **Observability + a console** | OpenTelemetry traces (retries and fallbacks as distinguishable sibling spans), Prometheus on a separate admin port, provisioned Grafana, a durable request log in Postgres, and a React console over the lot. |
 
-Two design rules are load-bearing throughout: **the gateway must never be the reason a request fails** — every dependency has an explicit, documented fail-open or fail-closed behavior — and **telemetry never blocks a request**.
+Two rules are load-bearing throughout: **the gateway must never be the reason a request fails** — every dependency has an explicit fail-open or fail-closed behavior, with budget enforcement the one deliberate fail-*closed* exception — and **telemetry never blocks a request**.
 
 ## The numbers
 
-All figures below come from [`docs/loadtest-results.md`](docs/loadtest-results.md), generated by a committed script anyone can rerun. Nothing here is hand-typed.
+From [`docs/loadtest-results.md`](docs/loadtest-results.md), generated by committed scripts anyone can rerun. Nothing is hand-typed.
 
-| Metric | Result |
-|---|---|
-| **Gateway overhead p95** | **2.84 ms** (p50 1.57 ms · p90 2.52 ms) — target was < 10 ms |
-| **Requests served** | 5,400 over ~90s at a sustained 60 req/s |
-| **Expected-status rate** | 5,400 / 5,400 — every response was a status the gateway is designed to produce |
-| **Failover under load** | 1,118 requests transparently served by the fallback provider during a 30s induced primary outage |
-| **End-to-end p95** | 37.41 ms (includes mock provider time; overhead is the gateway's share of it) |
-| **No goroutine leak** | 19 → 28 → 19 (baseline → peak → settled), confirmed after the run |
+| Metric | Part 1 | Part 2 |
+|---|---|---|
+| **Gateway overhead p95** | 2.84 ms | **4.03 ms** (p50 1.87 · p99 8.98) — target < 10 ms, now with a cache lookup and the classifier on every request |
+| **Genuine failure rate under load** | metric was misleading | **0.00%** — the deliberate 429/402/503 are now scoped out with `expectedStatuses` |
+| **Requests / rate** | 5,400 | 5,403 over ~90 s at a sustained 60 req/s |
+| **Rate-limit rejections** | 1,594 × 429 | 1,606 × 429 — unchanged behaviour |
+| **Failover under load** | 1,118 | 781 requests served by the fallback provider during a 30 s induced primary outage |
+| **Cache slice hit rate** | — | 97.2% — a hit is ~2 ms end to end vs ~35 ms for a miss |
+| **Cost saved by cache / by routing** | — | $0.0250 / $0.0249, measured separately from logged token counts |
+| **Redis spend vs request-log sum** | — | exact agreement, all three teams |
+| **Semantic embedding call** | — | p50 167 ms / p95 464 ms (real Gemini) — excluded from the overhead number, reported on its own header |
 
-Overhead is measured *inside* the gateway and excludes provider time — it is reported on every single response as `X-Switchyard-Overhead-Ms`, not just under test.
+Overhead is measured *inside* the gateway and excludes provider and embedding time — reported on every response as `X-Switchyard-Overhead-Ms`, not just under test.
 
-Two honest caveats, stated rather than buried: **60 req/s is a sustained rate, not a measured ceiling** — the run never saturated the gateway, so its actual throughput limit is still unknown. And **per-request failover latency is not yet isolated as its own metric**; what's proven is that failover works correctly under sustained load, not how many milliseconds it costs.
+Honest caveats, stated not buried: the load test still runs on **Windows** (Linux deferred; the ~529 µs monotonic-clock granularity makes the sub-millisecond tail less trustworthy); **60 req/s is a sustained rate, not a measured throughput ceiling**; the **fallback cost delta is $0** because the mock fallback models are priced identically to their primaries; and the **quality judge scored 61 of 284 samples** under the real provider's rate limit — graceful (zero request impact), but low yield.
 
 ## Architecture
 
@@ -63,95 +73,83 @@ Two honest caveats, stated rather than buried: **60 req/s is a sustained rate, n
 
 ```mermaid
 flowchart LR
+    C["Client<br/>any OpenAI SDK"] -->|"POST /v1/chat/completions"| MW
+    UI["Console<br/>React + nginx"] -->|"/v1 · /admin"| MW
+
     subgraph GW["SwitchYard"]
         direction TB
         MW["Middleware chain<br/>auth · limits · budget"]
-        RES["Routing + resilience<br/>health · retry · fallback · breaker"]
-        MW --> RES
+        CA["Semantic cache<br/>exact → embedded NN"]
+        RT["Routing + resilience<br/>classify · health · retry · fallback · breaker"]
+        MW --> CA --> RT
     end
 
-    C["Client<br/>any OpenAI SDK"] -->|"POST /v1/chat/completions"| MW
+    RT --> P1["OpenAI · Groq"]
+    RT --> P2["Anthropic · Gemini"]
+    RT --> P3["Ollama<br/>local · free"]
 
-    RES --> P1["OpenAI · Groq"]
-    RES --> P2["Anthropic · Gemini"]
-    RES --> P3["Ollama<br/>local · free"]
-
-    RES <-->|"limits · budgets · breaker state"| RD[("Redis")]
+    RT <-->|"limits · budgets · breaker · cache"| RD[("Redis")]
+    RT -->|"request log (post-response)"| PG[("Postgres")]
+    RT -.->|"sample"| QW["Quality worker<br/>async LLM-as-judge"]
+    QW -->|"score"| PG
     MW -.->|"metrics"| PM["Prometheus → Grafana"]
     MW -.->|"traces"| JG["Jaeger"]
 ```
 
-Dotted lines are telemetry: they can fail, hang, or disappear entirely without affecting a request.
+Dotted lines are telemetry: they can fail, hang, or disappear entirely without affecting a request. The quality worker runs off the request path — its input is a post-response sample, its failure is invisible to callers.
 
 ### Request path
 
-Every request passes through the chain in this order. It is defined in exactly one place, [`internal/proxy/router.go`](internal/proxy/router.go).
+Defined in exactly one place, [`internal/proxy/router.go`](internal/proxy/router.go). Middleware first (needs only the token), then the handler (needs the decoded body):
 
 ```mermaid
 flowchart TB
-    subgraph HANDLER["Handler — these need the decoded body"]
-        direction TB
-        J["TPM reservation"] --> K["Budget reservation"]
-        K --> L["Resolve model → fallback chain"]
-    end
-
-    R(["Request"]) --> A["1 · Recoverer<br/>catches panics from every layer below"]
-    A --> B["2 · RequestID<br/>correlation ID for logs, traces, response"]
-    B --> C["3 · Timing<br/>everything below counts as gateway overhead"]
-    C --> D["4 · Tracing<br/>opens the root span, so all others nest inside"]
-    D --> E["5 · Logger<br/>outside Auth, so 401s and 429s still get logged"]
-    E --> F["6 · Metrics<br/>counts rejections too, not just successes"]
-    F --> G["7 · Auth<br/>resolves the bearer token to a team"]
-    G --> H["8 · RateLimit · RPM<br/>needs the team, but not the body"]
-    H --> J
-
-    L --> M(["Resilience path ↓"])
+    R(["Request"]) --> A["Recoverer · RequestID · Timing · Tracing · Logger · Metrics"]
+    A --> G["Auth — bearer token → team"]
+    G --> H["RateLimit · RPM"]
+    H --> RT["Route — classify model:\"auto\" → tier<br/>(explicit models pass straight through)"]
+    RT --> AZ["Authorize model against the team's allowlist"]
+    AZ --> CH["Cache lookup — exact, then embedded NN<br/>hit ⇒ serve, no reservation, no provider call"]
+    CH --> TPM["TPM reservation"] --> BUD["Budget reservation"] --> RES(["Resolve model → fallback chain ↓"])
 ```
 
-TPM and budget checks are deliberately *not* middleware: both need the decoded request body to estimate a cost, and nothing before the handler has parsed one.
+Routing runs *before* authorization because it decides which model is being authorized. The cache is consulted *after* authorization and *before* any reservation — a hit spends no tokens and no money, so it must not draw down a bucket.
 
 ### Resilience path
 
 ```mermaid
 flowchart TB
     CH["Fallback chain<br/>allowlist-filtered, health-ordered"] --> S
-
     S{"Candidate<br/>left?"} -->|"no"| E503["503 with a per-candidate<br/>breakdown of what failed"]
     S -->|"yes"| BR{"Breaker<br/>open?"}
-
-    BR -->|"open"| SKIP["Skip instantly<br/>no call, no timeout wait"]
-    SKIP --> S
-
+    BR -->|"open"| SKIP["Skip instantly<br/>no call, no timeout wait"] --> S
     BR -->|"closed"| CALL["Call provider"]
     CALL --> OUT{"Outcome"}
-
-    OUT -->|"success"| WIN["Return response<br/>record cost + usage"]
-    OUT -->|"retryable"| RT["Backoff with full jitter<br/>honors provider Retry-After"]
-    RT --> CALL
-    OUT -->|"caller's fault<br/>400 · content policy"| FAIL["Return the error<br/>no fallback: it fails everywhere"]
+    OUT -->|"success"| WIN["Return · record cost, usage,<br/>routing savings, quality sample"]
+    OUT -->|"retryable"| RT["Backoff, full jitter<br/>honors provider Retry-After"] --> CALL
+    OUT -->|"caller's fault"| FAIL["Return the error<br/>no fallback: it fails everywhere"]
     OUT -->|"provider's fault"| S
 ```
 
-Retries happen against the *same* provider first, then the chain moves on — and never returns to a provider it has already given up on. Total attempts are capped across the entire chain, so a 3-retry policy against a 5-entry tier can't turn into 15 calls against an already-struggling fleet.
+Retries happen against the *same* provider first, then the chain moves on — and never returns to a provider it has given up on. Total attempts are capped across the entire chain, so a 3-retry policy against a 5-entry tier can't become 15 calls against an already-struggling fleet.
 
 ## Quickstart
 
-**Requires:** Docker, [Ollama](https://ollama.com) running locally, and a Groq or Gemini API key (both have free tiers). Go 1.26+ only if you'd rather run the gateway outside Docker (per the `go` directive in `go.mod`).
+**Requires:** Docker, [Ollama](https://ollama.com) running locally, and a Groq **and** Gemini API key (both free tiers — Gemini also powers the cache's embeddings). Go 1.26+ only to run the gateway outside Docker.
 
 ```bash
-# 1. Add your key — must exist before step 2, since the gateway container
-# reads it via env_file
-cp .env.example .env    # then fill in GROQ_API_KEY
-
-# 2. Bring up Redis, Jaeger, Prometheus, Grafana, and the gateway itself
-docker compose -f deploy/docker-compose.yml up -d
+cp .env.example .env     # fill in GROQ_API_KEY, GEMINI_API_KEY, POSTGRES_PASSWORD
+docker compose -f deploy/docker-compose.yml up -d --build
 ```
 
-Ollama isn't part of this stack — it runs natively on the host (not
-containerized), and the gateway container reaches it at
-`host.docker.internal:11434`.
+Brings up the gateway, Redis, Postgres (with the request-log schema migrated), Prometheus, Jaeger, Grafana, and the console. Ollama runs natively on the host; the gateway reaches it at `host.docker.internal:11434`.
 
-Then make a request:
+| | |
+|---|---|
+| Console | [localhost:3001](http://localhost:3001) — paste a dev team key to sign in |
+| Gateway (public) | `localhost:8080` |
+| Grafana | [localhost:3000](http://localhost:3000) |
+| Jaeger | [localhost:16686](http://localhost:16686) |
 
 ```bash
 curl http://localhost:8080/v1/chat/completions \
@@ -160,94 +158,60 @@ curl http://localhost:8080/v1/chat/completions \
   -d '{"model":"openai/gpt-oss-20b","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-The response carries `X-Switchyard-Overhead-Ms`, `X-Switchyard-Provider`, and `X-Switchyard-Served-Model`. Traces land in Jaeger at [localhost:16686](http://localhost:16686); dashboards are pre-provisioned in Grafana at [localhost:3000](http://localhost:3000).
+The response carries `X-Switchyard-Overhead-Ms`, `-Provider`, `-Served-Model`, `-Cache`, and — when routing ran — `-Route-Tier` / `-Route-Reason`.
 
 #### One-time: pull a model for the local fallback
 
-The `fast` tier's last hop is Ollama — local, free, no credential — but nothing can invent model weights for you; pulling one is a real multi-gigabyte download from Ollama's own registry, not something `docker compose up` (or Ollama itself) can bake in automatically. Run this once, locally, whenever Ollama is installed:
+The `fast` tier's last hop is Ollama — local, free, no credential — but pulling a model is a real multi-gigabyte download nothing can bake in:
 
 ```bash
 ollama pull llama3.2:3b
 ```
 
-Skip it and everything else still works exactly as designed: Groq and Gemini serve normally, and the gateway's health checker correctly marks `ollama` unavailable rather than blocking on it (see [Resilience path](#resilience-path)) — the only gap is the final fallback hop having nothing to serve if every paid provider is also down.
+Skip it and everything else works: Groq and Gemini serve normally, and the health checker marks `ollama` unavailable rather than blocking — the only gap is the final fallback hop having nothing to serve if every paid provider is also down.
+
+## Screens
+
+The console reads only from gateway endpoints — never Prometheus, Postgres, or a provider directly. Screenshots:
+
+| Screen | What it shows |
+|---|---|
+| **Overview** | KPI row, traffic and overhead charts, provider-health strip, breaker states, a live request feed |
+| **Playground** | A streaming request with the full metadata panel; `429` / `402` / `503` rendered as first-class output |
+| **Live Ops** | Provider panel with transition history, the breaker state machine, the chaos harness, a browser load simulator |
+| **Request Logs** | The Postgres-backed log, cursor-paginated, server-side filtered, with a Jaeger deep link per row |
+| **Usage & Cost** | Per-team spend vs budget, cost trends, cache and routing savings, the Redis-vs-log reconciliation strip |
+
+<!-- Add screenshots to docs/screens/ and link them here. -->
 
 ## Configuration
 
-Two YAML files, both hot-reloadable via `POST /admin/reload` with no restart and no dropped in-flight requests. A config that fails validation is rejected outright; the running gateway keeps serving on the last good one.
+YAML, all hot-reloadable via `POST /admin/reload` with no restart and no dropped in-flight requests. A config that fails validation is rejected outright; the running gateway keeps serving on the last good one.
 
-### `configs/providers.yaml`
-
-Provider instances and the fallback tiers that chain them.
-
-```yaml
-providers:
-  - name: groq                  # instance name — appears in metrics, headers, errors
-    type: openai-compatible     # selects the Go adapter
-    enabled: true               # a disabled entry is still validated, models still reserved
-    base_url: https://api.groq.com/openai/v1
-    api_key_env: GROQ_API_KEY   # names the variable; the secret never lives in the file
-    timeout: 30s
-    default_max_tokens: 1024
-    ping_model: openai/gpt-oss-20b
-    models:
-      - name: openai/gpt-oss-20b
-        input_per_1m_usd: 0.075   # real pricing; converted once to integer micro-dollars
-        output_per_1m_usd: 0.30
-
-tiers:
-  fast:                          # ordered chain of interchangeable-enough options
-    - { provider: groq,   model: openai/gpt-oss-20b }
-    - { provider: gemini, model: gemini-3.5-flash-lite }
-    - { provider: ollama, model: llama3.2:3b }   # local, free, and last
-```
-
-Separating instance `name` from adapter `type` is what lets Groq occupy the OpenAI slot during development and be swapped for real OpenAI by editing this file alone — no code change. A model belongs to at most one tier, enforced at startup.
-
-### `configs/teams.yaml`
-
-```yaml
-teams:
-  - id: acme
-    name: Acme Corp
-    api_key_hash: 2ce25520...    # SHA-256 of the key; the plaintext is never stored
-    allowed_providers: [groq, gemini, ollama]
-    allowed_models: [openai/gpt-oss-20b, llama3.2:3b]
-    rate_limits:
-      rpm: 60
-      tpm: 100000
-    monthly_budget_usd: 50.00
-    priority: realtime           # realtime | batch — batch is shed first under pressure
-```
+| File | Holds |
+|---|---|
+| [`configs/providers.yaml`](configs/providers.yaml) | Provider instances (`name` ≠ adapter `type`, so a free stand-in swaps for the real vendor by editing this file alone) and the fallback tiers that chain them. A model belongs to at most one tier. |
+| [`configs/teams.yaml`](configs/teams.yaml) | Per-team key hash (SHA-256; plaintext never stored), allowlists, RPM/TPM, monthly USD cap, priority, `is_admin`. |
+| [`configs/cache.yaml`](configs/cache.yaml) | Cache on/off, the two-tier split, similarity threshold, per-content TTL rules, embedding source. |
+| [`configs/router.yaml`](configs/router.yaml) | Complexity level → tier, and the classifier's weights, saturation scales, and lexicons. |
+| [`configs/quality.yaml`](configs/quality.yaml) | Sampling policy, the judge model, worker concurrency and queue size. |
 
 <details>
-<summary><strong>Environment variables</strong> — all optional, defaults shown</summary>
+<summary><strong>Key environment variables</strong> — all optional, defaults shown</summary>
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `SWITCHYARD_ADDR` | `:8080` | Public listener |
-| `SWITCHYARD_ADMIN_ADDR` | `:9090` | Admin + metrics listener — never expose publicly |
-| `SWITCHYARD_REDIS_ADDR` | `localhost:6379` | Redis for limits, budgets, health, breaker state |
-| `SWITCHYARD_PROVIDERS_CONFIG` | `configs/providers.yaml` | Provider registry path |
-| `SWITCHYARD_TEAMS_CONFIG` | `configs/teams.yaml` | Team registry path |
-| `SWITCHYARD_LOG_LEVEL` | `info` | `debug` · `info` · `warn` · `error` |
+| `SWITCHYARD_ADDR` / `SWITCHYARD_ADMIN_ADDR` | `:8080` / `:9090` | Public and admin listeners — never expose the admin port publicly |
+| `SWITCHYARD_REDIS_ADDR` | `localhost:6379` | Limits, budgets, health, breaker state, cache |
+| `POSTGRES_PASSWORD` | — | Enables the request log; unset ⇒ no log, no Usage & Cost, no quality worker |
+| `SWITCHYARD_POSTGRES_HOST` | `localhost:5432` | Request-log database |
+| `GEMINI_API_KEY` | — | The semantic cache's embedding source (fatal at startup if the cache is on and this is unset) |
+| `SWITCHYARD_{CACHE,ROUTER,QUALITY}_CONFIG` | `configs/*.yaml` | Override each config path |
+| `SWITCHYARD_ENV` / `SWITCHYARD_CHAOS_ENABLED` | `production` / `false` | `dev` + the flag together unlock the chaos harness |
+| `SWITCHYARD_PROMETHEUS_URL` | `http://localhost:9091` | Queried server-side for `/admin/summary` |
 | `SWITCHYARD_DRAIN_TIMEOUT` | `25s` | Graceful shutdown window on SIGTERM |
-| `SWITCHYARD_ENV` | `production` | `dev` unlocks the chaos harness; the safe value is the one you get by forgetting |
-| `SWITCHYARD_CHAOS_ENABLED` | `false` | Fault injection — requires `SWITCHYARD_ENV=dev` as well |
-| `SWITCHYARD_OTLP_ENDPOINT` | `localhost:4318` | Jaeger's OTLP/HTTP receiver |
-| `SWITCHYARD_TRACE_SAMPLE_RATIO` | `1.0` | 100% in dev; turn down for production |
-| `SWITCHYARD_HEALTH_CHECK_INTERVAL` | `30s` | Active ping cadence per provider |
-| `SWITCHYARD_HEALTH_DEGRADED_ERROR_RATE` | `0.10` | Error rate that marks a provider degraded |
-| `SWITCHYARD_HEALTH_DOWN_ERROR_RATE` | `0.50` | Error rate that marks a provider down |
-| `SWITCHYARD_HEALTH_RECOVERY_STREAK` | `3` | Consecutive clean checks required to recover — the anti-flapping guard |
-| `SWITCHYARD_RETRY_MAX_ATTEMPTS` | `3` | Per-provider attempt cap |
-| `SWITCHYARD_RETRY_MAX_TOTAL_ATTEMPTS` | `5` | Attempt cap across the *whole* chain |
-| `SWITCHYARD_RETRY_BASE_DELAY` | `50ms` | Full-jitter backoff base |
-| `SWITCHYARD_BREAKER_FAILURE_THRESHOLD` | `5` | Failures within the window that open a breaker |
-| `SWITCHYARD_BREAKER_WINDOW` | `30s` | Rolling failure window |
-| `SWITCHYARD_BREAKER_COOLDOWN_BASE` | `10s` | First cooldown, doubling on repeated failures |
-| `SWITCHYARD_BREAKER_COOLDOWN_MAX` | `5m` | Cooldown ceiling |
-| `SWITCHYARD_BREAKER_SUCCESS_THRESHOLD` | `2` | Consecutive probe successes required to close |
+
+Retry, breaker, and health thresholds are all env vars too — see [`.env.example`](.env.example).
 
 </details>
 
@@ -257,59 +221,58 @@ teams:
 
 | Endpoint | Notes |
 |---|---|
-| `POST /v1/chat/completions` | OpenAI-compatible. Streaming and non-streaming share one middleware chain. |
-| `GET /healthz` | Liveness. 200 whenever the process can serve HTTP; checks no dependencies. |
-| `GET /readyz` | Readiness. 503 only if config failed to load or **every** provider is down. |
+| `POST /v1/chat/completions` | OpenAI-compatible. Streaming and non-streaming share one middleware chain. `model: "auto"` opts into routing. `X-Switchyard-Cache-TTL: 0` opts a request out of caching. |
+| `GET /healthz` · `GET /readyz` | Liveness (checks nothing) · readiness (503 only if config failed to load or **every** provider is down). |
 
-**Response headers**
+**Response headers:** `X-Switchyard-Request-Id` · `-Provider` · `-Overhead-Ms` · `-Requested-Model` · `-Served-Model` · `-Fallback` · `-Cache` · `-Embed-Ms` · `-Route-Tier` · `-Route-Reason` · `-Budget-Warning` · `X-RateLimit-*` · `Retry-After`
 
-`X-Switchyard-Request-Id` · `X-Switchyard-Provider` · `X-Switchyard-Overhead-Ms` · `X-Switchyard-Requested-Model` · `X-Switchyard-Served-Model` · `X-Switchyard-Fallback` · `X-Switchyard-Budget-Warning` · `X-RateLimit-Limit` / `-Remaining` / `-Reset` · `Retry-After`
-
-### Admin — port 9090
+### Admin — port 9090 (bearer key; admin-only routes gated server-side)
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /admin/teams` · `GET /admin/teams/{id}` | Team config and live spend |
-| `PATCH /admin/teams/{id}` | Adjust limits and budget with no restart |
-| `POST /admin/teams/{id}/reset-budget` | Manual budget reset |
-| `GET /admin/providers` | Provider registry — API keys redacted at the JSON boundary |
-| `GET /admin/providers/health` | Per-provider status, error rate, p99, and transition history with reasons |
-| `POST /admin/providers/{name}/breaker/reset` | Manual breaker intervention |
-| `POST /admin/reload` | Re-read both YAML files; validates fully before swapping |
-| `GET` · `POST` · `DELETE /admin/chaos` | Fault injection — refuses to enable unless `SWITCHYARD_ENV=dev` **and** the flag is set |
+| `GET /admin/me` | The calling team's identity, admin flag, limits, spend |
+| `GET /admin/summary` | Overview's data — Prometheus queried server-side, `1h`/`24h`/`7d`/`30d` |
+| `GET /admin/requests` · `/admin/requests/{id}` | The request log — cursor-paginated, filterable, team-scoped for non-admins |
+| `GET /admin/costs` · `/admin/attribution` | Cost trends; cache and routing savings, and the cost shifted by fallback |
+| `GET /admin/reconciliation` | Redis budget counters cross-checked against the request-log sum *(admin)* |
+| `GET /admin/quality/feedback` | The cache-threshold and classifier feedback loops *(admin)* |
+| `GET /admin/providers/health` · `POST .../breaker/reset` | Per-provider status, transition history; manual breaker intervention |
+| `GET`·`POST`·`DELETE /admin/chaos` | Fault injection — refuses unless `SWITCHYARD_ENV=dev` **and** the flag is set |
+| `GET /admin/cache/tune` · `POST /admin/cache/purge` | Threshold sweep over historical requests; manual invalidation *(admin)* |
+| `PATCH /admin/teams/{id}` · `POST .../reset-budget` · `POST /admin/reload` | Live limit/budget edits; config reload *(admin)* |
 | `GET /metrics` | Prometheus exposition |
 
-Metrics and admin controls live on a separate listener from the public API by design — the chaos harness is reachable from the admin port only, so nothing on the public port can turn fault injection on.
+The chaos harness is reachable from the admin port only — nothing on the public port can turn fault injection on.
 
 ## Use cases
 
-**Internal LLM platform for multiple teams.** Give each team its own key, model allowlist, and monthly cap. Finance gets per-team cost attribution for free; no team can exhaust another's quota.
+**Internal LLM platform for multiple teams.** Per-team key, allowlist, and monthly cap. Finance gets per-team attribution for free; no team can exhaust another's quota.
 
-**Surviving provider outages.** When a provider degrades, health checks and the circuit breaker route around it automatically and traffic continues on the next tier entry — down to a local Ollama model that costs nothing and needs no credential.
+**Surviving provider outages.** Health checks and the breaker route around a degrading provider automatically, down to a local Ollama model that costs nothing.
 
-**Escaping vendor lock-in.** Because the public API mirrors OpenAI's wire format and every provider sits behind one interface, switching or adding a provider is a YAML edit. Clients never change.
+**Cutting spend without cutting features.** Repeated and paraphrased prompts are served from the semantic cache; `model: "auto"` requests route to the cheapest tier that can handle them; the async judge keeps both trades honest by scoring a sample of what they produced.
 
-**Controlling spend before it happens.** Budgets are enforced *in the request path* — a team at its cap gets a `402` with its exact spend, not a surprise invoice. Costs are integer micro-dollars end to end, so they don't drift over thousands of requests.
+**Escaping vendor lock-in.** The public API mirrors OpenAI's wire format and every provider sits behind one interface — switching or adding a provider is a YAML edit. Clients never change.
 
-**Debugging "why was that request slow?"** One trace per request, with retries and fallbacks as distinguishable sibling spans, and the trace ID stamped into every log line. Prompt and response content is deliberately *never* attached to spans.
+**Debugging "why was that request slow?"** One trace per request, retries and fallbacks as distinguishable sibling spans, the trace ID in every log line and deep-linked from every Request Logs row. Prompt and response content is *never* attached to spans or the log.
 
 ## Testing
 
 ```bash
-go test -race ./...                      # unit + package tests; the race detector is non-negotiable
-go test -race -tags=integration ./test/  # black-box: builds the real binary, drives it over HTTP
+go test -race ./...                       # unit + package tests; the race detector is non-negotiable
+go test -race -tags=integration ./test/   # black-box: builds the real binary, drives it over HTTP
 ```
 
-The integration suite in [`test/`](test/) compiles `cmd/gateway`, spawns it as a subprocess against real Redis and mock upstreams, and drives it purely over HTTP — never importing internal packages. It proves the shipped artifact behaves, not just the handlers: exact rate limiting under concurrency, budget cut-off, retry and no-retry classification, fallback with allowlist enforcement, the full breaker cycle, progressive streaming, client-cancel propagation, and hot reload without dropping an in-flight request.
+The integration suite compiles `cmd/gateway`, spawns it against real Redis and mock upstreams, and drives it purely over HTTP — never importing internal packages. It proves the shipped artifact behaves: exact rate limiting under concurrency, budget cut-off, retry classification, fallback with allowlist enforcement, the full breaker cycle, progressive streaming, client-cancel propagation, and hot reload without dropping an in-flight request.
 
-To rerun the load test, see [`docs/loadtest-results.md`](docs/loadtest-results.md).
+Unit tests concentrate on the state machines and failure paths — the token bucket, the breaker, the health hysteresis, the classifier, the sampler, the middleware chain. Packages that are mostly HTTP/Redis/Postgres glue (`internal/cache`, `internal/logstore`) are covered by the integration and load tests rather than by unit tests against a mock. To rerun the load test, see [`docs/loadtest-results.md`](docs/loadtest-results.md).
 
 ## Demo
 
-[`scripts/demo.sh`](scripts/demo.sh) narrates the whole story against a running gateway (see Quickstart), pausing before each scene: a normal request (with a trace to find in Jaeger), hammering a team's rate limit, killing a provider via the admin-only chaos harness and watching fallback engage, restoring it and watching the breaker's half-open probe close it again, and pushing a team over budget for a `402`. Needs `SWITCHYARD_ENV=dev SWITCHYARD_CHAOS_ENABLED=true` set before starting the gateway; it checks for this and fails fast with the fix if it's missing.
+[`scripts/demo.sh`](scripts/demo.sh) narrates the whole system in ten scenes against the running compose stack, pausing before each and printing the parallel "do this in the console" steps: live Overview, a streaming request, a cache hit, cost-aware routing, the failure chain reaction (health degrades → breaker opens → fallback engages), recovery, a rate-limit wall, a budget wall, Request Logs filtered to the failures with a Jaeger deep link, and Usage & Cost showing real savings. It does every API action itself, so each scene is deterministic and doubles as a smoke test; the preflight fails fast if a piece of the stack is missing.
 
 ```bash
-SWITCHYARD_ENV=dev SWITCHYARD_CHAOS_ENABLED=true go run ./cmd/gateway &
+docker compose -f deploy/docker-compose.yml up -d --build
 bash scripts/demo.sh
 ```
 
@@ -317,31 +280,39 @@ bash scripts/demo.sh
 
 ```
 cmd/gateway/          entrypoint, wiring, graceful shutdown, hot reload
+cmd/migrate/          one-shot request-log schema migration
 internal/config/      YAML loading and validation
 internal/provider/    Provider interface + OpenAI/Anthropic/Gemini/Ollama adapters
-internal/proxy/       middleware chain, request lifecycle, streaming
-internal/auth/        team key validation and context
-internal/ratelimit/   token bucket — Redis Lua, hand-written
-internal/budget/      cost accounting and spend caps
-internal/health/      active pings + passive signals + status hysteresis
-internal/resilience/  retry, backoff, fallback chains, circuit breaker
-internal/telemetry/   OTel setup, span helpers, Prometheus metrics
-internal/admin/       admin API handlers
-deploy/               Compose stack, Prometheus config, provisioned Grafana
-scripts/              load test, mock providers, environment setup
-test/                 black-box integration suite
+internal/proxy/        middleware chain, request lifecycle, streaming, cache/routing wiring
+internal/auth/         team key validation and context
+internal/ratelimit/    token bucket — Redis Lua, hand-written
+internal/budget/       cost accounting and spend caps
+internal/health/       active pings + passive signals + status hysteresis
+internal/resilience/   retry, backoff, fallback chains, circuit breaker
+internal/cache/         two-tier semantic cache
+internal/router/        complexity classifier + cost-aware routing policy
+internal/quality/       async LLM-as-judge worker and sampler
+internal/logstore/      Postgres request-log writer, query layer, retention
+internal/summary/       Prometheus query layer behind GET /admin/summary
+internal/telemetry/     OTel setup, span helpers, Prometheus metrics
+internal/admin/         admin API handlers
+migrations/            versioned SQL for the request-log schema
+web/                   React console (Vite) + its production nginx config
+deploy/                Compose stack, Prometheus config, provisioned Grafana
+scripts/               load tests, mock providers, demo, environment setup
+test/                  black-box integration suite
 ```
 
-`internal/provider/` knows nothing about teams, limits, or budgets. `internal/proxy/` is the only package that knows the full request lifecycle, and nothing imports it except `cmd/`.
+`internal/provider/` knows nothing about teams, limits, or budgets. `internal/proxy/` is the only package that knows the full request lifecycle, and nothing imports it except `cmd/`. Interfaces are defined by the consumer.
 
 ## Design decisions
 
-Every non-obvious choice in this project — and the alternative it was chosen over — is written up in **[DECISIONS.md](DECISIONS.md)**: why token bucket over sliding window, why rate limiting fails open while budgets fail closed, why one probe in half-open instead of a percentage, why the breaker is keyed per provider+model, why costs are integer micro-dollars, and why a team's allowlist beats provider availability.
+Every non-obvious choice — and the alternative it was chosen over — is in **[DECISIONS.md](DECISIONS.md)**, one section per phase across both parts: why token bucket over sliding window, why rate limiting fails open while budgets fail closed, why one probe in half-open, why the breaker is keyed per provider+model, why the cache is two tiers with the exact one first, why the classifier is lexical and never calls a model, why the quality worker drops samples rather than blocking, and why a team's allowlist beats provider availability. The [case study](CASE_STUDY.md) picks the one worth defending hardest.
 
-## Roadmap
+## Out of scope
 
-**In progress (Part 1):** containerizing the gateway so `docker compose up` brings up the complete system in one command.
+Kubernetes, Terraform, cloud deployment, and auth beyond static API keys — all deliberately.
 
-**Part 2:** semantic caching, cost-aware routing, async quality verification, request-log persistence, and a React UI.
+## License
 
-**Explicitly out of scope:** Kubernetes, Terraform, cloud deployment, and auth beyond static API keys.
+MIT — see [LICENSE.md](LICENSE.md).
