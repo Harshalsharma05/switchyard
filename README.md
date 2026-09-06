@@ -107,7 +107,7 @@ flowchart TB
     R(["Request"]) --> A["Recoverer · RequestID · Timing · Tracing · Logger · Metrics"]
     A --> G["Auth — bearer token → team"]
     G --> H["RateLimit · RPM"]
-    H --> RT["Route — classify model:\"auto\" → tier<br/>(explicit models pass straight through)"]
+    H --> RT["Route — classify a model: auto request to a tier<br/>(an explicitly named model passes straight through)"]
     RT --> AZ["Authorize model against the team's allowlist"]
     AZ --> CH["Cache lookup — exact, then embedded NN<br/>hit ⇒ serve, no reservation, no provider call"]
     CH --> TPM["TPM reservation"] --> BUD["Budget reservation"] --> RES(["Resolve model → fallback chain ↓"])
