@@ -151,6 +151,7 @@ func (e teamEntry) resolve(label string) (auth.Team, error) {
 		MonthlyBudgetMicros: usdToMicros(e.MonthlyBudgetUSD),
 		Priority:            priority,
 		IsAdmin:             e.IsAdmin,
+		KeySource:           auth.KeySourceConfig,
 	}, nil
 }
 

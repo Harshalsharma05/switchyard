@@ -191,6 +191,71 @@ func TestRegistryUpdateRejectsInvalidValues(t *testing.T) {
 	}
 }
 
+// The bug RotateKey exists to avoid: Update never deletes the old byHash entry,
+// so if a key's hash could change through it, the rotated-away key would keep
+// authenticating. RotateKey must leave exactly one working key.
+func TestRegistryRotateKeyInvalidatesOldKey(t *testing.T) {
+	r := testRegistry(t)
+
+	newRaw := "sk-switchyard-acme-newkey"
+	updated, err := r.RotateKey("acme", HashKey(newRaw), MaskKey(newRaw))
+	if err != nil {
+		t.Fatalf("RotateKey: %v", err)
+	}
+	if updated.KeySource != KeySourceRotated || updated.KeyCreatedAt == nil {
+		t.Errorf("rotated team = %+v, want source rotated with a created-at", updated)
+	}
+
+	if _, err := r.Authenticate("acme-key"); !errors.Is(err, ErrUnknownKey) {
+		t.Errorf("old key still authenticates after RotateKey: %v", err)
+	}
+	got, err := r.Authenticate(newRaw)
+	if err != nil {
+		t.Fatalf("new key does not authenticate: %v", err)
+	}
+	if got.ID != "acme" {
+		t.Errorf("new key resolved to %q, want acme", got.ID)
+	}
+	// The team is otherwise untouched.
+	if got.RateLimits.RPM != 60 {
+		t.Errorf("RPM = %d after rotation, want unchanged 60", got.RateLimits.RPM)
+	}
+}
+
+func TestRegistryRevokeKeyRemovesAllAuthentication(t *testing.T) {
+	r := testRegistry(t)
+
+	updated, err := r.RevokeKey("acme")
+	if err != nil {
+		t.Fatalf("RevokeKey: %v", err)
+	}
+	if updated.KeySource != KeySourceRevoked || updated.KeyHash != "" {
+		t.Errorf("revoked team = %+v, want source revoked and empty hash", updated)
+	}
+
+	if _, err := r.Authenticate("acme-key"); !errors.Is(err, ErrUnknownKey) {
+		t.Errorf("revoked team still authenticates: %v", err)
+	}
+	// The empty string must not resolve to the revoked team either.
+	if _, err := r.Authenticate(""); !errors.Is(err, ErrUnknownKey) {
+		t.Errorf("empty key authenticates after revoke: %v", err)
+	}
+	// The team itself survives — an admin can still see and re-key it.
+	if _, err := r.Get("acme"); err != nil {
+		t.Errorf("Get(acme) after revoke: %v", err)
+	}
+}
+
+func TestRegistryRotateUnknownTeam(t *testing.T) {
+	r := testRegistry(t)
+	if _, err := r.RotateKey("nope", HashKey("x"), "sk-…xxxx"); !errors.Is(err, ErrUnknownTeam) {
+		t.Errorf("err = %v, want ErrUnknownTeam", err)
+	}
+	if _, err := r.RevokeKey("nope"); !errors.Is(err, ErrUnknownTeam) {
+		t.Errorf("err = %v, want ErrUnknownTeam", err)
+	}
+}
+
 // The whole point of the copy-on-write design: a *Team a request already
 // holds must never change out from under it, even while concurrent Updates
 // and List/Get calls run against the same registry. Run under -race.

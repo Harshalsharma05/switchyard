@@ -7,10 +7,12 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/Harshalsharma05/switchyard/internal/auth"
+	"github.com/Harshalsharma05/switchyard/internal/logstore"
 )
 
 // microsPerUSD mirrors internal/config's own constant of the same name.
@@ -28,6 +30,8 @@ type TeamStore interface {
 	List() []auth.Team
 	Get(id string) (auth.Team, error)
 	Update(id string, patch auth.TeamPatch) (auth.Team, error)
+	RotateKey(id, newHash, newMasked string) (auth.Team, error)
+	RevokeKey(id string) (auth.Team, error)
 }
 
 // SpendReader is the slice of budget.Tracker this package needs.
@@ -62,12 +66,22 @@ type teamView struct {
 	SpentUSD          *float64       `json:"spent_usd"`
 	BudgetUtilization *float64       `json:"budget_utilization"`
 	Priority          string         `json:"priority"`
+	IsAdmin           bool           `json:"is_admin"`
 
-	// KeyFingerprint is the first 12 hex characters of the key's SHA-256
-	// digest — enough for an operator to tell one configured key from another
-	// or notice one changed, and far too little to be the digest or to attack.
-	// Step 6.4's "view API key metadata, never the key and never the hash".
-	KeyFingerprint string `json:"key_fingerprint,omitempty"`
+	// Key is the only key information any GET returns: where the current key
+	// came from, a display-only mask for one this gateway minted, and when.
+	// Never the key, never the hash — Step 6.4, tightened in Part 2 Step 1.
+	Key keyView `json:"key"`
+}
+
+// keyView is a team's key metadata. Masked is empty for a config-seeded team —
+// the gateway never saw that key's plaintext, so there is nothing honest to
+// show, and inventing a mask from the hash would be fabricated data. CreatedAt
+// is null in the same case.
+type keyView struct {
+	Source    string     `json:"source"`
+	Masked    string     `json:"masked,omitempty"`
+	CreatedAt *time.Time `json:"created_at"`
 }
 
 // teamPatchRequest is PATCH /admin/teams/{id}'s body. Every field is
@@ -89,14 +103,15 @@ func microsToUSD(micros int64) float64 {
 	return float64(micros) / microsPerUSD
 }
 
-// keyFingerprint is a short, one-way handle on a team's key for the management
-// UI. A 12-hex-char prefix of a 64-char SHA-256 digest: identifying, not the
-// digest, and nothing a brute-force could work back from.
-func keyFingerprint(keyHash string) string {
-	if len(keyHash) < 12 {
-		return ""
+// keyViewOf renders a team's key metadata. An unset KeySource is read as
+// "config": the older test fixtures and any team built before Part 2 Step 1
+// predate the field, and every one of them is a YAML-seeded key.
+func keyViewOf(t auth.Team) keyView {
+	source := t.KeySource
+	if source == "" {
+		source = auth.KeySourceConfig
 	}
-	return keyHash[:12]
+	return keyView{Source: source, Masked: t.KeyMasked, CreatedAt: t.KeyCreatedAt}
 }
 
 // newTeamView builds the response shape for one team. spentMicros is nil
@@ -111,7 +126,8 @@ func newTeamView(t auth.Team, spentMicros *int64) teamView {
 		RateLimits:       rateLimitsView{RPM: t.RateLimits.RPM, TPM: t.RateLimits.TPM},
 		MonthlyBudgetUSD: microsToUSD(t.MonthlyBudgetMicros),
 		Priority:         string(t.Priority),
-		KeyFingerprint:   keyFingerprint(t.KeyHash),
+		IsAdmin:          t.IsAdmin,
+		Key:              keyViewOf(t),
 	}
 	if spentMicros != nil {
 		spentUSD := microsToUSD(*spentMicros)
@@ -167,15 +183,32 @@ func getTeam(store TeamStore, spend SpendReader, log *slog.Logger) http.HandlerF
 	}
 }
 
+// limitsDelta is the {rpm, tpm, monthly_budget_usd} snapshot an audit entry
+// records for a team-limit change. Kept small and typed so before/after are
+// directly comparable in the audit view.
+func limitsDelta(t auth.Team) map[string]any {
+	return map[string]any{
+		"rpm":                t.RateLimits.RPM,
+		"tpm":                t.RateLimits.TPM,
+		"monthly_budget_usd": microsToUSD(t.MonthlyBudgetMicros),
+	}
+}
+
+// auditUnavailable is the 503 a mutation returns when its audit entry could not
+// be written. The mutation is not attempted: a change the audit log missed is
+// exactly what audit-before-mutate exists to prevent.
+func auditUnavailable(w http.ResponseWriter, log *slog.Logger) {
+	writeError(w, log, http.StatusServiceUnavailable, "audit_unavailable",
+		"the change was not applied because it could not be recorded to the audit log; try again shortly")
+}
+
 // patchTeam serves PATCH /admin/teams/{id}.
 //
-// Every mutation is logged with an actor, before values, and after values,
-// per Step 4.3's checklist. "Actor" is the caller's remote address: Part 1
-// has no admin authentication (CLAUDE.md scopes auth to static API keys on
-// the public API only), so a real operator identity does not exist to log —
-// the address is the most honest thing available, not a stand-in for real
-// audit identity.
-func patchTeam(store TeamStore, spend SpendReader, log *slog.Logger) http.HandlerFunc {
+// The audit entry is written before store.Update, so a mutation the audit log
+// missed cannot happen. Its `after` is the caller's requested values — if
+// Update then rejects them (a non-positive limit), the entry stands as an
+// attempt, which is the accepted cost of that ordering (see DECISIONS.md).
+func patchTeam(store TeamStore, spend SpendReader, audit AuditRecorder, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 
@@ -200,6 +233,30 @@ func patchTeam(store TeamStore, spend SpendReader, log *slog.Logger) http.Handle
 			patch.MonthlyBudgetMicros = &micros
 		}
 
+		requested := limitsDelta(before)
+		if body.RPM != nil {
+			requested["rpm"] = *body.RPM
+		}
+		if body.TPM != nil {
+			requested["tpm"] = *body.TPM
+		}
+		if body.MonthlyBudgetUSD != nil {
+			requested["monthly_budget_usd"] = *body.MonthlyBudgetUSD
+		}
+
+		if err := recordAudit(r.Context(), audit, logstore.AuditEntry{
+			ActorTeamID:  actorID(r),
+			ActorAddr:    r.RemoteAddr,
+			Action:       "team.patch",
+			TargetTeamID: id,
+			Before:       limitsDelta(before),
+			After:        requested,
+		}); err != nil {
+			log.ErrorContext(r.Context(), "writing team-patch audit entry", slog.Any("error", err))
+			auditUnavailable(w, log)
+			return
+		}
+
 		after, err := store.Update(id, patch)
 		if err != nil {
 			if errors.Is(err, auth.ErrUnknownTeam) {
@@ -211,7 +268,8 @@ func patchTeam(store TeamStore, spend SpendReader, log *slog.Logger) http.Handle
 		}
 
 		log.LogAttrs(r.Context(), slog.LevelInfo, "admin patched team",
-			slog.String("actor", r.RemoteAddr),
+			slog.String("actor", actorID(r)),
+			slog.String("actor_addr", r.RemoteAddr),
 			slog.String("team", id),
 			slog.Group("before",
 				slog.Int("rpm", before.RateLimits.RPM),
@@ -230,7 +288,7 @@ func patchTeam(store TeamStore, spend SpendReader, log *slog.Logger) http.Handle
 }
 
 // resetBudget serves POST /admin/teams/{id}/reset-budget.
-func resetBudget(store TeamStore, spend SpendReader, log *slog.Logger) http.HandlerFunc {
+func resetBudget(store TeamStore, spend SpendReader, audit AuditRecorder, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 
@@ -241,6 +299,23 @@ func resetBudget(store TeamStore, spend SpendReader, log *slog.Logger) http.Hand
 		}
 
 		before := readSpent(r.Context(), spend, log, id)
+		beforeUSD := 0.0
+		if before != nil {
+			beforeUSD = microsToUSD(*before)
+		}
+
+		if err := recordAudit(r.Context(), audit, logstore.AuditEntry{
+			ActorTeamID:  actorID(r),
+			ActorAddr:    r.RemoteAddr,
+			Action:       "team.budget_reset",
+			TargetTeamID: id,
+			Before:       map[string]any{"spent_usd": beforeUSD},
+			After:        map[string]any{"spent_usd": 0.0},
+		}); err != nil {
+			log.ErrorContext(r.Context(), "writing budget-reset audit entry", slog.Any("error", err))
+			auditUnavailable(w, log)
+			return
+		}
 
 		if err := spend.Reset(r.Context(), id); err != nil {
 			log.ErrorContext(r.Context(), "resetting team budget",
@@ -250,12 +325,9 @@ func resetBudget(store TeamStore, spend SpendReader, log *slog.Logger) http.Hand
 			return
 		}
 
-		beforeUSD := 0.0
-		if before != nil {
-			beforeUSD = microsToUSD(*before)
-		}
 		log.LogAttrs(r.Context(), slog.LevelInfo, "admin reset team budget",
-			slog.String("actor", r.RemoteAddr),
+			slog.String("actor", actorID(r)),
+			slog.String("actor_addr", r.RemoteAddr),
 			slog.String("team", id),
 			slog.Float64("before_spent_usd", beforeUSD),
 			slog.Float64("after_spent_usd", 0),
@@ -263,6 +335,137 @@ func resetBudget(store TeamStore, spend SpendReader, log *slog.Logger) http.Hand
 
 		zero := int64(0)
 		writeJSON(w, log, http.StatusOK, newTeamView(team, &zero))
+	}
+}
+
+// rotateKeyResponse is POST /admin/teams/{id}/key/rotate's body. APIKey is the
+// only time the plaintext key is ever returned — it is not stored, not logged,
+// and no later GET can reproduce it.
+type rotateKeyResponse struct {
+	APIKey  string  `json:"api_key"`
+	Key     keyView `json:"key"`
+	Warning string  `json:"warning"`
+}
+
+const rotationWarning = "This key is held in memory only. A gateway restart or a POST /admin/reload rebuilds the team registry from configs/teams.yaml and reverts to the previous key. Durable rotation arrives with Postgres-backed team storage."
+
+// rotateKey serves POST /admin/teams/{id}/key/rotate: mint a new key, record
+// the rotation, then swap it in. The old key stops working the instant
+// store.RotateKey returns; the new key works on the very next request, no
+// restart.
+func rotateKey(store TeamStore, audit AuditRecorder, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+
+		before, err := store.Get(id)
+		if err != nil {
+			writeTeamLookupError(w, log, id, err)
+			return
+		}
+
+		raw, err := auth.GenerateKey(id)
+		if err != nil {
+			log.ErrorContext(r.Context(), "generating rotated key", slog.String("team", id), slog.Any("error", err))
+			writeError(w, log, http.StatusInternalServerError, "internal_error",
+				"the gateway could not generate a new key")
+			return
+		}
+		masked := auth.MaskKey(raw)
+
+		// The audit records only that the key source changed — never the key,
+		// the hash, or even the mask.
+		if err := recordAudit(r.Context(), audit, logstore.AuditEntry{
+			ActorTeamID:  actorID(r),
+			ActorAddr:    r.RemoteAddr,
+			Action:       "key.rotate",
+			TargetTeamID: id,
+			Before:       map[string]any{"key_source": keyViewOf(before).Source},
+			After:        map[string]any{"key_source": auth.KeySourceRotated},
+		}); err != nil {
+			log.ErrorContext(r.Context(), "writing key-rotate audit entry", slog.Any("error", err))
+			auditUnavailable(w, log)
+			return
+		}
+
+		after, err := store.RotateKey(id, auth.HashKey(raw), masked)
+		if err != nil {
+			if errors.Is(err, auth.ErrUnknownTeam) {
+				writeError(w, log, http.StatusNotFound, "team_not_found", "no such team "+id)
+				return
+			}
+			log.ErrorContext(r.Context(), "rotating team key", slog.String("team", id), slog.Any("error", err))
+			writeError(w, log, http.StatusInternalServerError, "internal_error", "the key could not be rotated")
+			return
+		}
+
+		log.LogAttrs(r.Context(), slog.LevelInfo, "admin rotated team key",
+			slog.String("actor", actorID(r)),
+			slog.String("actor_addr", r.RemoteAddr),
+			slog.String("team", id),
+		)
+
+		writeJSON(w, log, http.StatusOK, rotateKeyResponse{
+			APIKey:  raw,
+			Key:     keyViewOf(after),
+			Warning: rotationWarning,
+		})
+	}
+}
+
+// revokeKey serves DELETE /admin/teams/{id}/key: remove a team's key entirely.
+// The team stays; nothing authenticates as it until an admin rotates it a new
+// key.
+func revokeKey(store TeamStore, audit AuditRecorder, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+
+		before, err := store.Get(id)
+		if err != nil {
+			writeTeamLookupError(w, log, id, err)
+			return
+		}
+
+		// Revoking the key you are authenticated with locks you out of the admin
+		// API with no way back short of a restart. Refuse it.
+		if caller := adminTeam(r); caller != nil && caller.ID == id {
+			writeError(w, log, http.StatusConflict, "cannot_revoke_own_key",
+				"refusing to revoke the key this request is authenticated with; rotate it instead, or use another admin key")
+			return
+		}
+
+		if err := recordAudit(r.Context(), audit, logstore.AuditEntry{
+			ActorTeamID:  actorID(r),
+			ActorAddr:    r.RemoteAddr,
+			Action:       "key.revoke",
+			TargetTeamID: id,
+			Before:       map[string]any{"key_source": keyViewOf(before).Source},
+			After:        map[string]any{"key_source": auth.KeySourceRevoked},
+		}); err != nil {
+			log.ErrorContext(r.Context(), "writing key-revoke audit entry", slog.Any("error", err))
+			auditUnavailable(w, log)
+			return
+		}
+
+		after, err := store.RevokeKey(id)
+		if err != nil {
+			if errors.Is(err, auth.ErrUnknownTeam) {
+				writeError(w, log, http.StatusNotFound, "team_not_found", "no such team "+id)
+				return
+			}
+			log.ErrorContext(r.Context(), "revoking team key", slog.String("team", id), slog.Any("error", err))
+			writeError(w, log, http.StatusInternalServerError, "internal_error", "the key could not be revoked")
+			return
+		}
+
+		log.LogAttrs(r.Context(), slog.LevelInfo, "admin revoked team key",
+			slog.String("actor", actorID(r)),
+			slog.String("actor_addr", r.RemoteAddr),
+			slog.String("team", id),
+		)
+
+		// Spend is not read here — this response is about the key, and a Redis
+		// hiccup must not turn a successful revoke into an error.
+		writeJSON(w, log, http.StatusOK, newTeamView(after, nil))
 	}
 }
 

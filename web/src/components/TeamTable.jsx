@@ -1,34 +1,75 @@
-// Team management (Step 6.4): a table over Part 1's admin team API. Inline
-// edit for rate limits and budget, a per-team budget reset. No optimistic UI —
-// a change shows a pending state and then the server's actual response
-// (DESIGN.md). Key metadata is a short one-way fingerprint, never the key.
+// Team management (Settings §1–2). A table over Part 1's admin team API: inline
+// edit for rate limits and budget, per-team budget reset, and per-team key
+// rotate / revoke. No optimistic UI — every action shows a pending state and
+// then the server's actual response (DESIGN.md). Every confirmation is inline,
+// never a modal. The Key column shows a masked display form for a rotated key
+// and the source otherwise — never the key, never the hash.
 import { useState } from 'react'
-import { patchTeam, resetTeamBudget } from '../api/teams.js'
+import { patchTeam, resetTeamBudget, rotateTeamKey, revokeTeamKey } from '../api/teams.js'
 import { formatUSD } from '../utils/format.js'
 import './TeamTable.css'
+
+const COLS = 10
 
 function nonNegative(s) {
   const n = Number(s)
   return s.trim() !== '' && Number.isFinite(n) && n >= 0 ? n : null
 }
 
-function TeamRow({ team, getKey, onChanged }) {
+function keyLabel(key) {
+  if (key?.masked) return key.masked
+  if (key?.source === 'revoked') return 'revoked'
+  return 'config'
+}
+
+// The show-once panel: the plaintext key, a copy button, the server's warning,
+// and an explicit "not shown again" line. Dismiss collapses it back to masked.
+function ShowOncePanel({ result, onDismiss }) {
+  const [copied, setCopied] = useState(false)
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(result.api_key)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      setCopied(false)
+    }
+  }
+  return (
+    <div className="tt-showonce">
+      <div className="tt-showonce-head">New API key — copy it now</div>
+      <div className="tt-showonce-keyrow">
+        <code className="tt-showonce-key num">{result.api_key}</code>
+        <button type="button" className="tt-btn tt-btn-primary" onClick={copy}>
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+      <p className="tt-showonce-warn">
+        This key will not be shown again. {result.warning}
+      </p>
+      <button type="button" className="tt-btn" onClick={onDismiss}>Dismiss</button>
+    </div>
+  )
+}
+
+function TeamRow({ team, callerTeamId, getKey, onChanged }) {
   const [editing, setEditing] = useState(false)
   const [form, setForm] = useState({ rpm: '', tpm: '', budget: '' })
-  const [busy, setBusy] = useState(null) // 'save' | 'reset'
+  const [busy, setBusy] = useState(null) // 'save' | 'reset' | 'key'
   const [error, setError] = useState(null)
+  const [resetPhase, setResetPhase] = useState(null) // null | 'confirm'
+  const [keyPhase, setKeyPhase] = useState(null) // null | 'rotate' | 'revoke'
+  const [rotated, setRotated] = useState(null) // { api_key, key, warning }
 
   const rl = team.rate_limits
+  const isSelf = team.id === callerTeamId
 
   const startEdit = () => {
     setForm({ rpm: String(rl.rpm), tpm: String(rl.tpm), budget: String(team.monthly_budget_usd) })
     setError(null)
     setEditing(true)
   }
-  const cancel = () => {
-    setEditing(false)
-    setError(null)
-  }
+  const cancel = () => { setEditing(false); setError(null) }
 
   const save = async () => {
     const rpm = nonNegative(form.rpm)
@@ -42,10 +83,7 @@ function TeamRow({ team, getKey, onChanged }) {
     if (rpm !== rl.rpm) patch.rpm = rpm
     if (tpm !== rl.tpm) patch.tpm = tpm
     if (budget !== team.monthly_budget_usd) patch.monthly_budget_usd = budget
-    if (Object.keys(patch).length === 0) {
-      setEditing(false)
-      return
-    }
+    if (Object.keys(patch).length === 0) { setEditing(false); return }
 
     setBusy('save')
     setError(null)
@@ -61,7 +99,7 @@ function TeamRow({ team, getKey, onChanged }) {
   }
 
   const reset = async () => {
-    if (!window.confirm(`Reset ${team.name}'s spend for this month to $0.00?`)) return
+    setResetPhase(null)
     setBusy('reset')
     setError(null)
     try {
@@ -74,16 +112,47 @@ function TeamRow({ team, getKey, onChanged }) {
     }
   }
 
-  const field = (key) => (
+  const rotate = async () => {
+    setKeyPhase(null)
+    setBusy('key')
+    setError(null)
+    try {
+      const result = await rotateTeamKey(getKey(), team.id)
+      setRotated(result)
+      onChanged()
+    } catch (e) {
+      setError(e.message || 'the key was not rotated')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const revoke = async () => {
+    setKeyPhase(null)
+    setBusy('key')
+    setError(null)
+    try {
+      await revokeTeamKey(getKey(), team.id)
+      onChanged()
+    } catch (e) {
+      setError(e.message || 'the key was not revoked')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const field = (name) => (
     <input
       className="tt-input num"
       type="number"
       min="0"
-      value={form[key]}
+      value={form[name]}
       disabled={busy === 'save'}
-      onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
+      onChange={(e) => setForm((f) => ({ ...f, [name]: e.target.value }))}
     />
   )
+
+  const models = team.allowed_models ?? []
 
   return (
     <>
@@ -92,14 +161,55 @@ function TeamRow({ team, getKey, onChanged }) {
           <span className="tt-name">{team.name}</span>
           <span className="tt-id num">{team.id}</span>
         </td>
-        <td className="num tt-fingerprint" title="first 12 hex of the key digest">
-          {team.key_fingerprint ? `#${team.key_fingerprint}` : '—'}
+        <td className="tt-key">
+          <span className="num tt-key-label" title={`key source: ${team.key?.source ?? 'config'}`}>
+            {keyLabel(team.key)}
+          </span>
+          {keyPhase === null && busy !== 'key' && (
+            <span className="tt-key-actions">
+              <button type="button" className="tt-btn tt-btn-sm" onClick={() => setKeyPhase('rotate')} disabled={busy != null}>
+                Rotate
+              </button>
+              <button
+                type="button"
+                className="tt-btn tt-btn-sm"
+                onClick={() => setKeyPhase('revoke')}
+                disabled={busy != null || isSelf}
+                title={isSelf ? 'You cannot revoke the key you are signed in with' : undefined}
+              >
+                Revoke
+              </button>
+            </span>
+          )}
+          {busy === 'key' && <span className="tt-muted">Working…</span>}
+          {keyPhase === 'rotate' && (
+            <span className="tt-confirm">
+              Rotate this key? The current key stops working immediately.
+              <button type="button" className="tt-btn tt-btn-sm tt-btn-primary" onClick={rotate}>Rotate</button>
+              <button type="button" className="tt-btn tt-btn-sm" onClick={() => setKeyPhase(null)}>Cancel</button>
+            </span>
+          )}
+          {keyPhase === 'revoke' && (
+            <span className="tt-confirm">
+              Revoke this key? {team.name} will have no working key until you rotate one.
+              <button type="button" className="tt-btn tt-btn-sm tt-btn-danger" onClick={revoke}>Revoke</button>
+              <button type="button" className="tt-btn tt-btn-sm" onClick={() => setKeyPhase(null)}>Cancel</button>
+            </span>
+          )}
         </td>
         <td>{team.priority}</td>
         <td className="num ta-r">{editing ? field('rpm') : rl.rpm.toLocaleString()}</td>
         <td className="num ta-r">{editing ? field('tpm') : rl.tpm.toLocaleString()}</td>
         <td className="num ta-r">{editing ? field('budget') : formatUSD(team.monthly_budget_usd)}</td>
         <td className="num ta-r">{team.spent_usd == null ? '—' : formatUSD(team.spent_usd)}</td>
+        <td className="num" title={models.join(', ')}>
+          {models.length} model{models.length === 1 ? '' : 's'}
+        </td>
+        <td>
+          {team.is_admin
+            ? <span className="tt-admin">Admin</span>
+            : <span className="tt-muted">·</span>}
+        </td>
         <td className="tt-actions">
           {editing ? (
             <>
@@ -110,28 +220,41 @@ function TeamRow({ team, getKey, onChanged }) {
                 Cancel
               </button>
             </>
+          ) : resetPhase === 'confirm' ? (
+            <span className="tt-confirm">
+              Reset {team.name}'s spend to $0.00?
+              <button type="button" className="tt-btn tt-btn-sm tt-btn-danger" onClick={reset}>Reset</button>
+              <button type="button" className="tt-btn tt-btn-sm" onClick={() => setResetPhase(null)}>Cancel</button>
+            </span>
           ) : (
             <>
               <button type="button" className="tt-btn" onClick={startEdit} disabled={busy != null}>
                 Edit
               </button>
-              <button type="button" className="tt-btn" onClick={reset} disabled={busy != null}>
+              <button type="button" className="tt-btn" onClick={() => setResetPhase('confirm')} disabled={busy != null}>
                 {busy === 'reset' ? 'Resetting…' : 'Reset budget'}
               </button>
             </>
           )}
         </td>
       </tr>
+      {rotated && (
+        <tr className="tt-showonce-row">
+          <td colSpan={COLS}>
+            <ShowOncePanel result={rotated} onDismiss={() => setRotated(null)} />
+          </td>
+        </tr>
+      )}
       {error && (
         <tr className="tt-error-row">
-          <td colSpan={8}>{error}</td>
+          <td colSpan={COLS}>{error}</td>
         </tr>
       )}
     </>
   )
 }
 
-export default function TeamTable({ teams, getKey, onChanged }) {
+export default function TeamTable({ teams, callerTeamId, getKey, onChanged }) {
   return (
     <div className="tt-wrap">
       <table className="table tt-table">
@@ -144,15 +267,21 @@ export default function TeamTable({ teams, getKey, onChanged }) {
             <th className="ta-r">TPM</th>
             <th className="ta-r">Monthly budget</th>
             <th className="ta-r">Spent</th>
+            <th>Models</th>
+            <th>Admin</th>
             <th />
           </tr>
         </thead>
         <tbody>
           {teams.map((t) => (
-            <TeamRow key={t.id} team={t} getKey={getKey} onChanged={onChanged} />
+            <TeamRow key={t.id} team={t} callerTeamId={callerTeamId} getKey={getKey} onChanged={onChanged} />
           ))}
         </tbody>
       </table>
+      <p className="tt-create-note">
+        Creating new teams needs Postgres-backed team storage — not in this release.
+        Teams are defined in <code className="num">configs/teams.yaml</code> for now.
+      </p>
     </div>
   )
 }

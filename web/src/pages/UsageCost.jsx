@@ -1,7 +1,7 @@
 // Usage & Cost: month-to-date team spend against budget (Step 6.1), the
-// Redis-vs-request-log reconciliation check (Step 6.1), and the cost trend
-// split by provider / model / team (Step 6.2). Attribution panels and team
-// management arrive in Steps 6.3 and 6.4.
+// Redis-vs-request-log reconciliation check (Step 6.1), the cost trend split by
+// provider / model / team (Step 6.2), and the cache / routing / fallback
+// attribution panels (Step 6.3). Team management moved to Settings in Step 6.4.
 import { useCallback, useState } from 'react'
 import { fetchMe } from '../api/session.js'
 import { fetchTeams } from '../api/teams.js'
@@ -10,13 +10,24 @@ import { fetchQualityFeedback } from '../api/quality.js'
 import { Card } from '../components/primitives.jsx'
 import { CostTrendChart } from '../components/charts.jsx'
 import SpendCard from '../components/SpendCard.jsx'
-import TeamTable from '../components/TeamTable.jsx'
 import { EmptyState, ErrorState, Loading } from '../components/states.jsx'
 import { useAuth } from '../hooks/useAuth.js'
 import { usePolling } from '../hooks/usePolling.js'
-import { formatUSD } from '../utils/format.js'
+import { formatUSD, isZeroUSD } from '../utils/format.js'
 import '../components/charts.css'
 import './UsageCost.css'
+
+// A small inline check — a verification mark on the reconciliation line, not a
+// status pill. 12px, healthy colour (Step 3, DESIGN.md: no emoji as status).
+function CheckMark() {
+  return (
+    <svg className="recon-check" width="12" height="12" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"
+      aria-hidden="true">
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
+  )
+}
 
 const RANGES = ['24h', '7d', '30d']
 
@@ -47,6 +58,7 @@ function ReconStrip({ state }) {
   if (r.reconciled && !r.degraded) {
     return (
       <p className="recon recon-ok" role="status">
+        <CheckMark />
         Redis budget counters and the request log agree for {r.period}.
       </p>
     )
@@ -87,6 +99,23 @@ function AttributionPanel({ title, state, empty, render }) {
   )
 }
 
+// One attribution headline figure. Sign convention: a negative `usd` is money
+// saved (shown −, healthy colour), a positive one is money added (shown +,
+// warn colour). A value that rounds to $0.00 renders neutral — no sign, no
+// status colour, --text-muted — because at that size the sign is noise (Step 3).
+function CostFigure({ usd }) {
+  if (isZeroUSD(usd)) {
+    return <span className="attr-value num attr-value-flat">{formatUSD(0)}</span>
+  }
+  const saved = usd < 0
+  return (
+    <span className={`attr-value num ${saved ? 'attr-value-ok' : 'attr-value-warn'}`}>
+      {saved ? '−' : '+'}
+      {formatUSD(Math.abs(usd))}
+    </span>
+  )
+}
+
 // Cache savings are priced from the real token counts on cache-hit rows, so
 // the headline is money genuinely not spent rather than an estimate. A null
 // panel means the gateway has no pricing table, not that savings were zero.
@@ -95,15 +124,25 @@ function CacheAttribution({ data }) {
   if (!c) return <span className="attr-context">The semantic cache is not enabled on this gateway.</span>
 
   const total = c.hits + c.misses
+  // Hits served by a model with no configured price — the mock provider under a
+  // load test, or a since-removed model — can't be priced, so a large hit count
+  // can still sit against a near-zero saving. Say so rather than let the number
+  // look broken (Step 3 investigation: 143 hits / $0.0001 saved was real, not a
+  // bug — 140 of those hits were mock-provider traffic).
+  const unpriced = c.hits - c.priced_hits
   return (
     <>
-      <span className={`attr-value num ${c.saved_micros > 0 ? 'attr-value-ok' : ''}`}>
-        {c.saved_micros > 0 ? `−${formatUSD(c.saved_usd)}` : formatUSD(0)}
-      </span>
+      <CostFigure usd={-c.saved_usd} />
       <span className="attr-context">
         {total === 0
           ? 'no cache lookups in this range'
           : `${c.hits} of ${total} lookups hit · ${(c.hit_rate * 100).toFixed(1)}% hit rate`}
+        {unpriced > 0 && total > 0 && (
+          <>
+            {' · '}
+            {unpriced} of {c.hits} served by a model with no price, not counted
+          </>
+        )}
       </span>
     </>
   )
@@ -119,9 +158,7 @@ function RoutingAttribution({ data }) {
 
   return (
     <>
-      <span className={`attr-value num ${r.saved_micros > 0 ? 'attr-value-ok' : ''}`}>
-        {r.saved_micros > 0 ? `−${formatUSD(r.saved_usd)}` : formatUSD(0)}
-      </span>
+      <CostFigure usd={-r.saved_usd} />
       <span className="attr-context">
         {r.routed === 0
           ? 'no routed requests in this range'
@@ -133,14 +170,12 @@ function RoutingAttribution({ data }) {
 
 function FallbackAttribution({ data }) {
   const { net_usd: net, extra_usd: extra, saved_usd: saved } = data.fallback
-  const tone = net > 0 ? 'warn' : net < 0 ? 'ok' : 'flat'
-  const headline =
-    net > 0 ? `+${formatUSD(net)}` : net < 0 ? `−${formatUSD(-net)}` : formatUSD(0)
+  const zero = isZeroUSD(net)
   return (
     <>
-      <span className={`attr-value num attr-value-${tone}`}>{headline}</span>
+      <CostFigure usd={net} />
       <span className="attr-context">
-        {net > 0 ? 'added by fallback' : net < 0 ? 'saved by fallback' : 'no net effect'}
+        {zero ? 'no net effect' : net > 0 ? 'added by fallback' : 'saved by fallback'}
         {' · '}
         {formatUSD(extra)} added, {formatUSD(saved)} saved
       </span>
@@ -336,18 +371,6 @@ export default function UsageCost() {
       </Card>
 
       {isAdmin && <QualityFeedbackCard getKey={getKey} range={range} />}
-
-      {isAdmin && (
-        <Card title="Team management" className="usage-placeholder">
-          {spend.loading && !spend.data ? (
-            <Loading rows={3} />
-          ) : spend.error && !spend.data ? (
-            <ErrorState message="Could not load teams." onRetry={spend.refresh} />
-          ) : (
-            <TeamTable teams={teams} getKey={getKey} onChanged={spend.refresh} />
-          )}
-        </Card>
-      )}
     </>
   )
 }

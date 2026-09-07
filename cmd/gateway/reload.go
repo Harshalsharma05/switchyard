@@ -9,7 +9,10 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"os"
 	"sync/atomic"
 
 	"github.com/Harshalsharma05/switchyard/internal/admin"
@@ -43,6 +46,12 @@ type liveConfig struct {
 	// Step 8.2's routing starts from a tier the policy named, so it has no
 	// model to key on; both indexes share the same backing slices.
 	tierNames map[string][]resilience.Candidate
+
+	// configHash is a SHA-256 over the raw bytes of providers.yaml and
+	// teams.yaml as they were when this generation was built. The System panel
+	// shows it so an operator can tell at a glance whether the running config
+	// matches what is on disk; it changes on every reload by construction.
+	configHash string
 }
 
 // configStore is the atomic swap point behind every hot-reloadable
@@ -124,8 +133,21 @@ func (s *configStore) Update(id string, patch auth.TeamPatch) (auth.Team, error)
 	return s.current.Load().authRegistry.Update(id, patch)
 }
 
+func (s *configStore) RotateKey(id, newHash, newMasked string) (auth.Team, error) {
+	return s.current.Load().authRegistry.RotateKey(id, newHash, newMasked)
+}
+
+func (s *configStore) RevokeKey(id string) (auth.Team, error) {
+	return s.current.Load().authRegistry.RevokeKey(id)
+}
+
 func (s *configStore) Configs() []provider.Config {
 	return s.current.Load().registry.Configs()
+}
+
+// ConfigHash returns the fingerprint of the currently-live config files.
+func (s *configStore) ConfigHash() string {
+	return s.current.Load().configHash
 }
 
 // loadLiveConfig reads and validates configs/*.yaml and builds a fresh
@@ -133,6 +155,11 @@ func (s *configStore) Configs() []provider.Config {
 // both there and by reload, so the two can never drift into checking
 // different things.
 func loadLiveConfig(providersPath, teamsPath string) (*liveConfig, int, int, error) {
+	hash, err := configHash(providersPath, teamsPath)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+
 	providers, err := config.LoadProviders(providersPath)
 	if err != nil {
 		return nil, 0, 0, fmt.Errorf("loading provider config: %w", err)
@@ -164,7 +191,24 @@ func loadLiveConfig(providersPath, teamsPath string) (*liveConfig, int, int, err
 		calc:         budget.NewCalculator(pricing),
 		tiers:        byModel,
 		tierNames:    byName,
+		configHash:   hash,
 	}, len(providers.Configs), len(teams), nil
+}
+
+// configHash fingerprints the two config files the running gateway depends on.
+// A second read of files config.Load* also reads is cheap and only happens at
+// boot and on a manual reload — never on the request path.
+func configHash(providersPath, teamsPath string) (string, error) {
+	h := sha256.New()
+	for _, p := range []string{providersPath, teamsPath} {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return "", fmt.Errorf("hashing config %s: %w", p, err)
+		}
+		h.Write(b)
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // indexTiers flips config's tier-name-keyed map into the model-keyed one the

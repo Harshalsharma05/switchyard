@@ -115,6 +115,9 @@ func TestCacheAttributionPricesRealTokens(t *testing.T) {
 	if got.HitRate != 0.75 {
 		t.Fatalf("hit_rate = %v, want 0.75", got.HitRate)
 	}
+	if got.PricedHits != 3 {
+		t.Fatalf("priced_hits = %d, want 3 (both groups priced)", got.PricedHits)
+	}
 }
 
 // A model that has left configs/providers.yaml has no price. Understating the
@@ -134,6 +137,11 @@ func TestCacheAttributionSkipsUnpricedModel(t *testing.T) {
 
 	if got.SavedMicros != 100 {
 		t.Fatalf("saved_micros = %d, want 100 (retired model skipped)", got.SavedMicros)
+	}
+	// Only the priced group's hit counts; the UI uses the gap to explain the
+	// number.
+	if got.PricedHits != 1 {
+		t.Fatalf("priced_hits = %d, want 1 (retired model's hit not counted)", got.PricedHits)
 	}
 }
 
@@ -160,7 +168,7 @@ func attributionBody(t *testing.T, reader RequestLogReader, calc CostCalculator)
 	srv := httptest.NewServer(NewRouter(func() bool { return true },
 		testTeamStore(t), &fakeSpendReader{}, fakeProviderLister{}, fakeHealthReader{},
 		&fakeBreakerController{}, nil, fakeReloader, reader, requestLogRegistry(t),
-		nil, nil, calc, nil, QualityFeedbackConfig{}, false, testMetrics(t), discardLogger()))
+		nil, nil, calc, nil, QualityFeedbackConfig{}, false, nil, nil, testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)
 
 	resp := getWithKey(t, srv, "/admin/attribution?range=24h", "acme-key")

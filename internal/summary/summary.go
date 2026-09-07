@@ -124,6 +124,16 @@ func NewService(cfg Config) *Service {
 	return s
 }
 
+// Reachable probes whether Prometheus is up, for the System panel's dependency
+// row. configured is false when this gateway has no Prometheus URL at all —
+// which the panel shows as "not configured" rather than "down".
+func (s *Service) Reachable(ctx context.Context) (up bool, configured bool) {
+	if s.prom == nil {
+		return false, false
+	}
+	return s.prom.reachable(ctx), true
+}
+
 // Build returns the summary for opts, from cache when a recent one exists.
 func (s *Service) Build(ctx context.Context, opts Options) Result {
 	key := opts.Range + "\x00" + opts.TeamID

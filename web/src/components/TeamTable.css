@@ -1,5 +1,5 @@
 /* Team management table (Step 6.4). Uses the shared .table primitive; only its
-   own inline-edit bits live here. */
+   own inline-edit, key-action, and show-once bits live here. */
 .tt-wrap { overflow-x: auto; }
 
 .tt-name { color: var(--text-primary); }
@@ -8,9 +8,58 @@
   font-size: 11px;
   color: var(--text-muted);
 }
-.tt-fingerprint { color: var(--text-secondary); }
+.tt-muted { color: var(--text-muted); }
+.tt-admin { font-size: 12px; color: var(--status-info); }
 
 .tt-row-editing td { background: var(--bg-raised); }
+
+/* --- key column --- */
+.tt-key { min-width: 220px; }
+.tt-key-label { color: var(--text-secondary); }
+.tt-key-actions { margin-left: var(--space-2); white-space: nowrap; }
+
+/* Inline confirmation — never a modal (DESIGN.md). Shared by key rotate/revoke
+   and budget reset. */
+.tt-confirm {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* --- show-once key panel --- */
+.tt-showonce-row td {
+  padding: 0;
+  background: var(--bg-inset);
+}
+.tt-showonce {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: var(--space-2) 0;
+  padding: var(--space-3);
+  border-left: 2px solid var(--accent);
+}
+.tt-showonce-head { font-size: 12px; font-weight: 500; color: var(--text-primary); }
+.tt-showonce-keyrow { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
+.tt-showonce-key {
+  padding: var(--space-1) var(--space-2);
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  overflow-wrap: anywhere;
+}
+.tt-showonce-warn { margin: 0; font-size: 11px; color: var(--status-warn); }
+
+.tt-create-note {
+  margin: var(--space-3) 0 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}
 
 .tt-input {
   width: 96px;
@@ -41,7 +90,10 @@
 .tt-btn:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-raised); }
 .tt-btn:disabled { color: var(--text-muted); cursor: not-allowed; }
 
+.tt-btn-sm { height: 24px; font-size: 11px; }
 .tt-btn-primary { color: var(--accent); border-color: var(--accent); }
+/* Destructive: red border and text, never a red fill (DESIGN.md). */
+.tt-btn-danger { color: var(--status-error); border-color: var(--status-error); }
 
 .tt-error-row td {
   padding-top: var(--space-1);

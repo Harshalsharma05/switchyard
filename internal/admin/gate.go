@@ -8,9 +8,34 @@
 package admin
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
+
+	"github.com/Harshalsharma05/switchyard/internal/auth"
 )
+
+// adminTeamCtxKey carries the authenticated admin team from requireAdmin down to
+// the handler, so a mutating handler can attribute an audit entry to a real
+// identity instead of just a remote address. Unexported key type — nothing
+// outside this package sets or reads it.
+type adminTeamCtxKey struct{}
+
+// adminTeam returns the team requireAdmin authenticated, or nil when the gate
+// was inert (a registry-less test build).
+func adminTeam(r *http.Request) *auth.Team {
+	t, _ := r.Context().Value(adminTeamCtxKey{}).(*auth.Team)
+	return t
+}
+
+// actorID is the audit "who": the authenticated team's ID, or "unknown" when
+// the gate is inert.
+func actorID(r *http.Request) string {
+	if t := adminTeam(r); t != nil {
+		return t.ID
+	}
+	return "unknown"
+}
 
 // requireAdmin rejects any request whose bearer key is missing, unknown, or
 // belongs to a non-admin team. When authr is nil the gate is inert — the port
@@ -32,7 +57,8 @@ func requireAdmin(authr KeyAuthenticator, log *slog.Logger) func(http.Handler) h
 					"this endpoint requires an admin team key")
 				return
 			}
-			next.ServeHTTP(w, r)
+			ctx := context.WithValue(r.Context(), adminTeamCtxKey{}, team)
+			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }

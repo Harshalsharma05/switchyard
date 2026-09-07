@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/Harshalsharma05/switchyard/internal/admin"
@@ -180,6 +181,9 @@ func main() {
 func run() error {
 	log := newLogger()
 
+	startedAt := time.Now()
+	serviceVersion := envOr("SWITCHYARD_SERVICE_VERSION", defaultServiceVersion)
+
 	providersPath := envOr("SWITCHYARD_PROVIDERS_CONFIG", defaultProvidersPath)
 	teamsPath := envOr("SWITCHYARD_TEAMS_CONFIG", defaultTeamsPath)
 
@@ -206,7 +210,7 @@ func run() error {
 	// CLAUDE.md states for telemetry, applied here to startup as well.
 	shutdownTracing, err := telemetry.Setup(context.Background(), telemetry.Config{
 		ServiceName:    "switchyard",
-		ServiceVersion: envOr("SWITCHYARD_SERVICE_VERSION", defaultServiceVersion),
+		ServiceVersion: serviceVersion,
 		Environment:    envOr("SWITCHYARD_ENV", defaultEnvironment),
 		OTLPEndpoint:   envOr("SWITCHYARD_OTLP_ENDPOINT", defaultOTLPEndpoint),
 		SampleRatio:    floatOr("SWITCHYARD_TRACE_SAMPLE_RATIO", defaultTraceSampleRatio),
@@ -359,8 +363,10 @@ func run() error {
 	// interface stays nil in that case, which makes the middleware a no-op.
 	var reqLog proxy.RequestLogger
 	var reqLogReader admin.RequestLogReader
+	var auditRec admin.AuditRecorder
 	var logWriter *logstore.Writer
 	var retainer *logstore.Retainer
+	var dbPool *pgxpool.Pool // nil without POSTGRES_PASSWORD; the System panel probes it
 	if pw := os.Getenv("POSTGRES_PASSWORD"); pw != "" {
 		dbCfg := logstore.DBConfig{
 			Host:     envOr("SWITCHYARD_POSTGRES_HOST", defaultPostgresHost),
@@ -374,6 +380,7 @@ func run() error {
 			return fmt.Errorf("building request log pool: %w", err)
 		}
 		defer pool.Close()
+		dbPool = pool
 
 		logWriter = logstore.NewWriter(pool, logstore.Config{
 			QueueSize:     intOr("SWITCHYARD_REQUESTLOG_QUEUE_SIZE", defaultRequestLogQueueSize),
@@ -383,6 +390,10 @@ func run() error {
 		}, promMetrics, log)
 		reqLog = logWriter
 		reqLogReader = logWriter
+
+		// Step 6.4's audit log shares the request log's pool but not its buffered
+		// writer — audit writes are synchronous and must not be dropped.
+		auditRec = logstore.NewAuditLog(pool)
 
 		retainer = logstore.NewRetainer(pool, logstore.RetentionConfig{
 			Window:     durationOr("SWITCHYARD_RETENTION_WINDOW", defaultRetentionWindow),
@@ -525,11 +536,22 @@ func run() error {
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
 
+	sysInfo := &systemInfo{
+		version:    serviceVersion,
+		startedAt:  startedAt,
+		configHash: store,
+		redis:      redisClient,
+		db:         dbPool,
+		summary:    summarySvc,
+	}
+
 	adminSrv := &http.Server{
 		Addr: envOr("SWITCHYARD_ADMIN_ADDR", defaultAdminAddr),
 		Handler: admin.NewRouter(isReady, store, budgetTracker, store, healthMonitor, breakerRegistry, chaosAdapter{chaos}, newReloader(store, providersPath, teamsPath), reqLogReader, store, summarySvc, cacheTuner, store, complexityRouter,
 			admin.QualityFeedbackConfig{LowScoreThreshold: qualityCfg.Feedback.LowScoreThreshold, ExampleLimit: qualityCfg.Feedback.ExampleLimit},
 			qualityWorker != nil,
+			auditRec,
+			sysInfo,
 			promMetrics, log,
 			proxy.Recoverer(log),
 			proxy.RequestID,

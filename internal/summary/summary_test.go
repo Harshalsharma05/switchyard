@@ -55,6 +55,44 @@ func newService(t *testing.T, f *fakeProm) *Service {
 	return NewService(Config{PrometheusURL: srv.URL, CacheTTL: time.Minute, HTTPTimeout: time.Second})
 }
 
+func TestReachable(t *testing.T) {
+	t.Run("no url configured", func(t *testing.T) {
+		svc := NewService(Config{PrometheusURL: "", CacheTTL: time.Minute})
+		up, configured := svc.Reachable(context.Background())
+		if up || configured {
+			t.Errorf("up=%v configured=%v, want false/false", up, configured)
+		}
+	})
+
+	t.Run("healthy endpoint", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/-/healthy" {
+				t.Errorf("probed %s, want /-/healthy", r.URL.Path)
+			}
+			w.WriteHeader(http.StatusOK)
+		}))
+		t.Cleanup(srv.Close)
+		svc := NewService(Config{PrometheusURL: srv.URL, CacheTTL: time.Minute, HTTPTimeout: time.Second})
+
+		up, configured := svc.Reachable(context.Background())
+		if !up || !configured {
+			t.Errorf("up=%v configured=%v, want true/true", up, configured)
+		}
+	})
+
+	t.Run("unreachable", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		url := srv.URL
+		srv.Close() // now nothing is listening
+
+		svc := NewService(Config{PrometheusURL: url, CacheTTL: time.Minute, HTTPTimeout: 200 * time.Millisecond})
+		up, configured := svc.Reachable(context.Background())
+		if up || !configured {
+			t.Errorf("up=%v configured=%v, want false/true", up, configured)
+		}
+	})
+}
+
 func TestBuildScopesTeamLabelledMetrics(t *testing.T) {
 	f := &fakeProm{value: "42"}
 	svc := newService(t, f)

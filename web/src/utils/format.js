@@ -19,6 +19,13 @@ export function formatUSD(n) {
   return `$${n.toFixed(2)}`
 }
 
+// True when a dollar amount rounds to $0.00 at cent precision. Below this a
+// signed, status-coloured cost figure is noise, not signal — Usage & Cost
+// renders it as a neutral $0.00 instead (Step 3).
+export function isZeroUSD(n) {
+  return n == null || Math.round(n * 100) === 0
+}
+
 // Micro-dollar precision for a single cost value, where formatUSD's two
 // decimals would round a real sub-cent request cost to $0.00.
 export function formatMicroDollars(micros) {

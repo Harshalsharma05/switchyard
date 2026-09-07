@@ -1,0 +1,87 @@
+/* Settings — teams, audit log, and system info. Section rhythm plus the audit
+   table, the system definition list, and the reload control. Team-table styling
+   lives in TeamTable.css. */
+
+.settings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+/* --- audit log --- */
+.audit-wrap { overflow-x: auto; }
+.audit-muted { color: var(--text-muted); }
+.audit-action {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--status-info);
+}
+.audit-change {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.audit-delta { font-size: 12px; }
+.audit-field {
+  margin-right: var(--space-2);
+  color: var(--text-secondary);
+}
+.audit-arrow { color: var(--text-muted); }
+
+.audit-pager {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+.audit-pager-info { font-size: 12px; color: var(--text-muted); }
+.audit-pager-btns { margin-left: auto; display: inline-flex; gap: var(--space-2); }
+
+/* --- system panel --- */
+.sys {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.sys-list {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-2) var(--space-4);
+  margin: 0;
+}
+.sys-list dt { font-size: 12px; color: var(--text-secondary); }
+.sys-list dd { margin: 0; font-size: 13px; color: var(--text-primary); }
+
+.sys-deps { display: flex; flex-wrap: wrap; gap: var(--space-4); }
+.sys-dep { display: inline-flex; align-items: center; gap: var(--space-2); }
+.sys-dep-name { font-size: 12px; color: var(--text-secondary); }
+
+.sys-sub {
+  display: block;
+  margin-bottom: var(--space-2);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.sys-provider-list { margin: 0; padding-left: var(--space-4); }
+.sys-provider-list li { font-size: 12px; margin-top: 2px; }
+
+.sys-reload {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+.sys-reload-ok { font-size: 12px; color: var(--status-healthy); }
+.sys-reload-err { font-size: 12px; color: var(--status-error); }
+.sys-note {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.sys-note code, .tt-create-note code { color: var(--text-secondary); }

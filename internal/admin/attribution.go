@@ -26,8 +26,17 @@ type fallbackAttrView struct {
 // is the denominator that makes the number interpretable: savings without a
 // hit count says nothing about whether the cache is working.
 type cacheAttrView struct {
-	Hits        int64   `json:"hits"`
-	Misses      int64   `json:"misses"`
+	Hits   int64 `json:"hits"`
+	Misses int64 `json:"misses"`
+
+	// PricedHits is how many of Hits were served by a model with a configured
+	// price and so could contribute to SavedMicros. It is less than Hits when
+	// hits were served by an unpriced model — the mock provider under a load
+	// test, or a model since removed from providers.yaml — and the frontend
+	// says so rather than presenting a misleadingly small saving as the whole
+	// story (Step 3 investigation).
+	PricedHits int64 `json:"priced_hits"`
+
 	HitRate     float64 `json:"hit_rate"`
 	SavedMicros int64   `json:"saved_micros"`
 	SavedUSD    float64 `json:"saved_usd"`
@@ -156,14 +165,16 @@ func cacheAttribution(r *http.Request, reqLog RequestLogReader, calc CostCalcula
 	for _, g := range saved.Groups {
 		micros, err := calc.Cost(g.Model, int(g.InputTokens), int(g.OutputTokens))
 		if err != nil {
-			// A model that has since left configs/providers.yaml has no price.
-			// Skipping it understates savings, which is the safe direction —
-			// far better than failing a report that is otherwise correct.
+			// A model with no price — the mock provider, or one since removed
+			// from configs/providers.yaml. Skipping it understates savings,
+			// which is the safe direction, and PricedHits lets the UI explain
+			// the gap rather than the number just looking wrong.
 			log.WarnContext(r.Context(), "pricing cache savings",
 				slog.String("model", g.Model), slog.Any("error", err))
 			continue
 		}
 		view.SavedMicros += micros
+		view.PricedHits += g.Hits
 	}
 	view.SavedUSD = microsToUSD(view.SavedMicros)
 	return view, nil

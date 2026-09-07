@@ -34,6 +34,23 @@ type promResponse struct {
 	} `json:"data"`
 }
 
+// reachable probes Prometheus's own health endpoint. It is a liveness check for
+// the System panel, not a query — a 200 from /-/healthy means the process is up
+// and serving, which is all the panel needs to distinguish "up" from "down".
+func (c *promClient) reachable(ctx context.Context) bool {
+	u := strings.TrimRight(c.base, "/") + "/-/healthy"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return false
+	}
+	defer func() { _, _ = io.Copy(io.Discard, resp.Body); resp.Body.Close() }()
+	return resp.StatusCode == http.StatusOK
+}
+
 // queryScalar runs promql and returns the first sample's value. ok is false
 // when the query succeeded but matched nothing, or resolved to NaN/Inf — a
 // "no data yet" the caller renders as null, distinct from an error.

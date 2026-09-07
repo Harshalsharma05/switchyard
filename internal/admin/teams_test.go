@@ -40,7 +40,7 @@ func testTeamStore(t *testing.T) *auth.Registry {
 			ID: "acme", Name: "Acme Corp", KeyHash: auth.HashKey("acme-key"),
 			AllowedProviders: []string{"groq"}, AllowedModels: []string{"m"},
 			RateLimits: auth.RateLimits{RPM: 60, TPM: 100_000}, MonthlyBudgetMicros: 50_000_000,
-			Priority: auth.PriorityRealtime,
+			Priority: auth.PriorityRealtime, IsAdmin: true,
 		},
 		{
 			ID: "globex", Name: "Globex Inc", KeyHash: auth.HashKey("globex-key"),
@@ -97,7 +97,7 @@ func newTestAdminServer(t *testing.T, teams TeamStore, spend SpendReader, provid
 
 func newTestAdminServerWithReload(t *testing.T, teams TeamStore, spend SpendReader, providers ProviderLister, reload Reloader) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(NewRouter(func() bool { return true }, teams, spend, providers, fakeHealthReader{}, &fakeBreakerController{}, nil, reload, nil, nil, nil, nil, nil, nil, QualityFeedbackConfig{}, false, testMetrics(t), discardLogger()))
+	srv := httptest.NewServer(NewRouter(func() bool { return true }, teams, spend, providers, fakeHealthReader{}, &fakeBreakerController{}, nil, reload, nil, nil, nil, nil, nil, nil, QualityFeedbackConfig{}, false, nil, nil, testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -195,15 +195,22 @@ func TestGetTeamSuccess(t *testing.T) {
 	if v.ID != "acme" || v.Name != "Acme Corp" {
 		t.Errorf("v = %+v, want acme/Acme Corp", v)
 	}
-
-	// Key metadata is a short one-way fingerprint — present, distinctive, and
-	// never the full digest (Step 6.4).
-	full := auth.HashKey("acme-key")
-	if v.KeyFingerprint == "" || v.KeyFingerprint == full || len(v.KeyFingerprint) >= len(full) {
-		t.Errorf("key_fingerprint = %q, want a short prefix of %q", v.KeyFingerprint, full)
+	if !v.IsAdmin {
+		t.Error("is_admin = false on GET /admin/teams/{id}, want true — the Settings table needs this")
 	}
-	if !strings.HasPrefix(full, v.KeyFingerprint) {
-		t.Errorf("key_fingerprint %q is not a prefix of the digest", v.KeyFingerprint)
+
+	// Key metadata: a config-seeded team reports source "config", no mask (the
+	// gateway never saw the plaintext), and no created-at. The hash appears
+	// nowhere — Step 1's rule.
+	if v.Key.Source != auth.KeySourceConfig {
+		t.Errorf("key.source = %q, want %q", v.Key.Source, auth.KeySourceConfig)
+	}
+	if v.Key.Masked != "" || v.Key.CreatedAt != nil {
+		t.Errorf("key = %+v, want no mask and no created-at for a config-seeded team", v.Key)
+	}
+	body, _ := json.Marshal(v)
+	if strings.Contains(string(body), auth.HashKey("acme-key")) {
+		t.Error("GET /admin/teams/{id} response contains the key hash")
 	}
 }
 
@@ -406,5 +413,123 @@ func TestResetBudgetFailureIs503(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+}
+
+// --- POST /admin/teams/{id}/key/rotate ------------------------------------
+
+// The Step 1 headline: the plaintext key is returned exactly once, the old key
+// dies immediately, the new one works with no restart, and no later read gives
+// the plaintext back.
+func TestRotateKeyReturnsPlaintextOnceThenMasked(t *testing.T) {
+	store := testTeamStore(t)
+	srv := newTestAdminServer(t, store, &fakeSpendReader{spent: map[string]int64{}}, fakeProviderLister{})
+
+	resp, err := http.Post(srv.URL+"/admin/teams/globex/key/rotate", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, body)
+	}
+
+	var rr rotateKeyResponse
+	if err := json.NewDecoder(resp.Body).Decode(&rr); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !strings.HasPrefix(rr.APIKey, "sk-switchyard-globex-") {
+		t.Errorf("api_key = %q, want an sk-switchyard-globex- key", rr.APIKey)
+	}
+	if rr.Key.Source != auth.KeySourceRotated || rr.Key.CreatedAt == nil {
+		t.Errorf("key metadata = %+v, want source rotated with a created-at", rr.Key)
+	}
+	if !strings.HasSuffix(rr.Key.Masked, rr.APIKey[len(rr.APIKey)-4:]) {
+		t.Errorf("masked %q does not end in the key's last four", rr.Key.Masked)
+	}
+
+	// Old key rejected, new key accepted — immediately, against the same store
+	// a real Auth middleware authenticates against.
+	if _, err := store.Authenticate("globex-key"); !errors.Is(err, auth.ErrUnknownKey) {
+		t.Errorf("old key still authenticates after rotation: %v", err)
+	}
+	if _, err := store.Authenticate(rr.APIKey); err != nil {
+		t.Errorf("rotated key does not authenticate: %v", err)
+	}
+
+	// A subsequent GET never carries the plaintext.
+	getResp, err := http.Get(srv.URL + "/admin/teams/globex")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer getResp.Body.Close()
+	body, _ := io.ReadAll(getResp.Body)
+	if strings.Contains(string(body), rr.APIKey) {
+		t.Error("GET /admin/teams/{id} returned the plaintext key after rotation")
+	}
+	var v teamView
+	json.Unmarshal(body, &v)
+	if v.Key.Source != auth.KeySourceRotated || v.Key.Masked != rr.Key.Masked {
+		t.Errorf("GET key metadata = %+v, want rotated with mask %q", v.Key, rr.Key.Masked)
+	}
+}
+
+func TestRotateKeyUnknownTeamIs404(t *testing.T) {
+	store := testTeamStore(t)
+	srv := newTestAdminServer(t, store, &fakeSpendReader{}, fakeProviderLister{})
+
+	resp, err := http.Post(srv.URL+"/admin/teams/nope/key/rotate", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+// --- DELETE /admin/teams/{id}/key ----------------------------------------
+
+func TestRevokeKeyRemovesAuthentication(t *testing.T) {
+	store := testTeamStore(t)
+	srv := newTestAdminServer(t, store, &fakeSpendReader{}, fakeProviderLister{})
+
+	req, _ := http.NewRequest(http.MethodDelete, srv.URL+"/admin/teams/globex/key", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, body)
+	}
+
+	var v teamView
+	json.NewDecoder(resp.Body).Decode(&v)
+	if v.Key.Source != auth.KeySourceRevoked {
+		t.Errorf("key.source = %q, want revoked", v.Key.Source)
+	}
+	if _, err := store.Authenticate("globex-key"); !errors.Is(err, auth.ErrUnknownKey) {
+		t.Errorf("revoked team still authenticates: %v", err)
+	}
+}
+
+// Revoking the key the request is authenticated with would lock the operator
+// out; it must be refused. Needs a real authenticator, so it runs on the
+// auth-wired server (acme = admin).
+func TestRevokeOwnKeyIsRefused(t *testing.T) {
+	srv := authedServer(t, &fakeSpendReader{})
+
+	req, _ := http.NewRequest(http.MethodDelete, srv.URL+"/admin/teams/acme/key", nil)
+	req.Header.Set("Authorization", "Bearer acme-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", resp.StatusCode)
 	}
 }

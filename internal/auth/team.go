@@ -10,8 +10,11 @@
 package auth
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
+	"time"
 )
 
 // Priority controls which requests are shed first when a team is near its
@@ -57,7 +60,24 @@ type Team struct {
 	// IsAdmin lets this team read other teams' rows on the admin API's
 	// request-log endpoints. Enforced server-side in the handler.
 	IsAdmin bool
+
+	// Key lifecycle metadata (Part 2, Step 6.4). None of it is the key or the
+	// hash: KeySource says where the current key came from, KeyMasked is a
+	// display-only "sk-…a097" for a key this gateway minted, and KeyCreatedAt is
+	// when it did. A config-seeded team has KeySourceConfig, an empty KeyMasked
+	// (the gateway never saw its plaintext), and a nil KeyCreatedAt. These live
+	// only in memory — a restart or a POST /admin/reload rebuilds the registry
+	// from configs/teams.yaml and every rotation is lost with them.
+	KeySource    string
+	KeyMasked    string
+	KeyCreatedAt *time.Time
 }
+
+const (
+	KeySourceConfig  = "config"  // key hash came from configs/teams.yaml
+	KeySourceRotated = "rotated" // key was minted by POST /admin/teams/{id}/key/rotate
+	KeySourceRevoked = "revoked" // key was removed by DELETE /admin/teams/{id}/key
+)
 
 // AllowsModel reports whether the team's allowlist includes model. This is
 // what Step 3.1's 403 check calls once the request body is decoded and the
@@ -99,4 +119,30 @@ func (t Team) AllowsProvider(provider string) bool {
 func HashKey(raw string) string {
 	sum := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(sum[:])
+}
+
+// GenerateKey mints a new plaintext API key for a team, shaped like the dev keys
+// already in configs/teams.yaml: sk-switchyard-<team>-<32 hex chars>.
+//
+// crypto/rand, not math/rand: this is a credential. math/rand is a deterministic
+// PRNG whose output an attacker who learns the seed can reproduce, which is why
+// it returns an error — a failure of the OS entropy source must abort the
+// rotation, not silently fall back to something guessable.
+func GenerateKey(teamID string) (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("generating api key: %w", err)
+	}
+	return fmt.Sprintf("sk-switchyard-%s-%s", teamID, hex.EncodeToString(b[:])), nil
+}
+
+// MaskKey renders a key for display: a fixed prefix and the last four
+// characters, enough for an operator to tell one key from another and far too
+// little to use. Only ever called on a key this process just generated — a
+// config-seeded key's plaintext is never seen, so it has no mask.
+func MaskKey(raw string) string {
+	if len(raw) < 4 {
+		return "sk-…"
+	}
+	return "sk-…" + raw[len(raw)-4:]
 }

@@ -31,7 +31,7 @@ type Middleware func(http.Handler) http.Handler
 // Route paths carry an explicit /admin prefix even though the whole listener
 // is already the admin port, leaving room for /metrics and future operator
 // endpoints to live at the root without colliding with this namespace.
-func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers ProviderLister, healthReader HealthReader, breakers BreakerController, chaos ChaosController, reload Reloader, requestLog RequestLogReader, authr KeyAuthenticator, summarySvc SummaryService, cacheTuner CacheTuner, costCalc CostCalculator, routing RoutingInfo, qualityFeedback QualityFeedbackConfig, qualityEnabled bool, metrics *telemetry.Metrics, log *slog.Logger, middleware ...Middleware) http.Handler {
+func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers ProviderLister, healthReader HealthReader, breakers BreakerController, chaos ChaosController, reload Reloader, requestLog RequestLogReader, authr KeyAuthenticator, summarySvc SummaryService, cacheTuner CacheTuner, costCalc CostCalculator, routing RoutingInfo, qualityFeedback QualityFeedbackConfig, qualityEnabled bool, audit AuditRecorder, system SystemReporter, metrics *telemetry.Metrics, log *slog.Logger, middleware ...Middleware) http.Handler {
 	r := chi.NewRouter()
 
 	for _, mw := range middleware {
@@ -67,9 +67,22 @@ func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers 
 		r.Route("/admin/teams", func(r chi.Router) {
 			r.Get("/", listTeams(teams, spend, log))
 			r.Get("/{id}", getTeam(teams, spend, log))
-			r.Patch("/{id}", patchTeam(teams, spend, log))
-			r.Post("/{id}/reset-budget", resetBudget(teams, spend, log))
+			r.Patch("/{id}", patchTeam(teams, spend, audit, log))
+			r.Post("/{id}/reset-budget", resetBudget(teams, spend, audit, log))
+
+			// Step 6.4's key lifecycle. Both write an audit entry before they
+			// mutate the registry — a credential change the audit log missed is
+			// the failure this ordering rules out.
+			r.Post("/{id}/key/rotate", rotateKey(teams, audit, log))
+			r.Delete("/{id}/key", revokeKey(teams, audit, log))
 		})
+
+		// Step 6.4's audit view: every mutation above, newest first, paginated.
+		r.Get("/admin/audit", listAudit(audit, log))
+
+		// Step 6.4's System panel: version, uptime, config hash, and live
+		// dependency probes. Admin-gated with the rest of Settings.
+		r.Get("/admin/system", handleSystem(system, providers, log))
 
 		// Step 6.1: cross-checks Redis budget counters against the request log.
 		r.Get("/admin/reconciliation", handleReconciliation(teams, spend, requestLog, log))
@@ -78,7 +91,7 @@ func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers 
 		// precedence is not the only thing keeping "health" from being read as a
 		// provider name; the literal route is more specific either way.
 		r.Post("/admin/providers/{name}/breaker/reset", resetBreaker(breakers, providers, log))
-		r.Post("/admin/reload", reloadConfig(reload, log))
+		r.Post("/admin/reload", reloadConfig(reload, audit, log))
 
 		// Step 7.3's threshold tuning sweep. Answers 404 when the cache is
 		// disabled, matching the chaos routes: the routing table stays the

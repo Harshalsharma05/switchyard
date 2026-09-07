@@ -82,13 +82,28 @@ export function OverheadChart({ points, range }) {
   )
 }
 
+// Below this many buckets a "trend" is a couple of points — a line or a row of
+// bars that reads as more than it is. Show the empty state instead.
+const COST_TREND_MIN_POINTS = 3
+
 // Cost over time, stacked by provider / model / team. Bars for the same reason
 // TrafficChart uses them — cost per fixed bucket is a discrete total. Only the
 // top three contributors get their own series; the rest fold into "Other" so
 // the chart never exceeds the defined palette.
 export function CostTrendChart({ data, range }) {
-  if (!data?.series?.length) {
-    return <EmptyState>No spend in this window yet.</EmptyState>
+  const series = data?.series ?? []
+  const grandTotalMicros = series.reduce((sum, p) => sum + (p.total_micros ?? 0), 0)
+
+  // Too few points, or every bucket rounds to $0.00 (mock-provider traffic,
+  // or a window with almost no real spend): a chart of identical zero ticks is
+  // worse than saying there is nothing to show yet (Step 3).
+  if (series.length < COST_TREND_MIN_POINTS || Math.round(grandTotalMicros / 1e4) === 0) {
+    return (
+      <EmptyState>
+        Not enough cost data in this window to chart a trend yet. It fills in as
+        priced requests accumulate.
+      </EmptyState>
+    )
   }
 
   const totals = {}

@@ -14,12 +14,11 @@ type RoutingInfo interface {
 	Options() []string
 }
 
-// meView is GET /admin/me's response: the caller's own team, plus the admin
-// flag the request-log and gated routes branch on. It embeds teamView so the
-// identity payload and the /admin/teams payload stay one shape.
+// meView is GET /admin/me's response: the caller's own team (teamView already
+// carries the admin flag the request-log and gated routes branch on) plus the
+// routing options only the identity call needs.
 type meView struct {
 	teamView
-	IsAdmin bool `json:"is_admin"`
 
 	// RoutingOptions lists what this gateway accepts in `model` beyond real
 	// model names — the auto keyword and each routable tier. Empty when
@@ -51,7 +50,6 @@ func handleMe(authr KeyAuthenticator, spend SpendReader, routing RoutingInfo, lo
 
 		view := meView{
 			teamView:       newTeamView(*team, readSpent(r.Context(), spend, log, team.ID)),
-			IsAdmin:        team.IsAdmin,
 			RoutingOptions: options,
 		}
 		writeJSON(w, log, http.StatusOK, view)

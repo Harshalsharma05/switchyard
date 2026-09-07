@@ -14,7 +14,15 @@
   font-size: 12px;
   border-radius: var(--radius-control);
 }
-.recon-ok { color: var(--text-muted); }
+.recon-ok {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-muted);
+}
+/* The check reads as an active verification, not decoration — healthy colour
+   on a muted line, small (Step 3). */
+.recon-check { flex: none; color: var(--status-healthy); }
 .recon-warn { color: var(--status-warn); background: var(--status-warn-bg); }
 .recon-list { margin: var(--space-1) 0 0; padding-left: var(--space-4); }
 .recon-list li { margin-top: 2px; }
@@ -69,6 +77,8 @@
 .attr-value { font-size: 22px; font-weight: 500; color: var(--text-primary); }
 .attr-value-warn { color: var(--status-warn); }
 .attr-value-ok { color: var(--status-healthy); }
+/* A cost that rounds to $0.00: neutral, no sign, no status colour (Step 3). */
+.attr-value-flat { color: var(--text-muted); }
 .attr-context { font-size: 11px; color: var(--text-muted); }
 
 @media (max-width: 900px) {
