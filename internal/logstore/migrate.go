@@ -74,9 +74,9 @@ func Migrate(ctx context.Context, conn *pgx.Conn, src fs.FS) ([]string, error) {
 	return ran, nil
 }
 
-// MigrateDSN opens one connection, runs Migrate against it, and closes it. It
-// is the whole job of cmd/migrate, and the request-log setup path in
-// cmd/gateway calls it too.
+// MigrateDSN opens one connection, runs Migrate against it, and closes it.
+// cmd/migrate is its only caller — the gateway never migrates itself, which is
+// why the compose gateway service waits on migrate completing.
 func MigrateDSN(ctx context.Context, dsn string, src fs.FS) ([]string, error) {
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {

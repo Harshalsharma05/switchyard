@@ -196,6 +196,11 @@ services:
     # Override the image's ENTRYPOINT (the gateway) with the migrate binary
     # baked into the same image.
     entrypoint: ["/app/migrate"]
+    # Same mount as the gateway. The image already bakes configs/, but the
+    # Tier 1 Step 2.2 team seed must import the teams.yaml the operator
+    # actually has, not the one that was current when the image was built.
+    volumes:
+      - ../configs:/app/configs:ro
     env_file:
       - ../.env
     environment:

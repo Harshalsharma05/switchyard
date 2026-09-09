@@ -1,5 +1,18 @@
 # SwitchYard team registry.
 #
+# FIRST-BOOT SEED ONLY. Teams live in Postgres as of Tier 1 Phase 2. This file
+# is imported by `cmd/migrate` exactly once, into an empty `teams` table, and is
+# never read again while any team exists — so an admin-API edit, a key rotation,
+# or a team created through the console is not reverted by the next deploy.
+#
+# What that means in practice:
+#   - Editing a team here has no effect on a database that already has teams.
+#     Use the admin API or the Settings screen instead.
+#   - Deleting this file after the import is supported; `cmd/migrate` skips the
+#     seed and exits cleanly.
+#   - To re-seed from this file you must first empty the `teams` table, which is
+#     a deliberate act, not something a deploy can do by accident.
+#
 # `api_key_hash` is the SHA-256 hex digest of the team's plaintext key, never
 # the key itself — this file is committed to git. Generate one with:
 #
