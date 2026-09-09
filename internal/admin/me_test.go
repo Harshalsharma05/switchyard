@@ -14,7 +14,7 @@ func authedServer(t *testing.T, spend SpendReader) *httptest.Server {
 	t.Helper()
 	reg := requestLogRegistry(t)
 	srv := httptest.NewServer(NewRouter(func() bool { return true },
-		reg, spend, fakeProviderLister{}, fakeHealthReader{}, &fakeBreakerController{},
+		registryStore{reg: reg}, spend, fakeProviderLister{}, fakeHealthReader{}, &fakeBreakerController{},
 		nil, fakeReloader, nil, reg, nil, nil, nil, nil, QualityFeedbackConfig{}, false, nil, nil, testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)
 	return srv

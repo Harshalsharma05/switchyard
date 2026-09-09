@@ -73,6 +73,8 @@ func TestNewMetricsRegistersEveryFamily(t *testing.T) {
 		"switchyard_requestlog_queue_depth",
 		"switchyard_retention_rows_deleted_total",
 		"switchyard_retention_last_sweep_timestamp_seconds",
+		"switchyard_team_snapshot_timestamp_seconds",
+		"switchyard_team_store_degraded",
 		"switchyard_panics_total",
 		"switchyard_cache_lookups_total",
 		"switchyard_cache_degraded_total",

@@ -54,12 +54,20 @@ func NewRegistry(teams []Team) (*Registry, error) {
 	byID := make(map[string]*Team, len(teams))
 
 	for _, t := range teams {
+		team := t
+		byID[t.ID] = &team
+
+		// A revoked team has no hash and simply is not indexed by one. Skipping
+		// rather than indexing "" matters now that teams come from Postgres: two
+		// revoked teams would otherwise collide with each other and fail the
+		// whole build, taking every other team down with them.
+		if t.KeyHash == "" {
+			continue
+		}
 		if existing, dup := byHash[t.KeyHash]; dup {
 			return nil, fmt.Errorf("teams %q and %q share the same api_key_hash", existing.ID, t.ID)
 		}
-		team := t
 		byHash[t.KeyHash] = &team
-		byID[t.ID] = &team
 	}
 
 	return &Registry{byHash: byHash, byID: byID}, nil
@@ -120,6 +128,38 @@ type TeamPatch struct {
 	MonthlyBudgetMicros *int64
 }
 
+// Apply merges the patch onto t and validates the result against the same
+// rules config.LoadTeams enforces at boot, returning the new value without
+// touching t.
+//
+// Separate from Update so a caller that must persist the change before it is
+// visible — the Postgres-backed store in internal/teamstore — can compute and
+// validate the merged team before it writes, and get the identical answer
+// Update would produce.
+func (p TeamPatch) Apply(t Team) (Team, error) {
+	updated := t
+	if p.RPM != nil {
+		updated.RateLimits.RPM = *p.RPM
+	}
+	if p.TPM != nil {
+		updated.RateLimits.TPM = *p.TPM
+	}
+	if p.MonthlyBudgetMicros != nil {
+		updated.MonthlyBudgetMicros = *p.MonthlyBudgetMicros
+	}
+
+	if updated.RateLimits.RPM <= 0 {
+		return Team{}, fmt.Errorf("rpm must be a positive integer, got %d", updated.RateLimits.RPM)
+	}
+	if updated.RateLimits.TPM <= 0 {
+		return Team{}, fmt.Errorf("tpm must be a positive integer, got %d", updated.RateLimits.TPM)
+	}
+	if updated.MonthlyBudgetMicros <= 0 {
+		return Team{}, fmt.Errorf("monthly budget must be positive, got %d micro-dollars", updated.MonthlyBudgetMicros)
+	}
+	return updated, nil
+}
+
 // Update applies patch to one team and returns the result.
 //
 // It never mutates the existing *Team in place — see the Registry doc
@@ -135,25 +175,9 @@ func (r *Registry) Update(id string, patch TeamPatch) (Team, error) {
 		return Team{}, ErrUnknownTeam
 	}
 
-	updated := *existing
-	if patch.RPM != nil {
-		updated.RateLimits.RPM = *patch.RPM
-	}
-	if patch.TPM != nil {
-		updated.RateLimits.TPM = *patch.TPM
-	}
-	if patch.MonthlyBudgetMicros != nil {
-		updated.MonthlyBudgetMicros = *patch.MonthlyBudgetMicros
-	}
-
-	if updated.RateLimits.RPM <= 0 {
-		return Team{}, fmt.Errorf("rpm must be a positive integer, got %d", updated.RateLimits.RPM)
-	}
-	if updated.RateLimits.TPM <= 0 {
-		return Team{}, fmt.Errorf("tpm must be a positive integer, got %d", updated.RateLimits.TPM)
-	}
-	if updated.MonthlyBudgetMicros <= 0 {
-		return Team{}, fmt.Errorf("monthly budget must be positive, got %d micro-dollars", updated.MonthlyBudgetMicros)
+	updated, err := patch.Apply(*existing)
+	if err != nil {
+		return Team{}, err
 	}
 
 	r.byID[id] = &updated

@@ -279,8 +279,8 @@ export default function TeamTable({ teams, callerTeamId, getKey, onChanged }) {
         </tbody>
       </table>
       <p className="tt-create-note">
-        Creating new teams needs Postgres-backed team storage — not in this release.
-        Teams are defined in <code className="num">configs/teams.yaml</code> for now.
+        Teams are stored in Postgres. Editing limits and rotating keys here is durable;
+        creating and deleting teams is not available yet.
       </p>
     </div>
   )

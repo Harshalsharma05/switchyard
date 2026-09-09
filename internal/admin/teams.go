@@ -26,12 +26,15 @@ const microsPerUSD = 1_000_000
 // Declared here, by the consumer, for the same reason every other package's
 // dependencies are: admin depends on listing, reading, and patching teams,
 // not on auth.Registry's own locking strategy.
+// The mutations take a context and the reads do not: since Tier 1 Phase 2 a
+// write goes to Postgres, while a read is answered from the in-memory snapshot
+// and does no I/O at all.
 type TeamStore interface {
 	List() []auth.Team
 	Get(id string) (auth.Team, error)
-	Update(id string, patch auth.TeamPatch) (auth.Team, error)
-	RotateKey(id, newHash, newMasked string) (auth.Team, error)
-	RevokeKey(id string) (auth.Team, error)
+	Update(ctx context.Context, id string, patch auth.TeamPatch) (auth.Team, error)
+	RotateKey(ctx context.Context, id, newHash, newMasked string) (auth.Team, error)
+	RevokeKey(ctx context.Context, id string) (auth.Team, error)
 }
 
 // SpendReader is the slice of budget.Tracker this package needs.
@@ -257,7 +260,7 @@ func patchTeam(store TeamStore, spend SpendReader, audit AuditRecorder, log *slo
 			return
 		}
 
-		after, err := store.Update(id, patch)
+		after, err := store.Update(r.Context(), id, patch)
 		if err != nil {
 			if errors.Is(err, auth.ErrUnknownTeam) {
 				writeError(w, log, http.StatusNotFound, "team_not_found", "no such team "+id)
@@ -347,7 +350,7 @@ type rotateKeyResponse struct {
 	Warning string  `json:"warning"`
 }
 
-const rotationWarning = "This key is held in memory only. A gateway restart or a POST /admin/reload rebuilds the team registry from configs/teams.yaml and reverts to the previous key. Durable rotation arrives with Postgres-backed team storage."
+const rotationWarning = "Copy this key now — it is shown once and never again. The rotation is durable: it survives a gateway restart and a POST /admin/reload. On a multi-replica deployment the previous key can still authenticate on other replicas until their next team-snapshot refresh."
 
 // rotateKey serves POST /admin/teams/{id}/key/rotate: mint a new key, record
 // the rotation, then swap it in. The old key stops working the instant
@@ -387,7 +390,7 @@ func rotateKey(store TeamStore, audit AuditRecorder, log *slog.Logger) http.Hand
 			return
 		}
 
-		after, err := store.RotateKey(id, auth.HashKey(raw), masked)
+		after, err := store.RotateKey(r.Context(), id, auth.HashKey(raw), masked)
 		if err != nil {
 			if errors.Is(err, auth.ErrUnknownTeam) {
 				writeError(w, log, http.StatusNotFound, "team_not_found", "no such team "+id)
@@ -446,7 +449,7 @@ func revokeKey(store TeamStore, audit AuditRecorder, log *slog.Logger) http.Hand
 			return
 		}
 
-		after, err := store.RevokeKey(id)
+		after, err := store.RevokeKey(r.Context(), id)
 		if err != nil {
 			if errors.Is(err, auth.ErrUnknownTeam) {
 				writeError(w, log, http.StatusNotFound, "team_not_found", "no such team "+id)

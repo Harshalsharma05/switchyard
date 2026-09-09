@@ -71,6 +71,15 @@ type Metrics struct {
 
 	RequestLogQueueDepth        prometheus.Gauge
 	RetentionLastSweepTimestamp prometheus.Gauge
+
+	// Tier 1 Phase 2's Postgres-backed team store. TeamLookupsTotal counts
+	// authentications served from the in-memory snapshot; comparing it with
+	// TeamSnapshotRefreshTotal is the evidence that team auth does not query
+	// Postgres per request.
+	TeamLookupsTotal         *prometheus.CounterVec
+	TeamSnapshotRefreshTotal *prometheus.CounterVec
+	TeamSnapshotTimestamp    prometheus.Gauge
+	TeamStoreDegraded        prometheus.Gauge
 }
 
 func NewMetrics() (*Metrics, error) {
@@ -140,6 +149,26 @@ func NewMetrics() (*Metrics, error) {
 		Name: "switchyard_panics_total",
 		Help: "Recovered panics by source: a matched route on the request path, or a goroutine name for a background worker. Any non-zero value is a bug.",
 	}, []string{"source"})
+
+	m.TeamLookupsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "switchyard_team_lookups_total",
+		Help: "Team authentications resolved against the in-memory snapshot, by result (hit or unknown).",
+	}, []string{"result"})
+
+	m.TeamSnapshotRefreshTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "switchyard_team_snapshot_refresh_total",
+		Help: "Team snapshot reloads from Postgres, by result (ok or error). One per refresh interval, never one per request.",
+	}, []string{"result"})
+
+	m.TeamSnapshotTimestamp = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "switchyard_team_snapshot_timestamp_seconds",
+		Help: "Unix time of the last successful team snapshot load. Alert when this stops advancing.",
+	})
+
+	m.TeamStoreDegraded = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "switchyard_team_store_degraded",
+		Help: "1 while team auth is serving a snapshot it could not refresh from Postgres, 0 otherwise.",
+	})
 
 	m.RetentionLastSweepTimestamp = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "switchyard_retention_last_sweep_timestamp_seconds",
@@ -247,6 +276,8 @@ func NewMetrics() (*Metrics, error) {
 		m.RatelimitRejectionsTotal, m.BudgetRejectionsTotal, m.BreakerTransitionsTotal,
 		m.TokensTotal, m.CostMicrodollarsTotal, m.RequestLogRowsTotal,
 		m.RetentionRowsDeletedTotal, m.PanicsTotal,
+		m.TeamLookupsTotal, m.TeamSnapshotRefreshTotal,
+		m.TeamSnapshotTimestamp, m.TeamStoreDegraded,
 		m.RequestDuration, m.GatewayOverhead, m.ProviderDuration, m.TimeToFirstToken,
 		m.ProviderHealth, m.BreakerState, m.BudgetUtilizationRatio,
 		m.RatelimitTokensRemaining, m.InflightRequests, m.RequestLogQueueDepth,

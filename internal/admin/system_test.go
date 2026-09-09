@@ -24,7 +24,7 @@ func systemServer(t *testing.T, sys SystemReporter) *httptest.Server {
 	t.Helper()
 	reg := requestLogRegistry(t) // acme = admin, globex = not
 	srv := httptest.NewServer(NewRouter(func() bool { return true },
-		reg, &fakeSpendReader{}, configuredProviders(), fakeHealthReader{}, &fakeBreakerController{},
+		registryStore{reg: reg}, &fakeSpendReader{}, configuredProviders(), fakeHealthReader{}, &fakeBreakerController{},
 		nil, fakeReloader, nil, reg, nil, nil, nil, nil, QualityFeedbackConfig{}, false, nil, sys,
 		testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)

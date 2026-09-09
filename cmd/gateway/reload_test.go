@@ -96,24 +96,56 @@ teams:
     priority: realtime
 `
 
+// fakeTeams adapts an in-memory auth.Registry to the teamStore interface. The
+// real store persists to Postgres; nothing in this file is testing that, so the
+// registry's own semantics are exactly the right stand-in.
+type fakeTeams struct{ reg *auth.Registry }
+
+func newFakeTeams(t *testing.T, ids ...string) *fakeTeams {
+	t.Helper()
+	teams := make([]auth.Team, 0, len(ids))
+	for _, id := range ids {
+		teams = append(teams, auth.Team{
+			ID: id, Name: id, KeyHash: auth.HashKey(id + "-key"),
+			AllowedProviders: []string{"ollama"}, AllowedModels: []string{"llama3.2:3b"},
+			RateLimits: auth.RateLimits{RPM: 60, TPM: 1000}, MonthlyBudgetMicros: 1_000_000,
+			Priority: auth.PriorityRealtime, KeySource: auth.KeySourceConfig,
+		})
+	}
+	reg, err := auth.NewRegistry(teams)
+	if err != nil {
+		t.Fatalf("building fake team registry: %v", err)
+	}
+	return &fakeTeams{reg: reg}
+}
+
+func (f *fakeTeams) Authenticate(k string) (*auth.Team, error) { return f.reg.Authenticate(k) }
+func (f *fakeTeams) List() []auth.Team                         { return f.reg.List() }
+func (f *fakeTeams) Get(id string) (auth.Team, error)          { return f.reg.Get(id) }
+func (f *fakeTeams) Update(_ context.Context, id string, p auth.TeamPatch) (auth.Team, error) {
+	return f.reg.Update(id, p)
+}
+func (f *fakeTeams) RotateKey(_ context.Context, id, h, m string) (auth.Team, error) {
+	return f.reg.RotateKey(id, h, m)
+}
+func (f *fakeTeams) RevokeKey(_ context.Context, id string) (auth.Team, error) {
+	return f.reg.RevokeKey(id)
+}
+
 func TestLoadLiveConfigValid(t *testing.T) {
 	dir := t.TempDir()
 	providersPath := writeFile(t, dir, "providers.yaml", validProvidersA)
-	teamsPath := writeFile(t, dir, "teams.yaml", teamsYAML(t, "acme", "globex"))
 
-	live, providerCount, teamCount, err := loadLiveConfig(providersPath, teamsPath)
+	live, providerCount, err := loadLiveConfig(providersPath)
 	if err != nil {
 		t.Fatalf("loadLiveConfig: %v", err)
 	}
-	if providerCount != 1 || teamCount != 2 {
-		t.Errorf("counts = (%d, %d), want (1, 2)", providerCount, teamCount)
+	if providerCount != 1 {
+		t.Errorf("providerCount = %d, want 1", providerCount)
 	}
 
 	if _, err := live.registry.ForModel("llama3.2:3b"); err != nil {
 		t.Errorf("registry does not resolve llama3.2:3b: %v", err)
-	}
-	if _, err := live.authRegistry.Authenticate("acme-key"); err != nil {
-		t.Errorf("authRegistry does not resolve acme-key: %v", err)
 	}
 	if cost, err := live.calc.Cost("llama3.2:3b", 100, 100); err != nil || cost != 0 {
 		t.Errorf("calc.Cost = (%d, %v), want (0, nil) for a free model", cost, err)
@@ -123,20 +155,9 @@ func TestLoadLiveConfigValid(t *testing.T) {
 func TestLoadLiveConfigInvalidProvidersErrors(t *testing.T) {
 	dir := t.TempDir()
 	providersPath := writeFile(t, dir, "providers.yaml", invalidProviders)
-	teamsPath := writeFile(t, dir, "teams.yaml", teamsYAML(t, "acme"))
 
-	if _, _, _, err := loadLiveConfig(providersPath, teamsPath); err == nil {
+	if _, _, err := loadLiveConfig(providersPath); err == nil {
 		t.Fatal("loadLiveConfig succeeded against an invalid providers.yaml")
-	}
-}
-
-func TestLoadLiveConfigInvalidTeamsErrors(t *testing.T) {
-	dir := t.TempDir()
-	providersPath := writeFile(t, dir, "providers.yaml", validProvidersA)
-	teamsPath := writeFile(t, dir, "teams.yaml", invalidTeams)
-
-	if _, _, _, err := loadLiveConfig(providersPath, teamsPath); err == nil {
-		t.Fatal("loadLiveConfig succeeded against an invalid teams.yaml")
 	}
 }
 
@@ -145,13 +166,12 @@ func TestLoadLiveConfigInvalidTeamsErrors(t *testing.T) {
 func TestConfigStoreDelegatesToCurrent(t *testing.T) {
 	dir := t.TempDir()
 	providersPath := writeFile(t, dir, "providers.yaml", validProvidersA)
-	teamsPath := writeFile(t, dir, "teams.yaml", teamsYAML(t, "acme"))
 
-	live, _, _, err := loadLiveConfig(providersPath, teamsPath)
+	live, _, err := loadLiveConfig(providersPath)
 	if err != nil {
 		t.Fatalf("loadLiveConfig: %v", err)
 	}
-	store := newConfigStore(live)
+	store := newConfigStore(live, newFakeTeams(t, "acme"))
 
 	if _, err := store.ForModel("llama3.2:3b"); err != nil {
 		t.Errorf("ForModel: %v", err)
@@ -172,7 +192,7 @@ func TestConfigStoreDelegatesToCurrent(t *testing.T) {
 		t.Errorf("Get: %v", err)
 	}
 	rpm := 100
-	if _, err := store.Update("acme", auth.TeamPatch{RPM: &rpm}); err != nil {
+	if _, err := store.Update(context.Background(), "acme", auth.TeamPatch{RPM: &rpm}); err != nil {
 		t.Errorf("Update: %v", err)
 	}
 	if len(store.Configs()) != 1 {
@@ -185,13 +205,12 @@ func TestConfigStoreDelegatesToCurrent(t *testing.T) {
 func TestReloadSwapsInNewConfigOnSuccess(t *testing.T) {
 	dir := t.TempDir()
 	providersPath := writeFile(t, dir, "providers.yaml", validProvidersA)
-	teamsPath := writeFile(t, dir, "teams.yaml", teamsYAML(t, "acme"))
 
-	live, _, _, err := loadLiveConfig(providersPath, teamsPath)
+	live, _, err := loadLiveConfig(providersPath)
 	if err != nil {
 		t.Fatalf("loadLiveConfig: %v", err)
 	}
-	store := newConfigStore(live)
+	store := newConfigStore(live, newFakeTeams(t, "acme"))
 
 	// Confirm the "before" state: the second model isn't there yet.
 	if _, err := store.ForModel("llama3.2:1b"); err == nil {
@@ -200,7 +219,7 @@ func TestReloadSwapsInNewConfigOnSuccess(t *testing.T) {
 
 	// Rewrite providers.yaml on disk (same path) to the B fixture and reload.
 	writeFile(t, dir, "providers.yaml", validProvidersB)
-	reload := newReloader(store, providersPath, teamsPath)
+	reload := newReloader(store, providersPath)
 
 	summary, err := reload(context.Background())
 	if err != nil {
@@ -222,17 +241,16 @@ func TestReloadSwapsInNewConfigOnSuccess(t *testing.T) {
 func TestReloadRejectedLeavesStoreOnOldConfig(t *testing.T) {
 	dir := t.TempDir()
 	providersPath := writeFile(t, dir, "providers.yaml", validProvidersA)
-	teamsPath := writeFile(t, dir, "teams.yaml", teamsYAML(t, "acme"))
 
-	live, _, _, err := loadLiveConfig(providersPath, teamsPath)
+	live, _, err := loadLiveConfig(providersPath)
 	if err != nil {
 		t.Fatalf("loadLiveConfig: %v", err)
 	}
-	store := newConfigStore(live)
+	store := newConfigStore(live, newFakeTeams(t, "acme"))
 
 	// Break providers.yaml on disk and attempt a reload.
 	writeFile(t, dir, "providers.yaml", invalidProviders)
-	reload := newReloader(store, providersPath, teamsPath)
+	reload := newReloader(store, providersPath)
 
 	if _, err := reload(context.Background()); err == nil {
 		t.Fatal("reload succeeded against an invalid providers.yaml")
@@ -248,31 +266,51 @@ func TestReloadRejectedLeavesStoreOnOldConfig(t *testing.T) {
 	}
 }
 
-// A reload is all-or-nothing across *both* files: a valid providers.yaml
-// paired with a broken teams.yaml must reject the whole attempt, not swap
-// in a new provider registry alongside the stale team registry.
-func TestReloadRejectedTeamsLeavesBothFilesOnOldConfig(t *testing.T) {
+// The Phase 0.1 before-state, inverted. A reload used to rebuild the team
+// registry from teams.yaml, silently reverting any limit edit or key rotation
+// made through the admin API. Teams now live in Postgres and reload does not
+// read them at all, so the sequence that used to revert must no longer do so.
+func TestReloadDoesNotRevertTeamChanges(t *testing.T) {
 	dir := t.TempDir()
 	providersPath := writeFile(t, dir, "providers.yaml", validProvidersA)
-	teamsPath := writeFile(t, dir, "teams.yaml", teamsYAML(t, "acme"))
 
-	live, _, _, err := loadLiveConfig(providersPath, teamsPath)
+	live, _, err := loadLiveConfig(providersPath)
 	if err != nil {
 		t.Fatalf("loadLiveConfig: %v", err)
 	}
-	store := newConfigStore(live)
+	store := newConfigStore(live, newFakeTeams(t, "acme"))
 
-	writeFile(t, dir, "providers.yaml", validProvidersB) // this half is fine
-	writeFile(t, dir, "teams.yaml", invalidTeams)        // this half is not
-	reload := newReloader(store, providersPath, teamsPath)
-
-	if _, err := reload(context.Background()); err == nil {
-		t.Fatal("reload succeeded despite an invalid teams.yaml")
+	ctx := context.Background()
+	rpm := 999
+	if _, err := store.Update(ctx, "acme", auth.TeamPatch{RPM: &rpm}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	rotated := "acme-rotated-key"
+	if _, err := store.RotateKey(ctx, "acme", auth.HashKey(rotated), auth.MaskKey(rotated)); err != nil {
+		t.Fatalf("RotateKey: %v", err)
 	}
 
-	// The provider side must not have been swapped in either, even though
-	// providers.yaml itself was valid — the bundle is atomic.
-	if _, err := store.ForModel("llama3.2:1b"); err == nil {
-		t.Fatal("llama3.2:1b resolves after a reload that should have been rejected wholesale")
+	writeFile(t, dir, "providers.yaml", validProvidersB)
+	if _, err := newReloader(store, providersPath)(ctx); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+
+	// The provider half of the reload still works.
+	if _, err := store.ForModel("llama3.2:1b"); err != nil {
+		t.Errorf("llama3.2:1b does not resolve after reload: %v", err)
+	}
+
+	team, err := store.Get("acme")
+	if err != nil {
+		t.Fatalf("Get after reload: %v", err)
+	}
+	if team.RateLimits.RPM != rpm {
+		t.Errorf("rpm = %d after reload, want %d — reload reverted a limit edit", team.RateLimits.RPM, rpm)
+	}
+	if _, err := store.Authenticate(rotated); err != nil {
+		t.Errorf("rotated key stopped working after reload: %v", err)
+	}
+	if _, err := store.Authenticate("acme-key"); err == nil {
+		t.Error("the pre-rotation key authenticates again after reload — reload resurrected it")
 	}
 }

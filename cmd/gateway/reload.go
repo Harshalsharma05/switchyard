@@ -31,9 +31,8 @@ import (
 // from another — the whole bundle is either the old generation or the new
 // one, never a mix.
 type liveConfig struct {
-	registry     *provider.Registry
-	authRegistry *auth.Registry
-	calc         *budget.Calculator
+	registry *provider.Registry
+	calc     *budget.Calculator
 
 	// tiers is Step 6.2's fallback chains, pre-indexed by model: given the
 	// model a caller asked for, the other candidates in its tier. Built once
@@ -47,10 +46,12 @@ type liveConfig struct {
 	// model to key on; both indexes share the same backing slices.
 	tierNames map[string][]resilience.Candidate
 
-	// configHash is a SHA-256 over the raw bytes of providers.yaml and
-	// teams.yaml as they were when this generation was built. The System panel
-	// shows it so an operator can tell at a glance whether the running config
-	// matches what is on disk; it changes on every reload by construction.
+	// configHash is a SHA-256 over the raw bytes of providers.yaml as it was
+	// when this generation was built. The System panel shows it so an operator
+	// can tell at a glance whether the running config matches what is on disk;
+	// it changes on every reload by construction. teams.yaml is deliberately
+	// not part of it — since Tier 1 Phase 2 that file is a first-boot seed and
+	// has no bearing on what the running gateway is doing.
 	configHash string
 }
 
@@ -70,8 +71,27 @@ type liveConfig struct {
 // is, at worst, a single spurious error that succeeds on an immediate
 // retry — out of proportion to how this reload is actually triggered: a
 // rare, manual, operator-initiated POST, not a hot path.
+// teamStore is the slice of teamstore.Store this package needs. Declared here,
+// by the consumer, for the same reason every other dependency is — and so the
+// reload tests can substitute a plain in-memory registry instead of requiring a
+// Postgres to test config reload.
+type teamStore interface {
+	Authenticate(rawKey string) (*auth.Team, error)
+	List() []auth.Team
+	Get(id string) (auth.Team, error)
+	Update(ctx context.Context, id string, patch auth.TeamPatch) (auth.Team, error)
+	RotateKey(ctx context.Context, id, newHash, newMasked string) (auth.Team, error)
+	RevokeKey(ctx context.Context, id string) (auth.Team, error)
+}
+
 type configStore struct {
 	current atomic.Pointer[liveConfig]
+
+	// teams is not part of the atomic swap above: teams live in Postgres since
+	// Tier 1 Phase 2 and are not reloadable from a file at all. It is a plain
+	// field because it is set once at construction and never replaced — the
+	// store does its own refreshing behind these calls.
+	teams teamStore
 }
 
 // Compile-time proof configStore satisfies every interface it is wired into
@@ -85,8 +105,8 @@ var (
 	_ admin.ProviderLister = (*configStore)(nil)
 )
 
-func newConfigStore(initial *liveConfig) *configStore {
-	s := &configStore{}
+func newConfigStore(initial *liveConfig, teams teamStore) *configStore {
+	s := &configStore{teams: teams}
 	s.current.Store(initial)
 	return s
 }
@@ -114,7 +134,7 @@ func (s *configStore) TierNamed(name string) []resilience.Candidate {
 }
 
 func (s *configStore) Authenticate(rawKey string) (*auth.Team, error) {
-	return s.current.Load().authRegistry.Authenticate(rawKey)
+	return s.teams.Authenticate(rawKey)
 }
 
 func (s *configStore) Cost(model string, inputTokens, outputTokens int) (int64, error) {
@@ -122,23 +142,23 @@ func (s *configStore) Cost(model string, inputTokens, outputTokens int) (int64, 
 }
 
 func (s *configStore) List() []auth.Team {
-	return s.current.Load().authRegistry.List()
+	return s.teams.List()
 }
 
 func (s *configStore) Get(id string) (auth.Team, error) {
-	return s.current.Load().authRegistry.Get(id)
+	return s.teams.Get(id)
 }
 
-func (s *configStore) Update(id string, patch auth.TeamPatch) (auth.Team, error) {
-	return s.current.Load().authRegistry.Update(id, patch)
+func (s *configStore) Update(ctx context.Context, id string, patch auth.TeamPatch) (auth.Team, error) {
+	return s.teams.Update(ctx, id, patch)
 }
 
-func (s *configStore) RotateKey(id, newHash, newMasked string) (auth.Team, error) {
-	return s.current.Load().authRegistry.RotateKey(id, newHash, newMasked)
+func (s *configStore) RotateKey(ctx context.Context, id, newHash, newMasked string) (auth.Team, error) {
+	return s.teams.RotateKey(ctx, id, newHash, newMasked)
 }
 
-func (s *configStore) RevokeKey(id string) (auth.Team, error) {
-	return s.current.Load().authRegistry.RevokeKey(id)
+func (s *configStore) RevokeKey(ctx context.Context, id string) (auth.Team, error) {
+	return s.teams.RevokeKey(ctx, id)
 }
 
 func (s *configStore) Configs() []provider.Config {
@@ -154,28 +174,19 @@ func (s *configStore) ConfigHash() string {
 // liveConfig from scratch — the exact same steps run() takes at boot. Used
 // both there and by reload, so the two can never drift into checking
 // different things.
-func loadLiveConfig(providersPath, teamsPath string) (*liveConfig, int, int, error) {
-	hash, err := configHash(providersPath, teamsPath)
+func loadLiveConfig(providersPath string) (*liveConfig, int, error) {
+	hash, err := configHash(providersPath)
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, err
 	}
 
 	providers, err := config.LoadProviders(providersPath)
 	if err != nil {
-		return nil, 0, 0, fmt.Errorf("loading provider config: %w", err)
+		return nil, 0, fmt.Errorf("loading provider config: %w", err)
 	}
 	registry, err := provider.NewRegistry(providers.Configs)
 	if err != nil {
-		return nil, 0, 0, fmt.Errorf("building provider registry: %w", err)
-	}
-
-	teams, err := config.LoadTeams(teamsPath)
-	if err != nil {
-		return nil, 0, 0, fmt.Errorf("loading team config: %w", err)
-	}
-	authRegistry, err := auth.NewRegistry(teams)
-	if err != nil {
-		return nil, 0, 0, fmt.Errorf("building auth registry: %w", err)
+		return nil, 0, fmt.Errorf("building provider registry: %w", err)
 	}
 
 	byModel, byName := indexTiers(providers.Tiers)
@@ -186,28 +197,24 @@ func loadLiveConfig(providersPath, teamsPath string) (*liveConfig, int, int, err
 	}
 
 	return &liveConfig{
-		registry:     registry,
-		authRegistry: authRegistry,
-		calc:         budget.NewCalculator(pricing),
-		tiers:        byModel,
-		tierNames:    byName,
-		configHash:   hash,
-	}, len(providers.Configs), len(teams), nil
+		registry:   registry,
+		calc:       budget.NewCalculator(pricing),
+		tiers:      byModel,
+		tierNames:  byName,
+		configHash: hash,
+	}, len(providers.Configs), nil
 }
 
-// configHash fingerprints the two config files the running gateway depends on.
-// A second read of files config.Load* also reads is cheap and only happens at
-// boot and on a manual reload — never on the request path.
-func configHash(providersPath, teamsPath string) (string, error) {
+// configHash fingerprints the config file the running gateway depends on. A
+// second read of a file config.LoadProviders also reads is cheap and only
+// happens at boot and on a manual reload — never on the request path.
+func configHash(providersPath string) (string, error) {
 	h := sha256.New()
-	for _, p := range []string{providersPath, teamsPath} {
-		b, err := os.ReadFile(p)
-		if err != nil {
-			return "", fmt.Errorf("hashing config %s: %w", p, err)
-		}
-		h.Write(b)
-		h.Write([]byte{0})
+	b, err := os.ReadFile(providersPath)
+	if err != nil {
+		return "", fmt.Errorf("hashing config %s: %w", providersPath, err)
 	}
+	h.Write(b)
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
@@ -251,13 +258,16 @@ func indexTiers(tiers map[string][]config.TierEntry) (byModel, byName map[string
 // the checklist's "invalid config reload is rejected, gateway keeps running
 // on the old config" holds by construction rather than by a rollback step
 // that could itself fail partway.
-func newReloader(store *configStore, providersPath, teamsPath string) admin.Reloader {
+func newReloader(store *configStore, providersPath string) admin.Reloader {
 	return func(ctx context.Context) (admin.ReloadSummary, error) {
-		next, providerCount, teamCount, err := loadLiveConfig(providersPath, teamsPath)
+		next, providerCount, err := loadLiveConfig(providersPath)
 		if err != nil {
 			return admin.ReloadSummary{}, err
 		}
 		store.current.Store(next)
-		return admin.ReloadSummary{Providers: providerCount, Teams: teamCount}, nil
+		// Reported, not reloaded: the count comes from the live team store so
+		// the summary describes what is actually serving, and reload cannot
+		// touch it.
+		return admin.ReloadSummary{Providers: providerCount, Teams: len(store.teams.List())}, nil
 	}
 }

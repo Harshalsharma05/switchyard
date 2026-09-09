@@ -34,6 +34,7 @@ import (
 	"github.com/Harshalsharma05/switchyard/internal/resilience"
 	"github.com/Harshalsharma05/switchyard/internal/router"
 	"github.com/Harshalsharma05/switchyard/internal/summary"
+	"github.com/Harshalsharma05/switchyard/internal/teamstore"
 	"github.com/Harshalsharma05/switchyard/internal/telemetry"
 )
 
@@ -42,7 +43,6 @@ import (
 // and team behaviour stays in YAML.
 const (
 	defaultProvidersPath = "configs/providers.yaml"
-	defaultTeamsPath     = "configs/teams.yaml"
 	defaultCachePath     = "configs/cache.yaml"
 	defaultRouterPath    = "configs/router.yaml"
 	defaultQualityPath   = "configs/quality.yaml"
@@ -185,17 +185,16 @@ func run() error {
 	serviceVersion := envOr("SWITCHYARD_SERVICE_VERSION", defaultServiceVersion)
 
 	providersPath := envOr("SWITCHYARD_PROVIDERS_CONFIG", defaultProvidersPath)
-	teamsPath := envOr("SWITCHYARD_TEAMS_CONFIG", defaultTeamsPath)
 
-	// loadLiveConfig (cmd/gateway/reload.go) is the one place providers.yaml
-	// and teams.yaml are read, validated, and turned into registries — boot
-	// and every later POST /admin/reload run the exact same steps, so the
-	// two can never drift into checking different things.
-	initial, providerCount, teamCount, err := loadLiveConfig(providersPath, teamsPath)
+	// loadLiveConfig (cmd/gateway/reload.go) is the one place providers.yaml is
+	// read, validated, and turned into registries — boot and every later POST
+	// /admin/reload run the exact same steps, so the two can never drift into
+	// checking different things. Teams are not here: they live in Postgres and
+	// are loaded by the team store below.
+	initial, providerCount, err := loadLiveConfig(providersPath)
 	if err != nil {
 		return err
 	}
-	store := newConfigStore(initial)
 
 	for _, p := range initial.registry.Providers() {
 		log.Info("provider registered", slog.String("provider", p.Name()))
@@ -359,16 +358,23 @@ func run() error {
 		log,
 	)
 
-	// Part 2 Phase 1's request log. Left disabled when POSTGRES_PASSWORD is
-	// unset, so a dev without Postgres still gets a working gateway; the
-	// interface stays nil in that case, which makes the middleware a no-op.
+	// Postgres is required as of Tier 1 Phase 2: teams live there, so a gateway
+	// without it cannot authenticate anyone. Refusing to start is the honest
+	// failure — the alternative, falling back to configs/teams.yaml, would be a
+	// second auth path with different persistence semantics and would make that
+	// file authoritative again.
 	var reqLog proxy.RequestLogger
 	var reqLogReader admin.RequestLogReader
 	var auditRec admin.AuditRecorder
 	var logWriter *logstore.Writer
 	var retainer *logstore.Retainer
-	var dbPool *pgxpool.Pool // nil without POSTGRES_PASSWORD; the System panel probes it
-	if pw := os.Getenv("POSTGRES_PASSWORD"); pw != "" {
+	var dbPool *pgxpool.Pool
+	var teams *teamstore.Store
+	{
+		pw := os.Getenv("POSTGRES_PASSWORD")
+		if pw == "" {
+			return errors.New("POSTGRES_PASSWORD is unset: teams are stored in Postgres, so the gateway cannot start without it")
+		}
 		dbCfg := logstore.DBConfig{
 			Host:     envOr("SWITCHYARD_POSTGRES_HOST", defaultPostgresHost),
 			User:     envOr("SWITCHYARD_POSTGRES_USER", defaultPostgresUser),
@@ -403,10 +409,20 @@ func run() error {
 			MaxBatches: intOr("SWITCHYARD_RETENTION_MAX_BATCHES", defaultRetentionMaxBatches),
 		}, promMetrics, log)
 
+		// The team store loads its first snapshot here and fails the boot if it
+		// cannot: there is no cache to fall back on yet, and an empty snapshot
+		// would reject every key.
+		teams, err = teamstore.New(context.Background(), pool,
+			durationOr("SWITCHYARD_TEAM_REFRESH_INTERVAL", teamstore.DefaultRefreshInterval),
+			promMetrics, log)
+		if err != nil {
+			return fmt.Errorf("building team store: %w", err)
+		}
+
 		log.Info("request log enabled", slog.String("database", dbCfg.Redacted()))
-	} else {
-		log.Warn("request log disabled: POSTGRES_PASSWORD is unset")
 	}
+
+	store := newConfigStore(initial, teams)
 
 	// Step 2.3's Overview summary service. It never blocks a request path and
 	// degrades on its own when Prometheus is unreachable, so it is wired
@@ -543,12 +559,13 @@ func run() error {
 		configHash: store,
 		redis:      redisClient,
 		db:         dbPool,
+		teams:      teams,
 		summary:    summarySvc,
 	}
 
 	adminSrv := &http.Server{
 		Addr: envOr("SWITCHYARD_ADMIN_ADDR", defaultAdminAddr),
-		Handler: admin.NewRouter(isReady, store, budgetTracker, store, healthMonitor, breakerRegistry, chaosAdapter{chaos}, newReloader(store, providersPath, teamsPath), reqLogReader, store, summarySvc, cacheTuner, store, complexityRouter,
+		Handler: admin.NewRouter(isReady, store, budgetTracker, store, healthMonitor, breakerRegistry, chaosAdapter{chaos}, newReloader(store, providersPath), reqLogReader, store, summarySvc, cacheTuner, store, complexityRouter,
 			admin.QualityFeedbackConfig{LowScoreThreshold: qualityCfg.Feedback.LowScoreThreshold, ExampleLimit: qualityCfg.Feedback.ExampleLimit},
 			qualityWorker != nil,
 			auditRec,
@@ -592,6 +609,11 @@ func run() error {
 	// SIGINT/SIGTERM that starts draining the listeners below — so the health
 	// checker's goroutines stop on the same signal rather than outliving it.
 	go checker.Run(ctx)
+
+	// The team snapshot refreshes until the shutdown signal. Requests still
+	// draining authenticate against the last snapshot, which is exactly the
+	// behaviour a failed refresh already produces.
+	go teams.Run(ctx)
 
 	// The flusher gets its own context, cancelled only after the HTTP drain
 	// finishes: requests still completing during the drain enqueue rows, and
@@ -638,7 +660,7 @@ func run() error {
 		slog.String("public_addr", publicSrv.Addr),
 		slog.String("admin_addr", adminSrv.Addr),
 		slog.Int("providers", providerCount),
-		slog.Int("teams", teamCount),
+		slog.Int("teams", len(teams.List())),
 	)
 
 	select {

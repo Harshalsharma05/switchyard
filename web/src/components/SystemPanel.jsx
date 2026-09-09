@@ -20,10 +20,10 @@ function uptime(seconds) {
   return parts.join(' ')
 }
 
-// "up" → healthy, "down" → error, "not_configured" → info. StatusPill puts the
-// literal word beside the dot, so it is never colour alone.
-const DEP_TONE = { up: 'healthy', down: 'down', not_configured: 'info' }
-const DEP_LABEL = { up: 'up', down: 'down', not_configured: 'not configured' }
+// "up" → healthy, "down" → error, "degraded" → warn, "not_configured" → info.
+// StatusPill puts the literal word beside the dot, so it is never colour alone.
+const DEP_TONE = { up: 'healthy', down: 'down', degraded: 'warn', not_configured: 'info' }
+const DEP_LABEL = { up: 'up', down: 'down', degraded: 'degraded', not_configured: 'not configured' }
 
 function ReloadControl({ getKey, onReloaded }) {
   const [phase, setPhase] = useState('idle') // idle | confirm | pending
@@ -62,9 +62,9 @@ function ReloadControl({ getKey, onReloaded }) {
       )}
       {error && <span className="sys-reload-err">{error}</span>}
       <p className="sys-note">
-        Reload re-reads <code className="num">configs/*.yaml</code> and reverts any in-memory
-        key rotation or limit edit that has not been written back to YAML — the audit
-        log records every reload.
+        Reload re-reads <code className="num">configs/providers.yaml</code> only. Teams live
+        in Postgres, so a key rotation or limit edit is never reverted by a reload — the
+        audit log records every reload.
       </p>
     </div>
   )

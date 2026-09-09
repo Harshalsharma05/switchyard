@@ -33,7 +33,29 @@ func testMetrics(t *testing.T) *telemetry.Metrics {
 // internal/auth's own tests, and re-deriving that logic in a fake here would
 // only risk drifting from the real behavior these handlers actually run
 // against.
-func testTeamStore(t *testing.T) *auth.Registry {
+// registryStore adapts an in-memory auth.Registry to the TeamStore interface,
+// whose mutations take a context now that the real store writes to Postgres.
+// These are handler tests: the registry's semantics are the right stand-in, and
+// the context is simply not something an in-memory registry needs.
+type registryStore struct{ reg *auth.Registry }
+
+func (s registryStore) List() []auth.Team                { return s.reg.List() }
+func (s registryStore) Get(id string) (auth.Team, error) { return s.reg.Get(id) }
+func (s registryStore) Update(_ context.Context, id string, p auth.TeamPatch) (auth.Team, error) {
+	return s.reg.Update(id, p)
+}
+func (s registryStore) RotateKey(_ context.Context, id, h, m string) (auth.Team, error) {
+	return s.reg.RotateKey(id, h, m)
+}
+func (s registryStore) RevokeKey(_ context.Context, id string) (auth.Team, error) {
+	return s.reg.RevokeKey(id)
+}
+
+// Not part of TeamStore — the tests that check a rotated key works use it
+// directly, the same way the gateway's authenticator would.
+func (s registryStore) Authenticate(k string) (*auth.Team, error) { return s.reg.Authenticate(k) }
+
+func testTeamStore(t *testing.T) registryStore {
 	t.Helper()
 	r, err := auth.NewRegistry([]auth.Team{
 		{
@@ -52,7 +74,7 @@ func testTeamStore(t *testing.T) *auth.Registry {
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
-	return r
+	return registryStore{reg: r}
 }
 
 // fakeSpendReader is the fake behind SpendReader — budget.Tracker needs real

@@ -28,7 +28,8 @@ type systemInfo struct {
 	startedAt  time.Time
 	configHash interface{ ConfigHash() string } // the configStore
 	redis      *redis.Client
-	db         *pgxpool.Pool // nil when POSTGRES_PASSWORD is unset
+	db         *pgxpool.Pool
+	teams      interface{ Degraded() (bool, time.Time) } // the team store
 	summary    *summary.Service
 }
 
@@ -43,6 +44,7 @@ func (s *systemInfo) Dependencies(ctx context.Context) map[string]string {
 		"redis":      s.probeRedis(ctx),
 		"postgres":   s.probePostgres(ctx),
 		"prometheus": s.probePrometheus(ctx),
+		"team_store": s.probeTeams(),
 	}
 }
 
@@ -54,6 +56,20 @@ func (s *systemInfo) probeRedis(ctx context.Context) string {
 	defer cancel()
 	if err := s.redis.Ping(c).Err(); err != nil {
 		return "down"
+	}
+	return "up"
+}
+
+// probeTeams reports the team snapshot rather than a connection: "degraded"
+// means auth is still working, from a snapshot the store could not refresh.
+// That is a distinct state from Postgres being down — the database can come
+// back before the next refresh, and requests never stopped either way.
+func (s *systemInfo) probeTeams() string {
+	if s.teams == nil {
+		return "not_configured"
+	}
+	if degraded, _ := s.teams.Degraded(); degraded {
+		return "degraded"
 	}
 	return "up"
 }
