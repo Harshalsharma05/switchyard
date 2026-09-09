@@ -36,6 +36,12 @@ type Metrics struct {
 	RequestLogRowsTotal       *prometheus.CounterVec
 	RetentionRowsDeletedTotal prometheus.Counter
 
+	// PanicsTotal counts recovered panics by their origin — a matched route
+	// on the request path, or a goroutine name for a background worker. Any
+	// non-zero value is a bug; it exists so that bug is visible on a dashboard
+	// rather than only in the logs.
+	PanicsTotal *prometheus.CounterVec
+
 	RequestDuration  *prometheus.HistogramVec
 	GatewayOverhead  prometheus.Histogram
 	ProviderDuration *prometheus.HistogramVec
@@ -129,6 +135,11 @@ func NewMetrics() (*Metrics, error) {
 		Name: "switchyard_retention_rows_deleted_total",
 		Help: "Request-log detail rows rolled into the daily summary and deleted by retention.",
 	})
+
+	m.PanicsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "switchyard_panics_total",
+		Help: "Recovered panics by source: a matched route on the request path, or a goroutine name for a background worker. Any non-zero value is a bug.",
+	}, []string{"source"})
 
 	m.RetentionLastSweepTimestamp = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "switchyard_retention_last_sweep_timestamp_seconds",
@@ -235,7 +246,7 @@ func NewMetrics() (*Metrics, error) {
 		m.RequestsTotal, m.ErrorsTotal, m.RetriesTotal, m.FallbacksTotal,
 		m.RatelimitRejectionsTotal, m.BudgetRejectionsTotal, m.BreakerTransitionsTotal,
 		m.TokensTotal, m.CostMicrodollarsTotal, m.RequestLogRowsTotal,
-		m.RetentionRowsDeletedTotal,
+		m.RetentionRowsDeletedTotal, m.PanicsTotal,
 		m.RequestDuration, m.GatewayOverhead, m.ProviderDuration, m.TimeToFirstToken,
 		m.ProviderHealth, m.BreakerState, m.BudgetUtilizationRatio,
 		m.RatelimitTokensRemaining, m.InflightRequests, m.RequestLogQueueDepth,

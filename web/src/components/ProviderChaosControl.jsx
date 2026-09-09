@@ -10,6 +10,7 @@ const MODES = [
   { value: 'latency', label: 'Add latency' },
   { value: 'rate_limit', label: 'Force 429s' },
   { value: 'drop', label: 'Drop connections' },
+  { value: 'panic', label: 'Force panic' },
 ]
 
 const LABEL = Object.fromEntries(MODES.map((m) => [m.value, m.label]))

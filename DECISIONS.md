@@ -692,3 +692,65 @@ go run ./scripts/overheadbench -n 40 -rpm 45 -mode miss -model auto
 ### Step 10.3 — Demo script
 
 - **`demo.sh` performs every API action itself and prints the parallel UI narration, rather than being a list of clicks.** A recorded walkthrough cannot depend on a human clicking the right thing at the right moment; doing the chaos POST, the budget PATCH and the request bursts in the script makes each scene reproducible and doubles as a smoke test. It now requires the full compose stack — Postgres for Request Logs and Usage & Cost, Prometheus for Overview — so the preflight checks for those and refuses a bare `go run`.
+
+---
+
+# Tier 1 — Fault Tolerance & Persistent Team Storage
+
+## Phase 0 — Prerequisites (before-state, no code change)
+
+### Step 0.1 — What `POST /admin/reload` currently reverts
+
+- **A reload rebuilds the entire live config bundle from disk, teams included.** `newReloader` calls the same `loadLiveConfig` boot uses; it reads `providers.yaml` *and* `teams.yaml`, builds a fresh `auth.Registry` from the YAML, and swaps the whole `liveConfig` pointer atomically. Any in-memory team mutation not written back to `teams.yaml` is gone the instant the swap lands.
+- **Concretely reverted by a reload:** a `PATCH /admin/teams/{id}` limit or budget edit; a `POST /admin/teams/{id}/key/rotate` (old YAML key authenticates again, new key 401s); a `DELETE /admin/teams/{id}/key` revoke (the YAML key works again). Confirmed by code path (`cmd/gateway/reload.go`, `internal/auth/registry.go`) and by the explicit caveats already in the code: `rotationWarning` in `internal/admin/teams.go`, the `RotateKey`/`RevokeKey` doc comments, and `DECISIONS.md` Part 2 Step 6 ("This limitation already existed, undocumented…").
+- **`demo.sh` does not call `/admin/reload` anywhere** — checked the full script. It uses `PATCH /admin/teams/globex` and the chaos endpoints only, so the demo is not silently tripping this. The one place the trap is armed is the Postman collection's Phase 6 "SETUP B", which already carries a caution line.
+- **UI copy that will go stale when Phase 2.4 fixes this:** `web/src/components/SystemPanel.jsx` `ReloadControl` (lines ~65–67) tells the operator reload "reverts any in-memory key rotation or limit edit". `DECISIONS.md` line ~468 is the "documented limitation" note to replace with the resolution.
+
+### Step 0.2 — Long-lived goroutine inventory (the Phase 1.3 panic surface)
+
+Started in `cmd/gateway/main.go run()`, each tied to a context that cancels on SIGINT/SIGTERM:
+
+- **`serve(publicSrv, …)`** — public HTTP accept loop (main.go:587)
+- **`serve(adminSrv, …)`** — admin HTTP accept loop (main.go:588)
+- **`checker.Run(ctx)`** (main.go:593) — health checker; fans out to **one goroutine per provider** (`internal/health/checker.go:66`), each a `time.Ticker` loop calling `Provider.Ping`
+- **`logWriter.Run(logCtx)`** (main.go:601) — request-log batch flusher, single ticker loop; only when `POSTGRES_PASSWORD` is set. Own context, cancelled after the HTTP drain
+- **`retainer.Run(ctx)`** (main.go:608) — request-log retention sweeper, single ticker loop; only when Postgres is wired and the window > 0
+- **`qualityWorker.Run(qualityCtx)`** (main.go:624) — quality verification; fans out to **`cfg.Concurrency` goroutines (default 4)** (`internal/quality/worker.go:94`), each pulling the sample queue and calling the judge model; only when `configs/quality.yaml` is enabled
+
+Not part of the Go panic surface:
+
+- **No config file watcher exists.** The Phase 0.2 hint lists one from memory, but reload is manual `POST /admin/reload` only — there is no `fsnotify` anywhere in the tree.
+- **The load simulator is browser-side JS** (`web/src/hooks/useLoadSim.js`) — it fires `fetch` from the operator's browser, nothing in the gateway process.
+- **Per-request async work** (async cache write in `storeInCache`, TPM/budget `Reconcile`) runs *synchronously* in the request goroutine via `defer`, not a spawned goroutine — so Step 1.1 request-path recovery covers it, not Step 1.3.
+
+## Phase 1 — Panic Recovery
+
+### Step 1.1 — Request-path recovery
+
+- **The recovery middleware already existed** (`proxy.Recoverer`, outermost in both routers since Part 1) — it recovered, logged the stack with the request ID, returned a generic 500, and re-panicked on `http.ErrAbortHandler`. Step 1.1 only added the missing metric.
+- **One `switchyard_panics_total` metric with a single `source` label, not one label per context.** The plan's wording — "labelled by route" in 1.1, "labelled by goroutine" in 1.3 — describes two label names on one metric, which Prometheus cannot express. `source` holds the chi route pattern on the request path and will hold the goroutine name for background workers in 1.3. Cost: a dashboard query filtering by `source` has to know both kinds of value exist; the alternative (two separate metric names) splits "how many panics" across two counters for no real gain.
+- **The label is chi's matched route pattern (`/v1/chat/completions`), falling back to `"unmatched"`, never `r.URL.Path`.** Raw path is unbounded — scanner traffic hitting 404s would blow up the label cardinality. The log line keeps the raw path alongside the pattern for debugging.
+
+### Step 1.2 — Streaming panic
+
+- **A mid-stream panic reuses `writeSSEError`, the exact Part 1 Step 2.4 mechanism a mid-stream provider error uses** — an SSE error event with the generic `internal_error` envelope, flushed, and the stream ends with no `[DONE]`. No second pattern was invented.
+- **`Recoverer` branches on whether the response is committed, via a one-field `panicWriter` wrapper** (`wrote bool`). Not committed → normal 500. Committed + `Content-Type: text/event-stream` → SSE error event. Committed + anything else → log only, because the status line is gone and there is no in-band error channel for a plain JSON response. The wrapper carries `Flush`/`Unwrap` so it does not hide `http.Flusher` from the stream path — the wrapping trap `CLAUDE.md` calls out.
+- **The panic value is never handed to `writeSSEError`.** It gets a sentinel error that is not a `*provider.Error`, which is exactly the input that makes `writeSSEError` emit its generic envelope rather than a message — the panic string cannot reach the client on either path.
+
+### Step 1.3 — Background goroutine recovery
+
+- **One helper, `telemetry.Supervise(ctx, log, m, name, fn)`, blocking — not a `safeGo` that spawns.** `health.Checker` and `quality.Worker` fan out their goroutines under a `sync.WaitGroup` so shutdown is deterministic; a blocking supervisor drops into `go func(){ defer wg.Done(); Supervise(...) }()`, a spawner cannot. Lives in `internal/telemetry` because that is imported everywhere, depends on nothing internal, and already owns the panic counter.
+- **Restart policy: capped exponential backoff.** 1s, doubling per consecutive panic, capped at 30s; resets to 1s once `fn` has run longer than the cap without panicking. A worker panicking in a tight loop therefore cannot spin — the cost is that a genuinely wedged worker retries only every 30s. Rejected "stay dead and mark unhealthy": none of these workers (health checker, log flusher, retention, quality) failing should gate `/readyz`, per the failure-mode table, so keeping them trying is strictly better.
+- **Each component supervises its own loop internally; `main.go`'s `go X.Run(ctx)` lines are unchanged.** Restarting a whole `Run` from outside would re-run its `defer close(w.done)` and panic on the second close. So `Writer.Run`/`Retainer.Run` were split into `Run` (keeps the one-shot `defer close`) and an unexported `loop` that `Supervise` restarts.
+- **The two HTTP listener goroutines get a plain `recover()` → error channel, not `Supervise`.** Re-entering `Serve` on a listener whose accept path just panicked is unsound; converting the panic into the same graceful-shutdown trigger a `Serve` error already causes is the right response. Handler panics never reach here — `proxy.Recoverer` catches those — so this only fires on an accept-loop fault, which is effectively a stdlib bug.
+- **`switchyard_panics_total{source}` is shared with Step 1.1**: the label is the goroutine name (`health-checker:groq`, `quality-worker`, `requestlog-writer`, `retention-sweeper`) for background panics, the route pattern for request-path panics.
+
+- **`Supervise` runs `fn` at least once, even against an already-cancelled context** — corrected during Step 2.1, when the logstore writer round-trip tests failed against a live Postgres. The original `for ctx.Err() == nil` guard skipped `fn` entirely if shutdown beat the supervisor's first iteration, so `Writer.loop` never reached its `finalFlush` drain and queued rows were dropped — while `close(w.done)` still fired, making `Wait` report a successful flush. Cancellation belongs to the supervised loop, not the supervisor. Cost: a worker whose context is already dead still pays one pass through its loop body; every current `fn` returns immediately in that case, so the cost is nil in practice. The regression only surfaced with Postgres running — without it those tests skip, which is why Phase 1 read clean.
+
+### Step 1.4 — Prove it
+
+- **The `panic` chaos mode panics inside `Chaos.Apply`, the same injection point every other mode uses.** One code path, already wired into both the streaming and non-streaming handlers; no new hook in the hot loop. Because `Apply` runs before the provider call, a panic on a streaming request lands before the first byte, so it produces a clean 500 rather than a mid-stream SSE error event — the mid-stream case is covered by the Step 1.2 unit test, not reproducible through this injection point.
+- **`panic` does not travel the provider-error path.** The other four modes forge a `*provider.Error` so the breaker/retry/fallback machinery sees them; a panic is a gateway bug, not a provider fault, so it just panics and lets `proxy.Recoverer` handle it.
+- **Admin and the cmd adapter needed no changes** — `Mode` crosses both boundaries as a free string and is validated only in `proxy.ChaosRule.validate`. The UI change is one entry in `ProviderChaosControl`'s `MODES` array; everything downstream keyed off that array already.
+- **Test-metric reads use `client_model/go` `dto`, not `prometheus/.../testutil`** — `testutil` would add `kylelemons/godebug` as an indirect dep for a test helper; `client_model` is already a dependency. This promoted `client_model` from indirect to a direct require in `go.mod` (no `go.sum` change).
+

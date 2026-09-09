@@ -96,6 +96,50 @@ func TestWorkerEnqueueNeverBlocks(t *testing.T) {
 	}
 }
 
+// panicOnceScorer panics the first time it is called and scores normally after,
+// standing in for the plan's "one bad row from the quality worker".
+type panicOnceScorer struct {
+	mu       sync.Mutex
+	panicked bool
+}
+
+func (s *panicOnceScorer) Score(context.Context, Sample) (Verdict, error) {
+	s.mu.Lock()
+	first := !s.panicked
+	s.panicked = true
+	s.mu.Unlock()
+	if first {
+		panic("bad sample")
+	}
+	return Verdict{Score: 5}, nil
+}
+
+// A panic scoring one sample must not kill the worker: Supervise restarts the
+// loop and the next sample is scored.
+func TestWorkerSurvivesScorerPanic(t *testing.T) {
+	st := &fakeStore{}
+	w := newTestWorker(&panicOnceScorer{}, st)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.Run(ctx)
+
+	w.Enqueue(Sample{RequestID: "poison", Reason: ReasonDowngraded})
+	w.Enqueue(Sample{RequestID: "good", Reason: ReasonDowngraded})
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if v, ok := st.get("good"); ok {
+			if v != 5 {
+				t.Fatalf("stored score = %v, want 5", v)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("worker did not recover from the panic and score the next sample")
+}
+
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)

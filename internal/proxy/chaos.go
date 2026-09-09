@@ -39,8 +39,8 @@ const devEnvironment = "dev"
 // that it exists and declined.
 var ErrChaosUnavailable = errors.New("chaos harness is not available in this environment")
 
-// ChaosMode is one kind of injected fault. The four here are exactly the
-// modes Step 7.5 lists.
+// ChaosMode is one kind of injected fault. The first four are the modes Step
+// 7.5 lists; ChaosPanic was added in Tier 1 to prove panic recovery.
 type ChaosMode string
 
 const (
@@ -60,6 +60,14 @@ const (
 	// ChaosDrop forges a transport failure with no HTTP response at all —
 	// the shape of a connection dropped mid-flight.
 	ChaosDrop ChaosMode = "drop"
+
+	// ChaosPanic panics the request goroutine at the injection point, to
+	// demonstrate that proxy.Recoverer catches it: the request gets a 500
+	// (or a mid-stream SSE error event), the panic is logged and counted in
+	// switchyard_panics_total, and the process keeps serving. Unlike the other
+	// modes it does not travel the provider-error path — a panic is a gateway
+	// bug, not a provider fault.
+	ChaosPanic ChaosMode = "panic"
 )
 
 // chaosRateLimitRetryAfter is what a forged 429 tells the caller to wait.
@@ -86,7 +94,7 @@ func (r ChaosRule) validate() error {
 	}
 
 	switch r.Mode {
-	case ChaosError, ChaosRateLimit, ChaosDrop:
+	case ChaosError, ChaosRateLimit, ChaosDrop, ChaosPanic:
 		if r.Latency != 0 {
 			return fmt.Errorf("latency is only meaningful for mode %q, got mode %q", ChaosLatency, r.Mode)
 		}
@@ -258,6 +266,12 @@ func (c *Chaos) Apply(ctx context.Context, providerName, model string) error {
 		slog.String("model", model),
 		slog.String("mode", string(rule.Mode)),
 	)
+
+	if rule.Mode == ChaosPanic {
+		// Recovered by proxy.Recoverer. The message names the target for the
+		// logs; Recoverer never puts it on the wire.
+		panic(fmt.Sprintf("chaos: injected panic for %s/%s", providerName, model))
+	}
 
 	if rule.Mode == ChaosLatency {
 		// Raced against ctx rather than slept blindly: a client that gives up

@@ -75,7 +75,7 @@ func NewRouter(resolver Resolver, authr Authenticator, limiter RateLimiter, budg
 
 	r := chi.NewRouter()
 
-	r.Use(Recoverer(log))
+	r.Use(Recoverer(log, promMetrics))
 	r.Use(RequestID)
 	r.Use(Timing)
 	r.Use(Tracing)

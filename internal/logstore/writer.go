@@ -123,9 +123,19 @@ func (w *Writer) Write(rec Record) {
 
 // Run flushes batches until ctx is cancelled, then drains whatever is still
 // queued under its own deadline before returning.
+//
+// The flush loop runs under Supervise: a panic writing one batch (a driver
+// bug, a malformed row) is recovered and the loop restarted after a backoff,
+// rather than taking the whole gateway down. close(w.done) stays out here so it
+// runs exactly once, whatever the loop does.
 func (w *Writer) Run(ctx context.Context) {
 	defer close(w.done)
+	telemetry.Supervise(ctx, w.log, w.metrics, "requestlog-writer", func() {
+		w.loop(ctx)
+	})
+}
 
+func (w *Writer) loop(ctx context.Context) {
 	ticker := time.NewTicker(w.cfg.FlushInterval)
 	defer ticker.Stop()
 

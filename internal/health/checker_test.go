@@ -59,7 +59,7 @@ func TestNewCheckerValidation(t *testing.T) {
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			_, err := NewChecker(mocks, monitor, log, tt.interval, tt.timeout)
+			_, err := NewChecker(mocks, monitor, log, nil, tt.interval, tt.timeout)
 			if tt.wantErr && err == nil {
 				t.Fatalf("NewChecker() error = nil, want error")
 			}
@@ -80,7 +80,7 @@ func TestCheckerRunPingsImmediatelyAndOnEachTick(t *testing.T) {
 	providers := []provider.Provider{mockA, mockB}
 	monitor := newTestMonitor(t, providers, log)
 
-	checker, err := NewChecker(providers, monitor, log, 15*time.Millisecond, 5*time.Millisecond)
+	checker, err := NewChecker(providers, monitor, log, nil, 15*time.Millisecond, 5*time.Millisecond)
 	if err != nil {
 		t.Fatalf("NewChecker() error: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestCheckerCheckUsesItsOwnTimeout(t *testing.T) {
 	slow := &provider.Mock{ProviderName: "slow", Models: []string{"m"}, Delay: 50 * time.Millisecond}
 	monitor := newTestMonitor(t, []provider.Provider{slow}, log)
 
-	checker, err := NewChecker([]provider.Provider{slow}, monitor, log, time.Second, 10*time.Millisecond)
+	checker, err := NewChecker([]provider.Provider{slow}, monitor, log, nil, time.Second, 10*time.Millisecond)
 	if err != nil {
 		t.Fatalf("NewChecker() error: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestCheckerCheckLogsSuccess(t *testing.T) {
 	healthy := &provider.Mock{ProviderName: "healthy", Models: []string{"m"}}
 	monitor := newTestMonitor(t, []provider.Provider{healthy}, log)
 
-	checker, err := NewChecker([]provider.Provider{healthy}, monitor, log, time.Second, 50*time.Millisecond)
+	checker, err := NewChecker([]provider.Provider{healthy}, monitor, log, nil, time.Second, 50*time.Millisecond)
 	if err != nil {
 		t.Fatalf("NewChecker() error: %v", err)
 	}

@@ -93,15 +93,20 @@ func (w *Worker) Run(ctx context.Context) {
 		w.wg.Add(1)
 		go func() {
 			defer w.wg.Done()
-			for {
-				select {
-				case s := <-w.queue:
-					w.process(ctx, s)
-					w.reportDepth()
-				case <-ctx.Done():
-					return
+			// A panic scoring one bad sample must not kill the gateway, so the
+			// scoring loop runs under Supervise, which restarts it after a
+			// capped backoff.
+			telemetry.Supervise(ctx, w.log, w.metrics, "quality-worker", func() {
+				for {
+					select {
+					case s := <-w.queue:
+						w.process(ctx, s)
+						w.reportDepth()
+					case <-ctx.Done():
+						return
+					}
 				}
-			}
+			})
 		}()
 	}
 	w.wg.Wait()

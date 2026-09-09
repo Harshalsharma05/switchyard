@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,8 +11,11 @@ import (
 	"testing"
 	"time"
 
+	dto "github.com/prometheus/client_model/go"
+
 	"github.com/Harshalsharma05/switchyard/internal/auth"
 	"github.com/Harshalsharma05/switchyard/internal/provider"
+	"github.com/Harshalsharma05/switchyard/internal/telemetry"
 )
 
 func devChaos(t *testing.T) *Chaos {
@@ -97,6 +101,7 @@ func TestChaosRuleValidation(t *testing.T) {
 		"model only":          {rule: ChaosRule{Model: "m", Mode: ChaosDrop}},
 		"provider and model":  {rule: ChaosRule{Provider: "groq", Model: "m", Mode: ChaosRateLimit}},
 		"latency with a wait": {rule: ChaosRule{Provider: "groq", Mode: ChaosLatency, Latency: time.Second}},
+		"panic mode":          {rule: ChaosRule{Provider: "groq", Mode: ChaosPanic}},
 
 		// Neither field set would silently target every call the gateway
 		// makes, which is not something a fat-fingered rule should be able
@@ -107,6 +112,7 @@ func TestChaosRuleValidation(t *testing.T) {
 		"latency without wait":  {rule: ChaosRule{Provider: "groq", Mode: ChaosLatency}, wantErr: true},
 		"negative latency":      {rule: ChaosRule{Provider: "groq", Mode: ChaosLatency, Latency: -time.Second}, wantErr: true},
 		"latency on error mode": {rule: ChaosRule{Provider: "groq", Mode: ChaosError, Latency: time.Second}, wantErr: true},
+		"latency on panic mode": {rule: ChaosRule{Provider: "groq", Mode: ChaosPanic, Latency: time.Second}, wantErr: true},
 	}
 
 	for name, tt := range tests {
@@ -395,6 +401,69 @@ func TestChaosFeedsTheHealthRecorder(t *testing.T) {
 	failures := recorder.failuresFor("groq")
 	if failures == 0 {
 		t.Errorf("health recorder saw no failures for the chaos-broken provider, want at least one")
+	}
+}
+
+// TestChaosPanicModePanicsAtInjectionPoint proves the panic mode does what it
+// says at the harness level, before any router wiring.
+func TestChaosPanicModePanicsAtInjectionPoint(t *testing.T) {
+	c := devChaos(t)
+	if err := c.SetRules([]ChaosRule{{Provider: "groq", Mode: ChaosPanic}}); err != nil {
+		t.Fatalf("SetRules() error: %v", err)
+	}
+
+	defer func() {
+		if recover() == nil {
+			t.Error("Apply() did not panic for a panic rule")
+		}
+	}()
+	_ = c.Apply(context.Background(), "groq", "m")
+}
+
+// TestChaosPanicModeRecoveredEndToEnd is the Step 1.4 checklist item: a panic
+// forced through the chaos harness returns 500, does not leak the panic value,
+// increments switchyard_panics_total, and leaves the process serving.
+func TestChaosPanicModeRecoveredEndToEnd(t *testing.T) {
+	m, err := telemetry.NewMetrics()
+	if err != nil {
+		t.Fatalf("NewMetrics: %v", err)
+	}
+
+	chaos := devChaos(t)
+	if err := chaos.SetRules([]ChaosRule{{Provider: "groq", Mode: ChaosPanic}}); err != nil {
+		t.Fatalf("SetRules() error: %v", err)
+	}
+
+	srv := httptest.NewServer(NewRouter(stubResolver{prov: okMock("groq", "m")}, stubAuthenticator{team: defaultTestTeam()},
+		stubRateLimiter{}, stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, nil, nil, chaos,
+		noRetryConfig(t), m, nil, discardLogger(), func() bool { return true }))
+	t.Cleanup(srv.Close)
+
+	resp := post(t, srv, `{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", resp.StatusCode)
+	}
+	if strings.Contains(string(body), "chaos: injected panic") {
+		t.Errorf("panic value leaked into the response body: %q", body)
+	}
+
+	// Chaos is still active; a second request still gets a response rather than
+	// a refused connection — the process survived the first panic.
+	resp2 := post(t, srv, `{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusInternalServerError {
+		t.Errorf("second request status = %d, want 500 — the process must still be serving", resp2.StatusCode)
+	}
+
+	var dtoMetric dto.Metric
+	if err := m.PanicsTotal.WithLabelValues("/v1/chat/completions").Write(&dtoMetric); err != nil {
+		t.Fatalf("reading counter: %v", err)
+	}
+	if got := dtoMetric.GetCounter().GetValue(); got != 2 {
+		t.Errorf("switchyard_panics_total{source=\"/v1/chat/completions\"} = %v, want 2", got)
 	}
 }
 

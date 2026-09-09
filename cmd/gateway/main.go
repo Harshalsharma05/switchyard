@@ -328,6 +328,7 @@ func run() error {
 		initial.registry.Providers(),
 		healthMonitor,
 		log,
+		promMetrics,
 		durationOr("SWITCHYARD_HEALTH_CHECK_INTERVAL", defaultHealthCheckInterval),
 		durationOr("SWITCHYARD_HEALTH_CHECK_TIMEOUT", defaultHealthCheckTimeout),
 	)
@@ -553,7 +554,7 @@ func run() error {
 			auditRec,
 			sysInfo,
 			promMetrics, log,
-			proxy.Recoverer(log),
+			proxy.Recoverer(log, promMetrics),
 			proxy.RequestID,
 			proxy.Logger(log),
 		),
@@ -668,6 +669,18 @@ func run() error {
 // ordinary close.
 func serve(srv *http.Server, ln net.Listener, name string, log *slog.Logger, errs chan<- error) {
 	log.Info("listener serving", slog.String("listener", name), slog.String("addr", ln.Addr().String()))
+
+	// A panic in the accept loop is not restartable the way a worker loop is —
+	// re-entering Serve on a listener whose accept path just panicked is
+	// unsound. Instead it is turned into the same graceful-shutdown trigger a
+	// Serve error already is: report it and let run() drain the other listener.
+	// Panics inside request handlers never reach here; proxy.Recoverer catches
+	// those.
+	defer func() {
+		if rec := recover(); rec != nil {
+			errs <- fmt.Errorf("%s listener panicked: %v", name, rec)
+		}
+	}()
 
 	// ErrServerClosed is what Shutdown causes, so it is the expected outcome
 	// rather than a failure.

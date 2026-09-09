@@ -107,12 +107,20 @@ func NewRetainer(pool *pgxpool.Pool, cfg RetentionConfig, metrics *telemetry.Met
 // Run sweeps on a ticker until ctx is cancelled. A failed sweep is logged and
 // retried on the next tick: retention falling behind is an operational
 // problem, never a reason to fail a request.
+//
+// The sweep loop runs under Supervise so a panic mid-sweep is recovered and
+// the loop restarted after a backoff rather than crashing the gateway.
 func (r *Retainer) Run(ctx context.Context) {
 	if r.cfg.Window <= 0 {
 		r.log.Info("request log retention disabled")
 		return
 	}
+	telemetry.Supervise(ctx, r.log, r.metrics, "retention-sweeper", func() {
+		r.loop(ctx)
+	})
+}
 
+func (r *Retainer) loop(ctx context.Context) {
 	ticker := time.NewTicker(r.cfg.Interval)
 	defer ticker.Stop()
 

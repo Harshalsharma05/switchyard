@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"net/http"
 	"runtime/debug"
 	"strconv"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
 	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
@@ -536,9 +538,13 @@ func Logger(log *slog.Logger) func(http.Handler) http.Handler {
 // This is the one place a panic is caught rather than avoided: the gateway must
 // never be the reason a request fails, and that includes never being the reason
 // every *other* in-flight request fails because the process died.
-func Recoverer(log *slog.Logger) func(http.Handler) http.Handler {
+//
+// metrics may be nil (tests that drive the chain without a Prometheus registry
+// pass nil throughout); the panic counter is simply skipped in that case.
+func Recoverer(log *slog.Logger, metrics *telemetry.Metrics) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			pw := &panicWriter{ResponseWriter: w}
 			defer func() {
 				rec := recover()
 				if rec == nil {
@@ -550,18 +556,86 @@ func Recoverer(log *slog.Logger) func(http.Handler) http.Handler {
 					panic(rec)
 				}
 
+				route := panicRoute(r)
 				log.LogAttrs(r.Context(), slog.LevelError, "panic recovered",
 					slog.String("request_id", RequestIDFrom(r.Context())),
+					slog.String("route", route),
 					slog.String("path", r.URL.Path),
+					slog.Bool("response_started", pw.wrote),
 					slog.Any("panic", rec),
 					slog.String("stack", string(debug.Stack())),
 				)
+				if metrics != nil {
+					metrics.PanicsTotal.WithLabelValues(route).Inc()
+				}
 
-				writeError(w, log, http.StatusInternalServerError, "internal_error",
-					"the gateway encountered an unexpected error")
+				respondToPanic(pw, log)
 			}()
 
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(pw, r)
 		})
 	}
+}
+
+// errPanicRecovered is what a recovered panic hands writeSSEError. It is
+// deliberately not a *provider.Error, so writeSSEError emits its generic
+// internal_error envelope and the panic value never reaches the client.
+var errPanicRecovered = errors.New("panic recovered")
+
+// respondToPanic signals failure on whatever channel is still open. Before the
+// response is committed that is a normal 500. Once it is committed the status
+// line cannot be retracted — and for a stream the only channel left is an
+// in-band SSE error event, the same one a mid-stream provider failure uses
+// (Step 2.4 of Part 1). A committed non-stream response has no channel left,
+// so it is only logged (already done by the caller).
+func respondToPanic(pw *panicWriter, log *slog.Logger) {
+	if !pw.wrote {
+		writeError(pw, log, http.StatusInternalServerError, "internal_error",
+			"the gateway encountered an unexpected error")
+		return
+	}
+	if pw.Header().Get("Content-Type") == "text/event-stream" {
+		_ = writeSSEError(pw, errPanicRecovered)
+		pw.Flush()
+	}
+}
+
+// panicWriter is the minimal wrapper Recoverer needs to tell "a 500 is still
+// possible" from "the status line is long gone". Flush and Unwrap are kept
+// reachable for the same reason recorder keeps them: a wrapper that hides
+// http.Flusher silently breaks streaming for every handler behind it.
+type panicWriter struct {
+	http.ResponseWriter
+	wrote bool
+}
+
+func (w *panicWriter) WriteHeader(status int) {
+	w.wrote = true
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *panicWriter) Write(b []byte) (int, error) {
+	w.wrote = true
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *panicWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (w *panicWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// panicRoute is the low-cardinality label for a recovered request-path panic:
+// chi's matched route pattern (e.g. "/v1/chat/completions"), or "unmatched"
+// when the panic happened before routing resolved. Raw r.URL.Path is
+// deliberately not used — scanner traffic would make it unbounded.
+func panicRoute(r *http.Request) string {
+	if rctx := chi.RouteContext(r.Context()); rctx != nil {
+		if p := rctx.RoutePattern(); p != "" {
+			return p
+		}
+	}
+	return "unmatched"
 }

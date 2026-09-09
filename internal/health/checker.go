@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Harshalsharma05/switchyard/internal/provider"
+	"github.com/Harshalsharma05/switchyard/internal/telemetry"
 )
 
 // Checker runs one ticking goroutine per provider. Interval and Timeout are
@@ -24,6 +25,7 @@ type Checker struct {
 	providers []provider.Provider
 	monitor   *Monitor
 	log       *slog.Logger
+	metrics   *telemetry.Metrics
 	interval  time.Duration
 	timeout   time.Duration
 }
@@ -33,7 +35,7 @@ type Checker struct {
 // Step 5.1's active checks into Step 5.3's healthy/degraded/down status —
 // Checker itself only ever logs a single ping's result, it does not decide
 // what that means for the provider overall.
-func NewChecker(providers []provider.Provider, monitor *Monitor, log *slog.Logger, interval, timeout time.Duration) (*Checker, error) {
+func NewChecker(providers []provider.Provider, monitor *Monitor, log *slog.Logger, metrics *telemetry.Metrics, interval, timeout time.Duration) (*Checker, error) {
 	if interval <= 0 {
 		return nil, fmt.Errorf("health checker: interval must be positive, got %s", interval)
 	}
@@ -51,7 +53,7 @@ func NewChecker(providers []provider.Provider, monitor *Monitor, log *slog.Logge
 		return nil, fmt.Errorf("health checker: timeout (%s) must be shorter than interval (%s)", timeout, interval)
 	}
 
-	return &Checker{providers: providers, monitor: monitor, log: log, interval: interval, timeout: timeout}, nil
+	return &Checker{providers: providers, monitor: monitor, log: log, metrics: metrics, interval: interval, timeout: timeout}, nil
 }
 
 // Run starts one ticking goroutine per provider and blocks until ctx is
@@ -65,7 +67,11 @@ func (c *Checker) Run(ctx context.Context) {
 		wg.Add(1)
 		go func(p provider.Provider) {
 			defer wg.Done()
-			c.watch(ctx, p)
+			// A panic in a provider adapter's Ping must not take the process
+			// down, and must not take the other providers' watchers with it.
+			telemetry.Supervise(ctx, c.log, c.metrics, "health-checker:"+p.Name(), func() {
+				c.watch(ctx, p)
+			})
 		}(p)
 	}
 	wg.Wait()

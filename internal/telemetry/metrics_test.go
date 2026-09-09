@@ -33,6 +33,7 @@ func TestNewMetricsRegistersEveryFamily(t *testing.T) {
 	m.RequestLogQueueDepth.Set(0)
 	m.RetentionRowsDeletedTotal.Add(0)
 	m.RetentionLastSweepTimestamp.Set(0)
+	m.PanicsTotal.WithLabelValues("/v1/chat/completions").Inc()
 
 	m.CacheLookupsTotal.WithLabelValues("acme", "exact", "hit").Inc()
 	m.CacheDegradedTotal.WithLabelValues("redis_read").Inc()
@@ -72,6 +73,7 @@ func TestNewMetricsRegistersEveryFamily(t *testing.T) {
 		"switchyard_requestlog_queue_depth",
 		"switchyard_retention_rows_deleted_total",
 		"switchyard_retention_last_sweep_timestamp_seconds",
+		"switchyard_panics_total",
 		"switchyard_cache_lookups_total",
 		"switchyard_cache_degraded_total",
 		"switchyard_cache_lookup_seconds",

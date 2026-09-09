@@ -715,6 +715,67 @@ func TestStreamChatCompletionsMidStreamError(t *testing.T) {
 	}
 }
 
+// panicAfterOneChunkReader streams one good chunk and then panics on the next
+// Recv — a bug in the stream path surfacing after the 200 and one event are
+// already on the wire.
+type panicAfterOneChunkReader struct{ sent bool }
+
+func (r *panicAfterOneChunkReader) Recv() (*provider.Chunk, error) {
+	if !r.sent {
+		r.sent = true
+		return &provider.Chunk{Content: "partial"}, nil
+	}
+	panic("boom in the stream loop")
+}
+
+func (r *panicAfterOneChunkReader) Close() error { return nil }
+
+// A panic mid-stream is the same problem as a mid-stream provider error: the
+// 200 is already committed, so the client gets an SSE error event, the stream
+// ends without [DONE], and the process keeps serving.
+func TestStreamChatCompletionsMidStreamPanic(t *testing.T) {
+	mock := &provider.Mock{
+		StreamFunc: func(context.Context, provider.Request) (provider.StreamReader, error) {
+			return &panicAfterOneChunkReader{}, nil
+		},
+	}
+
+	srv := newTestServer(t, stubResolver{prov: mock})
+	resp := post(t, srv, `{"model":"m","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: the 200 was committed before the panic", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	if strings.Contains(string(body), "boom in the stream loop") {
+		t.Errorf("panic value leaked into the response body: %q", body)
+	}
+
+	events := parseSSE(t, body)
+	if len(events) != 2 {
+		t.Fatalf("got %d SSE events, want 2 (one chunk + one error event): %q", len(events), body)
+	}
+	if events[1] == "[DONE]" {
+		t.Error("stream ended with [DONE] instead of an error event")
+	}
+
+	var errEvent errorBody
+	if err := json.Unmarshal([]byte(events[1]), &errEvent); err != nil {
+		t.Fatalf("decoding error event: %v", err)
+	}
+	if errEvent.Error.Type != "internal_error" {
+		t.Errorf("error event type = %q, want internal_error", errEvent.Error.Type)
+	}
+
+	// The process is still serving after the recovered panic: a second request
+	// still gets a response rather than a connection refusal.
+	ok := post(t, srv, `{"model":"m","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+	if ok.StatusCode != http.StatusOK {
+		t.Errorf("follow-up request status = %d, want 200 — the panic must not have killed the server", ok.StatusCode)
+	}
+}
+
 // blockingStreamReader never returns a chunk on its own; it waits for its
 // context to be cancelled, which is exactly what a client disconnect should
 // cause per Step 2.3.

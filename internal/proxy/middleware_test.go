@@ -5,6 +5,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/go-chi/chi/v5"
+	dto "github.com/prometheus/client_model/go"
+
+	"github.com/Harshalsharma05/switchyard/internal/telemetry"
 )
 
 func TestRequestIDGeneratesWhenAbsent(t *testing.T) {
@@ -148,7 +153,7 @@ func TestLoggerSupportsResponseController(t *testing.T) {
 }
 
 func TestRecovererTurnsPanicIntoFiveHundred(t *testing.T) {
-	h := Recoverer(discardLogger())(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := Recoverer(discardLogger(), nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		panic("something went badly wrong")
 	}))
 
@@ -176,7 +181,7 @@ func TestRecovererTurnsPanicIntoFiveHundred(t *testing.T) {
 // The process must survive a panicking handler, since one bad request must not
 // take down every other in-flight request.
 func TestRecovererKeepsServerServing(t *testing.T) {
-	h := Recoverer(discardLogger())(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := Recoverer(discardLogger(), nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/boom" {
 			panic("boom")
 		}
@@ -200,6 +205,71 @@ func TestRecovererKeepsServerServing(t *testing.T) {
 
 	if ok.StatusCode != http.StatusOK {
 		t.Errorf("status = %d after an earlier panic, want 200", ok.StatusCode)
+	}
+}
+
+// The counter must record the matched route pattern, not the raw path — a
+// dashboard needs "which endpoint panics" without scanner traffic inflating
+// the label set.
+func TestRecovererCountsPanicByRoute(t *testing.T) {
+	m, err := telemetry.NewMetrics()
+	if err != nil {
+		t.Fatalf("NewMetrics: %v", err)
+	}
+
+	r := chi.NewRouter()
+	r.Use(Recoverer(discardLogger(), m))
+	r.Get("/v1/thing/{id}", func(http.ResponseWriter, *http.Request) { panic("boom") })
+
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/v1/thing/42")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", resp.StatusCode)
+	}
+
+	var dtoMetric dto.Metric
+	if err := m.PanicsTotal.WithLabelValues("/v1/thing/{id}").Write(&dtoMetric); err != nil {
+		t.Fatalf("reading counter: %v", err)
+	}
+	if got := dtoMetric.GetCounter().GetValue(); got != 1 {
+		t.Errorf("switchyard_panics_total{source=\"/v1/thing/{id}\"} = %v, want 1", got)
+	}
+}
+
+// Recoverer must be genuinely outermost: a panic raised in another middleware
+// below it — auth, in the real chain — is caught the same as one in the handler.
+func TestRecovererCatchesPanicInInnerMiddleware(t *testing.T) {
+	panicMW := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic("boom in middleware") })
+	}
+
+	r := chi.NewRouter()
+	r.Use(Recoverer(discardLogger(), nil))
+	r.Use(panicMW)
+	r.Get("/x", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/x")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	body := make([]byte, 256)
+	n, _ := resp.Body.Read(body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", resp.StatusCode)
+	}
+	if strings.Contains(string(body[:n]), "boom in middleware") {
+		t.Error("panic message leaked into the response body")
 	}
 }
 
