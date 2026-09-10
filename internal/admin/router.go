@@ -66,8 +66,10 @@ func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers 
 
 		r.Route("/admin/teams", func(r chi.Router) {
 			r.Get("/", listTeams(teams, spend, log))
+			r.Post("/", createTeam(teams, providers, audit, log))
 			r.Get("/{id}", getTeam(teams, spend, log))
 			r.Patch("/{id}", patchTeam(teams, spend, audit, log))
+			r.Delete("/{id}", deleteTeam(teams, audit, log))
 			r.Post("/{id}/reset-budget", resetBudget(teams, spend, audit, log))
 
 			// Step 6.4's key lifecycle. Both write an audit entry before they

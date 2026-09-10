@@ -11,6 +11,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Harshalsharma05/switchyard/internal/auth"
 )
@@ -65,8 +66,9 @@ func Seed(ctx context.Context, conn *pgx.Conn, teams []auth.Team) (int, error) {
 	}
 
 	for _, t := range teams {
+		t.OrganizationID = DefaultOrgID
 		if err := insertTeam(ctx, tx, t); err != nil {
-			return 0, err
+			return 0, fmt.Errorf("seeding team %q: %w", t.ID, err)
 		}
 	}
 
@@ -95,7 +97,17 @@ const insertTeamSQL = `
 		key_hash, key_source, key_masked, key_created_at
 	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`
 
-func insertTeam(ctx context.Context, tx pgx.Tx, t auth.Team) error {
+// execer is what insertTeam needs from its caller: a transaction in Seed, the
+// pool in Store.Create. Both pgx types satisfy it structurally, which is what
+// lets one insert serve both without either knowing about the other.
+type execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// insertTeam writes one team row. Errors are returned unwrapped so each caller
+// can say what it was doing — and so Store.Create can inspect the Postgres
+// error code underneath.
+func insertTeam(ctx context.Context, db execer, t auth.Team) error {
 	// A revoked key is NULL, not "" — the partial unique index on key_hash is
 	// what lets several revoked teams coexist, and "" is not a valid digest.
 	var keyHash *string
@@ -103,13 +115,11 @@ func insertTeam(ctx context.Context, tx pgx.Tx, t auth.Team) error {
 		keyHash = &t.KeyHash
 	}
 
-	if _, err := tx.Exec(ctx, insertTeamSQL,
-		t.ID, DefaultOrgID, t.Name, string(t.Priority),
+	_, err := db.Exec(ctx, insertTeamSQL,
+		t.ID, t.OrganizationID, t.Name, string(t.Priority),
 		t.RateLimits.RPM, t.RateLimits.TPM, t.MonthlyBudgetMicros,
 		t.AllowedProviders, t.AllowedModels, t.IsAdmin,
 		keyHash, t.KeySource, t.KeyMasked, t.KeyCreatedAt,
-	); err != nil {
-		return fmt.Errorf("seeding team %q: %w", t.ID, err)
-	}
-	return nil
+	)
+	return err
 }

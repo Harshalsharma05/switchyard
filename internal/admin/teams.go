@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -35,6 +37,8 @@ type TeamStore interface {
 	Update(ctx context.Context, id string, patch auth.TeamPatch) (auth.Team, error)
 	RotateKey(ctx context.Context, id, newHash, newMasked string) (auth.Team, error)
 	RevokeKey(ctx context.Context, id string) (auth.Team, error)
+	Create(ctx context.Context, t auth.Team) (auth.Team, error)
+	Delete(ctx context.Context, id string) (auth.Team, error)
 }
 
 // SpendReader is the slice of budget.Tracker this package needs.
@@ -62,6 +66,7 @@ type rateLimitsView struct {
 type teamView struct {
 	ID                string         `json:"id"`
 	Name              string         `json:"name"`
+	OrganizationID    string         `json:"organization_id"`
 	AllowedProviders  []string       `json:"allowed_providers"`
 	AllowedModels     []string       `json:"allowed_models"`
 	RateLimits        rateLimitsView `json:"rate_limits"`
@@ -124,6 +129,7 @@ func newTeamView(t auth.Team, spentMicros *int64) teamView {
 	v := teamView{
 		ID:               t.ID,
 		Name:             t.Name,
+		OrganizationID:   t.OrganizationID,
 		AllowedProviders: t.AllowedProviders,
 		AllowedModels:    t.AllowedModels,
 		RateLimits:       rateLimitsView{RPM: t.RateLimits.RPM, TPM: t.RateLimits.TPM},
@@ -481,4 +487,238 @@ func writeTeamLookupError(w http.ResponseWriter, log *slog.Logger, id string, er
 	}
 	log.Error("looking up team", slog.String("team", id), slog.Any("error", err))
 	writeError(w, log, http.StatusInternalServerError, "internal_error", "the gateway could not resolve this team")
+}
+
+// --- create and delete (Tier 1, Step 2.5) ---------------------------------
+
+// createTeamRequest is POST /admin/teams' body. Flat, like a PATCH body, and
+// with no id: the ID is derived from the name, once, and never changes.
+type createTeamRequest struct {
+	Name             string   `json:"name"`
+	OrganizationID   string   `json:"organization_id"`
+	Priority         string   `json:"priority"`
+	RPM              int      `json:"rpm"`
+	TPM              int      `json:"tpm"`
+	MonthlyBudgetUSD float64  `json:"monthly_budget_usd"`
+	AllowedProviders []string `json:"allowed_providers"`
+	AllowedModels    []string `json:"allowed_models"`
+	IsAdmin          bool     `json:"is_admin"`
+}
+
+// createTeamResponse is a superset of rotateKeyResponse, so the console's
+// existing show-once key panel can render either one. APIKey is the only time
+// this team's plaintext key is ever returned.
+type createTeamResponse struct {
+	Team    teamView `json:"team"`
+	APIKey  string   `json:"api_key"`
+	Key     keyView  `json:"key"`
+	Warning string   `json:"warning"`
+}
+
+const creationWarning = "Copy this key now — it is shown once and never again. It works immediately and survives a gateway restart."
+
+// teamSettings is what an audit entry records about a whole team: its settings,
+// never its key, hash, or mask.
+func teamSettings(t auth.Team) map[string]any {
+	d := limitsDelta(t)
+	d["name"] = t.Name
+	d["priority"] = string(t.Priority)
+	d["allowed_providers"] = t.AllowedProviders
+	d["allowed_models"] = t.AllowedModels
+	d["is_admin"] = t.IsAdmin
+	if t.OrganizationID != "" {
+		d["organization_id"] = t.OrganizationID
+	}
+	return d
+}
+
+// validateAllowlists checks a new team's allowlists against the live provider
+// config, so a typo is a 400 now rather than a team whose every request 403s
+// later. Point-in-time by nature: a later providers.yaml edit can still leave a
+// stale entry, exactly as it can for a seeded team.
+func validateAllowlists(providers ProviderLister, allowedProviders, allowedModels []string) error {
+	knownProviders := map[string]bool{}
+	knownModels := map[string]bool{}
+	for _, cfg := range providers.Configs() {
+		knownProviders[cfg.Name] = true
+		for _, m := range cfg.Models {
+			knownModels[m] = true
+		}
+	}
+	for _, p := range allowedProviders {
+		if !knownProviders[p] {
+			return fmt.Errorf("allowed provider %q is not configured in providers.yaml", p)
+		}
+	}
+	for _, m := range allowedModels {
+		if !knownModels[m] {
+			return fmt.Errorf("allowed model %q is not served by any configured provider", m)
+		}
+	}
+	return nil
+}
+
+func writeTeamExists(w http.ResponseWriter, log *slog.Logger, id string) {
+	writeError(w, log, http.StatusConflict, "team_exists",
+		"a team with id "+id+" exists or once existed; team IDs come from the name and are never reused, so choose a different name")
+}
+
+// createTeam serves POST /admin/teams: validate, mint a key, record the creation,
+// then persist it. The plaintext key is in the 201 body and nowhere else — the
+// same show-once contract as a rotation — and the audit row records the team's
+// settings, never the key.
+func createTeam(store TeamStore, providers ProviderLister, audit AuditRecorder, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var body createTeamRequest
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&body); err != nil {
+			writeError(w, log, http.StatusBadRequest, "invalid_request_error",
+				"request body is not valid JSON: "+err.Error())
+			return
+		}
+
+		id := auth.Slug(body.Name)
+		if id == "" {
+			writeError(w, log, http.StatusBadRequest, "invalid_request_error",
+				"name must contain at least one ASCII letter or digit")
+			return
+		}
+		team := auth.Team{
+			ID:                  id,
+			OrganizationID:      body.OrganizationID,
+			Name:                strings.TrimSpace(body.Name),
+			AllowedProviders:    body.AllowedProviders,
+			AllowedModels:       body.AllowedModels,
+			RateLimits:          auth.RateLimits{RPM: body.RPM, TPM: body.TPM},
+			MonthlyBudgetMicros: usdToMicros(body.MonthlyBudgetUSD),
+			Priority:            auth.Priority(body.Priority),
+			IsAdmin:             body.IsAdmin,
+		}
+		if err := team.Validate(); err != nil {
+			writeError(w, log, http.StatusBadRequest, "invalid_request_error", err.Error())
+			return
+		}
+		if err := validateAllowlists(providers, team.AllowedProviders, team.AllowedModels); err != nil {
+			writeError(w, log, http.StatusBadRequest, "invalid_request_error", err.Error())
+			return
+		}
+
+		// Checked here as well as by the database, so an obvious conflict gets a
+		// clear 409 without an audit row for an attempt that could never succeed.
+		// A soft-deleted team's ID is not in the snapshot; the insert catches it.
+		if _, err := store.Get(id); err == nil {
+			writeTeamExists(w, log, id)
+			return
+		}
+
+		raw, err := auth.GenerateKey(id)
+		if err != nil {
+			log.ErrorContext(r.Context(), "generating new team key", slog.String("team", id), slog.Any("error", err))
+			writeError(w, log, http.StatusInternalServerError, "internal_error", "the gateway could not generate a key")
+			return
+		}
+		// All of the key's metadata is set here, where the key is minted, rather
+		// than split between this handler and the store.
+		now := time.Now().UTC()
+		team.KeyHash = auth.HashKey(raw)
+		team.KeyMasked = auth.MaskKey(raw)
+		team.KeySource = auth.KeySourceCreated
+		team.KeyCreatedAt = &now
+
+		if err := recordAudit(r.Context(), audit, logstore.AuditEntry{
+			ActorTeamID:  actorID(r),
+			ActorAddr:    r.RemoteAddr,
+			Action:       "team.create",
+			TargetTeamID: id,
+			Before:       map[string]any{},
+			After:        teamSettings(team),
+		}); err != nil {
+			log.ErrorContext(r.Context(), "writing team-create audit entry", slog.Any("error", err))
+			auditUnavailable(w, log)
+			return
+		}
+
+		created, err := store.Create(r.Context(), team)
+		if err != nil {
+			switch {
+			case errors.Is(err, auth.ErrTeamExists):
+				writeTeamExists(w, log, id)
+			case errors.Is(err, auth.ErrUnknownOrganization):
+				writeError(w, log, http.StatusBadRequest, "invalid_request_error",
+					"no such organization "+body.OrganizationID)
+			default:
+				log.ErrorContext(r.Context(), "creating team", slog.String("team", id), slog.Any("error", err))
+				writeError(w, log, http.StatusInternalServerError, "internal_error", "the team could not be created")
+			}
+			return
+		}
+
+		log.LogAttrs(r.Context(), slog.LevelInfo, "admin created team",
+			slog.String("actor", actorID(r)),
+			slog.String("actor_addr", r.RemoteAddr),
+			slog.String("team", id),
+		)
+
+		writeJSON(w, log, http.StatusCreated, createTeamResponse{
+			Team:    newTeamView(created, nil),
+			APIKey:  raw,
+			Key:     keyViewOf(created),
+			Warning: creationWarning,
+		})
+	}
+}
+
+// deleteTeam serves DELETE /admin/teams/{id}: a soft delete. The key stops
+// working on the next request, the row stays so request-log and audit history
+// keep pointing at a real team, and the ID is never reused.
+func deleteTeam(store TeamStore, audit AuditRecorder, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+
+		before, err := store.Get(id)
+		if err != nil {
+			writeTeamLookupError(w, log, id, err)
+			return
+		}
+
+		// Deleting the team you are authenticated as locks you out of the admin
+		// API. Refusing it also guarantees an admin always remains: only an admin
+		// can delete a team, and never its own.
+		if caller := adminTeam(r); caller != nil && caller.ID == id {
+			writeError(w, log, http.StatusConflict, "cannot_delete_own_team",
+				"refusing to delete the team this request is authenticated as; use another admin key")
+			return
+		}
+
+		if err := recordAudit(r.Context(), audit, logstore.AuditEntry{
+			ActorTeamID:  actorID(r),
+			ActorAddr:    r.RemoteAddr,
+			Action:       "team.delete",
+			TargetTeamID: id,
+			Before:       teamSettings(before),
+			After:        map[string]any{"deleted": true},
+		}); err != nil {
+			log.ErrorContext(r.Context(), "writing team-delete audit entry", slog.Any("error", err))
+			auditUnavailable(w, log)
+			return
+		}
+
+		if _, err := store.Delete(r.Context(), id); err != nil {
+			if errors.Is(err, auth.ErrUnknownTeam) {
+				writeError(w, log, http.StatusNotFound, "team_not_found", "no such team "+id)
+				return
+			}
+			log.ErrorContext(r.Context(), "deleting team", slog.String("team", id), slog.Any("error", err))
+			writeError(w, log, http.StatusInternalServerError, "internal_error", "the team could not be deleted")
+			return
+		}
+
+		log.LogAttrs(r.Context(), slog.LevelInfo, "admin deleted team",
+			slog.String("actor", actorID(r)),
+			slog.String("actor_addr", r.RemoteAddr),
+			slog.String("team", id),
+		)
+		w.WriteHeader(http.StatusNoContent)
+	}
 }

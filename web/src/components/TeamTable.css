@@ -55,10 +55,94 @@
 }
 .tt-showonce-warn { margin: 0; font-size: 11px; color: var(--status-warn); }
 
-.tt-create-note {
-  margin: var(--space-3) 0 0;
-  font-size: 11px;
-  color: var(--text-muted);
+/* --- create team (Tier 1, Step 2.6) --- */
+.tt-create-bar { margin-top: var(--space-3); }
+.tt-create-bar .tt-btn,
+.tt-create-foot .tt-btn { margin-left: 0; }
+
+.tt-created { margin-top: var(--space-3); }
+.tt-created-note { margin: 0; font-size: 12px; color: var(--text-secondary); }
+
+/* A nested panel: raised surface, hairline border, card radius (DESIGN.md). */
+.tt-create {
+  margin-top: var(--space-4);
+  padding: var(--space-4);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+}
+.tt-create-head {
+  margin: 0 0 var(--space-3);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+.tt-create-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: var(--space-3);
+}
+
+.tt-field { display: flex; flex-direction: column; gap: var(--space-1); }
+.tt-label { padding: 0; font-size: 12px; color: var(--text-secondary); }
+.tt-hint { font-size: 11px; color: var(--text-muted); }
+
+/* Form controls: inset well, hairline border, 32px (DESIGN.md "Inputs"). */
+.tt-control {
+  height: 32px;
+  padding: 0 var(--space-2);
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+}
+.tt-control:focus-visible {
+  border-color: var(--accent);
+  outline: 2px solid var(--status-info-bg);
+}
+.tt-control:disabled { color: var(--text-muted); }
+
+.tt-allow {
+  display: grid;
+  grid-template-columns: 1fr 2fr;
+  gap: var(--space-4);
+  margin-top: var(--space-4);
+}
+.tt-allow-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.tt-models { display: flex; flex-direction: column; gap: var(--space-1); }
+.tt-models-provider { margin-top: var(--space-1); font-size: 11px; color: var(--text-muted); }
+
+.tt-check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 13px;
+  color: var(--text-primary);
+}
+.tt-check input { accent-color: var(--accent); }
+.tt-check input:focus-visible { outline: 2px solid var(--status-info-bg); }
+.tt-create-admin { margin-top: var(--space-4); }
+
+.tt-create-foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+.tt-create-error { font-size: 12px; color: var(--status-error); }
+
+@media (max-width: 1100px) {
+  .tt-allow { grid-template-columns: 1fr; }
 }
 
 .tt-input {

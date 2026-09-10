@@ -18,6 +18,16 @@ var ErrUnknownKey = errors.New("unknown api key")
 // sentinel so a caller can map either onto the right HTTP status by identity.
 var ErrUnknownTeam = errors.New("unknown team id")
 
+// ErrTeamExists means a team with that ID exists or once existed. IDs are
+// never reused — a soft-deleted team keeps its ID — so this covers both, and
+// the admin API maps it onto a 409 by identity.
+var ErrTeamExists = errors.New("team id already exists")
+
+// ErrUnknownOrganization means a team named an organisation that does not
+// exist. It lives here, beside the Team field it describes, so the admin API
+// can branch on it without importing the Postgres store.
+var ErrUnknownOrganization = errors.New("unknown organization id")
+
 // Registry resolves a plaintext API key to the team that owns it, and — from
 // Step 4.3 onward — lets the admin API read and mutate a team's limits and
 // budget without a restart.
@@ -148,16 +158,25 @@ func (p TeamPatch) Apply(t Team) (Team, error) {
 		updated.MonthlyBudgetMicros = *p.MonthlyBudgetMicros
 	}
 
-	if updated.RateLimits.RPM <= 0 {
-		return Team{}, fmt.Errorf("rpm must be a positive integer, got %d", updated.RateLimits.RPM)
-	}
-	if updated.RateLimits.TPM <= 0 {
-		return Team{}, fmt.Errorf("tpm must be a positive integer, got %d", updated.RateLimits.TPM)
-	}
-	if updated.MonthlyBudgetMicros <= 0 {
-		return Team{}, fmt.Errorf("monthly budget must be positive, got %d micro-dollars", updated.MonthlyBudgetMicros)
+	if err := validateLimits(updated); err != nil {
+		return Team{}, err
 	}
 	return updated, nil
+}
+
+// validateLimits is the rule a PATCH and a new team share: both rate limits and
+// the budget must be positive. One copy, so the two paths cannot drift.
+func validateLimits(t Team) error {
+	if t.RateLimits.RPM <= 0 {
+		return fmt.Errorf("rpm must be a positive integer, got %d", t.RateLimits.RPM)
+	}
+	if t.RateLimits.TPM <= 0 {
+		return fmt.Errorf("tpm must be a positive integer, got %d", t.RateLimits.TPM)
+	}
+	if t.MonthlyBudgetMicros <= 0 {
+		return fmt.Errorf("monthly budget must be positive, got %d micro-dollars", t.MonthlyBudgetMicros)
+	}
+	return nil
 }
 
 // Update applies patch to one team and returns the result.
@@ -198,9 +217,9 @@ func (r *Registry) Update(id string, patch TeamPatch) (Team, error) {
 // unreferenced. The next request to present the new key authenticates
 // immediately, with nothing to invalidate.
 //
-// In memory only. A restart or a POST /admin/reload rebuilds the registry from
-// configs/teams.yaml and the rotation is gone — a documented limitation until
-// team storage moves to Postgres.
+// This method only changes the in-memory index. Durability is the caller's job:
+// internal/teamstore writes the new hash to Postgres first and then calls this,
+// so the rotation survives a restart.
 func (r *Registry) RotateKey(id, newHash, newMasked string) (Team, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -231,7 +250,8 @@ func (r *Registry) RotateKey(id, newHash, newMasked string) (Team, error) {
 
 // RevokeKey removes a team's key entirely. The team stays in the registry — an
 // admin can still see it and rotate it a new key — but no credential resolves
-// to it until then. Same in-memory-only caveat as RotateKey.
+// to it until then. Same division of labour as RotateKey: teamstore persists,
+// this updates the index.
 func (r *Registry) RevokeKey(id string) (Team, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -250,4 +270,46 @@ func (r *Registry) RevokeKey(id string) (Team, error) {
 	delete(r.byHash, existing.KeyHash)
 	r.byID[id] = &updated
 	return updated, nil
+}
+
+// Add indexes a newly created team (Tier 1, Step 2.5). Same rules NewRegistry
+// enforces — no duplicate ID, no shared key — and the same copy-on-write
+// discipline: it inserts a fresh pointer and never touches an existing one.
+func (r *Registry) Add(t Team) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, exists := r.byID[t.ID]; exists {
+		return ErrTeamExists
+	}
+	if t.KeyHash != "" {
+		if other, taken := r.byHash[t.KeyHash]; taken {
+			return fmt.Errorf("add %s: key already belongs to team %q", t.ID, other.ID)
+		}
+	}
+
+	team := t
+	r.byID[t.ID] = &team
+	if t.KeyHash != "" {
+		r.byHash[t.KeyHash] = &team
+	}
+	return nil
+}
+
+// Remove drops a team from both indexes, so its key stops resolving on the very
+// next request. A request that already authenticated keeps the *Team it holds
+// until it finishes, as with every other mutation here.
+func (r *Registry) Remove(id string) (Team, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	existing, ok := r.byID[id]
+	if !ok {
+		return Team{}, ErrUnknownTeam
+	}
+	delete(r.byID, id)
+	if existing.KeyHash != "" {
+		delete(r.byHash, existing.KeyHash)
+	}
+	return *existing, nil
 }

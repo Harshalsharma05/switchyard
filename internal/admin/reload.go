@@ -47,9 +47,9 @@ type reloadResponse struct {
 // The audit entry is written AFTER a successful reload, not before like the
 // team mutations. A reload that could not be audited should still run — it is
 // often the recovery step from a bad config — and a reload records itself as
-// "this happened", not "this was authorized". A reload is also the one action
-// that silently reverts every in-memory team PATCH and key rotation, so an
-// operator debugging "my rotated key stopped working" needs it in this list.
+// "this happened", not "this was authorized". Since Tier 1 Phase 2 a reload
+// re-reads providers.yaml only and cannot touch teams; it stays in the audit
+// list because it still changes routing and pricing for every request.
 func reloadConfig(reload Reloader, audit AuditRecorder, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		summary, err := reload(r.Context())

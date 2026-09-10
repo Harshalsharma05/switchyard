@@ -47,17 +47,27 @@ Write-Host "Building gateway, migrate, and mock provider binaries..."
 
 $env:SWITCHYARD_POSTGRES_HOST = "localhost:5432"
 
-Write-Host "Applying the request-log schema..."
-& (Join-Path $binDir "switchyard-migrate.exe")
-if ($LASTEXITCODE -ne 0) { Write-Error "migration failed"; exit 1 }
+# The load test gets its own database, recreated every run. Teams live in
+# Postgres and cmd/migrate seeds them only into an empty teams table, so the
+# load-test teams can only be seeded into a database that has none — the dev
+# stack's database already holds acme and globex. Recreating it also resets the
+# request log without touching the dev stack's history.
+$env:SWITCHYARD_POSTGRES_DB = "switchyard_loadtest"
+$env:SWITCHYARD_TEAMS_CONFIG = Join-Path $repoRoot "scripts\loadtest\teams.yaml"
 
 # Every run starts from a clean slate: rate-limit / budget / cache / breaker
-# state in Redis and request-log rows in Postgres both persist across runs
-# otherwise, so a prior run's spend or cached answers would skew this one's
-# numbers (a monthly budget counter especially — it would never reset).
-Write-Host "Clearing prior load-test state (Redis + request log)..."
+# state in Redis persists across runs otherwise, so a prior run's spend or
+# cached answers would skew this one's numbers (a monthly budget counter
+# especially — it would never reset).
+Write-Host "Clearing prior load-test state (Redis + load-test database)..."
 & docker compose -f $composeFile exec -T redis redis-cli FLUSHALL | Out-Null
-& docker compose -f $composeFile exec -T postgres psql -U switchyard -d switchyard -c "TRUNCATE requests, requests_daily" | Out-Null
+& docker compose -f $composeFile exec -T postgres psql -U switchyard -d switchyard -c "DROP DATABASE IF EXISTS switchyard_loadtest WITH (FORCE)" | Out-Null
+& docker compose -f $composeFile exec -T postgres psql -U switchyard -d switchyard -c "CREATE DATABASE switchyard_loadtest" | Out-Null
+if ($LASTEXITCODE -ne 0) { Write-Error "creating the load-test database failed"; exit 1 }
+
+Write-Host "Applying the schema and seeding the load-test teams..."
+& (Join-Path $binDir "switchyard-migrate.exe")
+if ($LASTEXITCODE -ne 0) { Write-Error "migration failed"; exit 1 }
 
 $processes = @{}
 
@@ -77,7 +87,6 @@ $processes.mockFallback = (Start-Process -FilePath (Join-Path $binDir "mockprovi
 Start-Sleep -Milliseconds 300
 
 $env:SWITCHYARD_PROVIDERS_CONFIG = Join-Path $repoRoot "scripts\loadtest\providers.yaml"
-$env:SWITCHYARD_TEAMS_CONFIG = Join-Path $repoRoot "scripts\loadtest\teams.yaml"
 $env:SWITCHYARD_QUALITY_CONFIG = Join-Path $repoRoot "scripts\loadtest\quality.yaml"
 # Routing reuses configs/router.yaml unchanged — its policy (simple->fast,
 # complex->frontier) already matches the tiers in loadtest/providers.yaml. Set

@@ -497,9 +497,8 @@ func run() error {
 		)
 	}
 
-	// Step 9.2's async quality worker. It needs the request log to write
-	// scores onto, so it stays off whenever Postgres is unconfigured — there
-	// is nowhere to put a score without it.
+	// Step 9.2's async quality worker. It writes scores onto the request log,
+	// which always exists now that Postgres is required to boot.
 	qualityPath := envOr("SWITCHYARD_QUALITY_CONFIG", defaultQualityPath)
 	qualityCfg, err := config.LoadQuality(qualityPath)
 	if err != nil {
@@ -509,8 +508,6 @@ func run() error {
 	var qualityWorker *quality.Worker
 	switch {
 	case !qualityCfg.Enabled:
-	case logWriter == nil:
-		log.Warn("quality verification disabled: it requires the request log (POSTGRES_PASSWORD)")
 	default:
 		// Resolved through the store, not captured once, so the judge follows
 		// a hot reload of providers.yaml. A routing keyword ("auto", a tier)

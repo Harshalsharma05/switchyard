@@ -1,6 +1,7 @@
 // Package integration black-box tests the compiled cmd/gateway binary: it
 // builds the real binary once, spawns it as a subprocess per test against a
-// real Redis and httptest mock upstreams standing in for a provider, and
+// real Redis, a throwaway Postgres database seeded by the real cmd/migrate, and
+// httptest mock upstreams standing in for a provider, and
 // drives it purely over HTTP. It never imports internal/proxy — only cmd/ is
 // allowed to — so this is the one place that proves the whole wired system
 // behaves correctly, not just one package's handlers.
@@ -11,12 +12,14 @@ package integration
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,48 +29,53 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
-var gatewayBin string
+var gatewayBin, migrateBin string
 
+// TestMain builds cmd/migrate alongside the gateway: a test's teams reach the
+// gateway the way production's do, seeded into Postgres from a teams.yaml by
+// cmd/migrate and read from there, never from the file directly.
 func TestMain(m *testing.M) {
-	bin, cleanup, err := buildGatewayBinary()
+	dir, err := os.MkdirTemp("", "switchyard-integration-*")
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "building gateway binary:", err)
+		fmt.Fprintln(os.Stderr, "creating build dir:", err)
 		os.Exit(1)
 	}
-	gatewayBin = bin
+
+	gatewayBin, err = buildBinary(dir, "./cmd/gateway", "switchyard-gateway")
+	if err == nil {
+		migrateBin, err = buildBinary(dir, "./cmd/migrate", "switchyard-migrate")
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "building binaries:", err)
+		os.RemoveAll(dir)
+		os.Exit(1)
+	}
+
 	code := m.Run()
-	cleanup()
+	os.RemoveAll(dir)
 	os.Exit(code)
 }
 
-func buildGatewayBinary() (string, func(), error) {
+func buildBinary(dir, pkg, name string) (string, error) {
 	root, err := repoRoot()
 	if err != nil {
-		return "", nil, err
+		return "", err
 	}
-
-	dir, err := os.MkdirTemp("", "switchyard-integration-*")
-	if err != nil {
-		return "", nil, err
-	}
-	cleanup := func() { os.RemoveAll(dir) }
-
-	name := "switchyard-gateway"
 	if runtime.GOOS == "windows" {
 		name += ".exe"
 	}
 	out := filepath.Join(dir, name)
 
-	cmd := exec.Command("go", "build", "-o", out, "./cmd/gateway")
+	cmd := exec.Command("go", "build", "-o", out, pkg)
 	cmd.Dir = root
 	if output, err := cmd.CombinedOutput(); err != nil {
-		cleanup()
-		return "", nil, fmt.Errorf("go build: %w\n%s", err, output)
+		return "", fmt.Errorf("go build %s: %w\n%s", pkg, err, output)
 	}
-
-	return out, cleanup, nil
+	return out, nil
 }
 
 func repoRoot() (string, error) {
@@ -102,6 +110,86 @@ func requireRedis(t *testing.T) {
 		t.Skipf("no Redis reachable at %s: %v", addr, err)
 	}
 	conn.Close()
+}
+
+// harnessEnv reads the same SWITCHYARD_POSTGRES_* variables the gateway and
+// cmd/migrate read, with the same defaults.
+func harnessEnv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func testPostgresHost() string { return harnessEnv("SWITCHYARD_POSTGRES_HOST", "localhost:5432") }
+
+// createTestDatabase makes a throwaway database for one gateway and drops it
+// when the test ends. A whole database rather than a schema, because the
+// gateway connects to a database by name and has no search_path setting —
+// testing it any other way would not be testing the shipped binary.
+//
+// No POSTGRES_PASSWORD, or no reachable server, skips the test, the same
+// convention requireRedis uses: the gateway will not start without Postgres, so
+// there is nothing to test.
+func createTestDatabase(t *testing.T) string {
+	t.Helper()
+	pw := os.Getenv("POSTGRES_PASSWORD")
+	if pw == "" {
+		t.Skip("set POSTGRES_PASSWORD (and run Postgres): the gateway stores teams there and will not start without it")
+	}
+	dsn := (&url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(harnessEnv("SWITCHYARD_POSTGRES_USER", "switchyard"), pw),
+		Host:     testPostgresHost(),
+		Path:     "/" + harnessEnv("SWITCHYARD_POSTGRES_DB", "switchyard"),
+		RawQuery: "sslmode=" + harnessEnv("SWITCHYARD_POSTGRES_SSLMODE", "disable"),
+	}).String()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Skipf("no Postgres reachable at %s: %v", testPostgresHost(), err)
+	}
+	defer conn.Close(context.Background())
+
+	// Digits and underscores only, so interpolating it is safe — CREATE
+	// DATABASE cannot take a bind parameter.
+	name := fmt.Sprintf("sy_it_%d_%d", time.Now().UnixNano(), uniqueSeq.Add(1))
+	if _, err := conn.Exec(ctx, "CREATE DATABASE "+name); err != nil {
+		t.Fatalf("creating test database: %v", err)
+	}
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		c, err := pgx.Connect(ctx, dsn)
+		if err != nil {
+			t.Logf("dropping test database %s: %v", name, err)
+			return
+		}
+		defer c.Close(context.Background())
+		// FORCE: a killed gateway may not have closed its pool's connections.
+		if _, err := c.Exec(ctx, "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)"); err != nil {
+			t.Logf("dropping test database %s: %v", name, err)
+		}
+	})
+	return name
+}
+
+// seedTeams runs the compiled cmd/migrate against db with teamsPath as its seed:
+// schema and teams arrive exactly as they do on a real first boot.
+func seedTeams(t *testing.T, db, teamsPath string) {
+	t.Helper()
+	cmd := exec.Command(migrateBin)
+	cmd.Env = append(os.Environ(),
+		"SWITCHYARD_POSTGRES_HOST="+testPostgresHost(),
+		"SWITCHYARD_POSTGRES_DB="+db,
+		"SWITCHYARD_TEAMS_CONFIG="+teamsPath,
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("seeding teams with cmd/migrate: %v\n%s", err, out)
+	}
 }
 
 func freePort(t *testing.T) int {
@@ -277,6 +365,10 @@ type teamSpec struct {
 	tpm              int
 	monthlyBudgetUSD float64
 	priority         string
+
+	// isAdmin marks a team that may call the admin API. Every mutating admin
+	// route — reload included — requires an admin key.
+	isAdmin bool
 }
 
 func defaultTeam(id, key string, allowedProviders, allowedModels []string) teamSpec {
@@ -350,6 +442,9 @@ func buildTeamsYAML(teams []teamSpec) string {
 		fmt.Fprintf(&b, "    rate_limits:\n      rpm: %d\n      tpm: %d\n", t.rpm, t.tpm)
 		fmt.Fprintf(&b, "    monthly_budget_usd: %.6f\n", t.monthlyBudgetUSD)
 		fmt.Fprintf(&b, "    priority: %s\n", t.priority)
+		if t.isAdmin {
+			b.WriteString("    is_admin: true\n")
+		}
 	}
 	return b.String()
 }
@@ -365,12 +460,13 @@ type gatewayInstance struct {
 	Client   *http.Client
 
 	providersPath string
-	teamsPath     string
 }
 
-// startGateway writes cfg to a temp providers.yaml/teams.yaml, launches the
-// real gateway binary against them and a real Redis, and waits for it to
-// report healthy. The process is killed on test cleanup.
+// startGateway writes cfg to a temp providers.yaml/teams.yaml, seeds the teams
+// into a fresh database with cmd/migrate, launches the real gateway binary
+// against that database, the providers file, and a real Redis, and waits for
+// it to report healthy. The process is killed on test cleanup, before the
+// database is dropped.
 //
 // upstreams lists every mock upstream cfg's providers point at. The health
 // checker fires one ping per provider immediately at boot, before any test
@@ -392,12 +488,18 @@ func startGateway(t *testing.T, cfg harnessConfig, upstreams ...*mockUpstream) *
 		t.Fatalf("writing teams.yaml: %v", err)
 	}
 
+	// Registered before the gateway's own cleanup, so it runs after it: t.Cleanup
+	// is last-in, first-out.
+	db := createTestDatabase(t)
+	seedTeams(t, db, teamsPath)
+
 	publicPort := freePort(t)
 	adminPort := freePort(t)
 
 	env := map[string]string{
 		"SWITCHYARD_PROVIDERS_CONFIG": providersPath,
-		"SWITCHYARD_TEAMS_CONFIG":     teamsPath,
+		"SWITCHYARD_POSTGRES_HOST":    testPostgresHost(),
+		"SWITCHYARD_POSTGRES_DB":      db,
 		"SWITCHYARD_ADDR":             fmt.Sprintf(":%d", publicPort),
 		"SWITCHYARD_ADMIN_ADDR":       fmt.Sprintf(":%d", adminPort),
 		"SWITCHYARD_REDIS_ADDR":       testRedisAddr(),
@@ -456,7 +558,6 @@ func startGateway(t *testing.T, cfg harnessConfig, upstreams ...*mockUpstream) *
 		AdminURL:      adminURL,
 		Client:        &http.Client{},
 		providersPath: providersPath,
-		teamsPath:     teamsPath,
 	}
 }
 

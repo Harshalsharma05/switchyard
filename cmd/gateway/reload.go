@@ -82,6 +82,8 @@ type teamStore interface {
 	Update(ctx context.Context, id string, patch auth.TeamPatch) (auth.Team, error)
 	RotateKey(ctx context.Context, id, newHash, newMasked string) (auth.Team, error)
 	RevokeKey(ctx context.Context, id string) (auth.Team, error)
+	Create(ctx context.Context, t auth.Team) (auth.Team, error)
+	Delete(ctx context.Context, id string) (auth.Team, error)
 }
 
 type configStore struct {
@@ -159,6 +161,14 @@ func (s *configStore) RotateKey(ctx context.Context, id, newHash, newMasked stri
 
 func (s *configStore) RevokeKey(ctx context.Context, id string) (auth.Team, error) {
 	return s.teams.RevokeKey(ctx, id)
+}
+
+func (s *configStore) Create(ctx context.Context, t auth.Team) (auth.Team, error) {
+	return s.teams.Create(ctx, t)
+}
+
+func (s *configStore) Delete(ctx context.Context, id string) (auth.Team, error) {
+	return s.teams.Delete(ctx, id)
 }
 
 func (s *configStore) Configs() []provider.Config {

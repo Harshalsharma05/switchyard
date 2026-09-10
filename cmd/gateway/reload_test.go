@@ -131,6 +131,12 @@ func (f *fakeTeams) RotateKey(_ context.Context, id, h, m string) (auth.Team, er
 func (f *fakeTeams) RevokeKey(_ context.Context, id string) (auth.Team, error) {
 	return f.reg.RevokeKey(id)
 }
+func (f *fakeTeams) Create(_ context.Context, t auth.Team) (auth.Team, error) {
+	return t, f.reg.Add(t)
+}
+func (f *fakeTeams) Delete(_ context.Context, id string) (auth.Team, error) {
+	return f.reg.Remove(id)
+}
 
 func TestLoadLiveConfigValid(t *testing.T) {
 	dir := t.TempDir()

@@ -12,6 +12,8 @@ import (
 	"testing"
 
 	"github.com/Harshalsharma05/switchyard/internal/auth"
+	"github.com/Harshalsharma05/switchyard/internal/logstore"
+	"github.com/Harshalsharma05/switchyard/internal/provider"
 	"github.com/Harshalsharma05/switchyard/internal/telemetry"
 )
 
@@ -49,6 +51,12 @@ func (s registryStore) RotateKey(_ context.Context, id, h, m string) (auth.Team,
 }
 func (s registryStore) RevokeKey(_ context.Context, id string) (auth.Team, error) {
 	return s.reg.RevokeKey(id)
+}
+func (s registryStore) Create(_ context.Context, t auth.Team) (auth.Team, error) {
+	return t, s.reg.Add(t)
+}
+func (s registryStore) Delete(_ context.Context, id string) (auth.Team, error) {
+	return s.reg.Remove(id)
 }
 
 // Not part of TeamStore — the tests that check a rotated key works use it
@@ -553,5 +561,189 @@ func TestRevokeOwnKeyIsRefused(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("status = %d, want 409", resp.StatusCode)
+	}
+}
+
+// --- POST /admin/teams, DELETE /admin/teams/{id} (Tier 1, Step 2.5) --------
+
+// failingAudit is an audit log that is down. Every team mutation writes its
+// audit entry first, so this is how a test proves nothing happens without one.
+type failingAudit struct{}
+
+func (failingAudit) RecordAudit(context.Context, logstore.AuditEntry) error {
+	return errors.New("audit log unavailable")
+}
+
+func (failingAudit) ListAudit(context.Context, int, string) (logstore.AuditPage, error) {
+	return logstore.AuditPage{}, errors.New("audit log unavailable")
+}
+
+func newCreateDeleteServer(t *testing.T, teams TeamStore, audit AuditRecorder) *httptest.Server {
+	t.Helper()
+	providers := fakeProviderLister{configs: []provider.Config{{Name: "groq", Models: []string{"m", "m2"}}}}
+	srv := httptest.NewServer(NewRouter(func() bool { return true }, teams, &fakeSpendReader{}, providers, fakeHealthReader{}, &fakeBreakerController{}, nil, fakeReloader, nil, nil, nil, nil, nil, nil, QualityFeedbackConfig{}, false, audit, nil, testMetrics(t), discardLogger()))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// createBody is a valid create request with overrides applied on top.
+func createBody(t *testing.T, overrides map[string]any) string {
+	t.Helper()
+	body := map[string]any{
+		"name": "Initech Labs", "priority": "batch", "rpm": 30, "tpm": 1000,
+		"monthly_budget_usd": 2.5, "allowed_providers": []string{"groq"}, "allowed_models": []string{"m"},
+	}
+	for k, v := range overrides {
+		body[k] = v
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return string(raw)
+}
+
+func postCreateTeam(t *testing.T, srv *httptest.Server, body string) *http.Response {
+	t.Helper()
+	resp, err := http.Post(srv.URL+"/admin/teams", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /admin/teams: %v", err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+func deleteTeamRequest(t *testing.T, srv *httptest.Server, id, key string) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodDelete, srv.URL+"/admin/teams/"+id, nil)
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE /admin/teams/%s: %v", id, err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+// The headline: a created team's key is returned once and authenticates on the
+// very next request, with no restart.
+func TestCreateTeamReturnsKeyThatAuthenticates(t *testing.T) {
+	store := testTeamStore(t)
+	srv := newCreateDeleteServer(t, store, nil)
+
+	resp := postCreateTeam(t, srv, createBody(t, nil))
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 201: %s", resp.StatusCode, body)
+	}
+	var cr createTeamResponse
+	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if cr.Team.ID != "initech-labs" {
+		t.Errorf("team id = %q, want initech-labs derived from the name", cr.Team.ID)
+	}
+	if !strings.HasPrefix(cr.APIKey, "sk-switchyard-initech-labs-") {
+		t.Errorf("api_key = %q, want an sk-switchyard-initech-labs- key", cr.APIKey)
+	}
+	if cr.Key.Source != auth.KeySourceCreated {
+		t.Errorf("key.source = %q, want %q", cr.Key.Source, auth.KeySourceCreated)
+	}
+
+	team, err := store.Authenticate(cr.APIKey)
+	if err != nil {
+		t.Fatalf("new key does not authenticate: %v", err)
+	}
+	if team.MonthlyBudgetMicros != 2_500_000 || team.Priority != auth.PriorityBatch {
+		t.Errorf("stored budget/priority = %d/%q, want 2500000/batch", team.MonthlyBudgetMicros, team.Priority)
+	}
+}
+
+// Every rejection happens before anything is written: the team count is
+// unchanged whatever the reason.
+func TestCreateTeamRejectsInvalidRequests(t *testing.T) {
+	tests := map[string]struct {
+		overrides map[string]any
+		want      int
+	}{
+		"name slugs to an existing id": {map[string]any{"name": "Acme"}, http.StatusConflict},
+		"unknown model":                {map[string]any{"allowed_models": []string{"gpt-9"}}, http.StatusBadRequest},
+		"unknown provider":             {map[string]any{"allowed_providers": []string{"openai"}}, http.StatusBadRequest},
+		"name with no ASCII letters":   {map[string]any{"name": "!!!"}, http.StatusBadRequest},
+		"zero rpm":                     {map[string]any{"rpm": 0}, http.StatusBadRequest},
+		"unknown priority":             {map[string]any{"priority": "urgent"}, http.StatusBadRequest},
+		"caller-chosen id":             {map[string]any{"id": "chosen"}, http.StatusBadRequest},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			store := testTeamStore(t)
+			srv := newCreateDeleteServer(t, store, nil)
+
+			resp := postCreateTeam(t, srv, createBody(t, tc.overrides))
+			if resp.StatusCode != tc.want {
+				body, _ := io.ReadAll(resp.Body)
+				t.Fatalf("status = %d, want %d: %s", resp.StatusCode, tc.want, body)
+			}
+			if n := len(store.List()); n != 2 {
+				t.Errorf("team count = %d after a rejected create, want 2", n)
+			}
+		})
+	}
+}
+
+func TestCreateTeamAuditFailureCreatesNothing(t *testing.T) {
+	store := testTeamStore(t)
+	srv := newCreateDeleteServer(t, store, failingAudit{})
+
+	resp := postCreateTeam(t, srv, createBody(t, nil))
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+	if _, err := store.Get("initech-labs"); !errors.Is(err, auth.ErrUnknownTeam) {
+		t.Errorf("team was created despite a failed audit write: %v", err)
+	}
+}
+
+func TestDeleteTeamRemovesAuthentication(t *testing.T) {
+	store := testTeamStore(t)
+	srv := newCreateDeleteServer(t, store, nil)
+
+	resp := deleteTeamRequest(t, srv, "globex", "")
+	if resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 204: %s", resp.StatusCode, body)
+	}
+	if _, err := store.Authenticate("globex-key"); !errors.Is(err, auth.ErrUnknownKey) {
+		t.Errorf("deleted team's key still authenticates: %v", err)
+	}
+	if _, err := store.Get("globex"); !errors.Is(err, auth.ErrUnknownTeam) {
+		t.Errorf("deleted team is still listed: %v", err)
+	}
+}
+
+// Deleting the team you are authenticated as would lock you out, and refusing
+// it is what guarantees an admin always remains. Needs a real authenticator, so
+// it runs on the auth-wired server (acme = admin).
+func TestDeleteOwnTeamIsRefused(t *testing.T) {
+	srv := authedServer(t, &fakeSpendReader{})
+
+	resp := deleteTeamRequest(t, srv, "acme", "acme-key")
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", resp.StatusCode)
+	}
+}
+
+func TestDeleteTeamAuditFailureDeletesNothing(t *testing.T) {
+	store := testTeamStore(t)
+	srv := newCreateDeleteServer(t, store, failingAudit{})
+
+	resp := deleteTeamRequest(t, srv, "globex", "")
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+	if _, err := store.Authenticate("globex-key"); err != nil {
+		t.Errorf("team was deleted despite a failed audit write: %v", err)
 	}
 }

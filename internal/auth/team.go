@@ -13,7 +13,9 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -34,10 +36,16 @@ type RateLimits struct {
 	TPM int
 }
 
-// Team is one validated entry from configs/teams.yaml.
+// Team is one tenant, stored in Postgres: seeded from configs/teams.yaml on a
+// first boot, or created through the admin API.
 type Team struct {
 	ID   string
 	Name string
+
+	// OrganizationID is the organisation this team belongs to. There is one,
+	// the default, until multi-org exists; the field is here so the concept
+	// is real in the data model without any behaviour hanging off it yet.
+	OrganizationID string
 
 	// KeyHash is the SHA-256 hex digest of the team's API key, never the key
 	// itself — configs/teams.yaml is committed to git, so only the digest may
@@ -65,9 +73,9 @@ type Team struct {
 	// hash: KeySource says where the current key came from, KeyMasked is a
 	// display-only "sk-…a097" for a key this gateway minted, and KeyCreatedAt is
 	// when it did. A config-seeded team has KeySourceConfig, an empty KeyMasked
-	// (the gateway never saw its plaintext), and a nil KeyCreatedAt. These live
-	// only in memory — a restart or a POST /admin/reload rebuilds the registry
-	// from configs/teams.yaml and every rotation is lost with them.
+	// (the gateway never saw its plaintext), and a nil KeyCreatedAt. Persisted
+	// in Postgres by internal/teamstore since Tier 1 Phase 2, so a rotation
+	// survives both a restart and a POST /admin/reload.
 	KeySource    string
 	KeyMasked    string
 	KeyCreatedAt *time.Time
@@ -76,7 +84,8 @@ type Team struct {
 const (
 	KeySourceConfig  = "config"  // key hash came from configs/teams.yaml
 	KeySourceRotated = "rotated" // key was minted by POST /admin/teams/{id}/key/rotate
-	KeySourceRevoked = "revoked" // key was removed by DELETE /admin/teams/{id}/key
+	KeySourceRevoked = "revoked" // key was removed by DELETE /admin/teams/{id}/key, or the team was deleted
+	KeySourceCreated = "created" // key was minted with the team by POST /admin/teams
 )
 
 // AllowsModel reports whether the team's allowlist includes model. This is
@@ -145,4 +154,64 @@ func MaskKey(raw string) string {
 		return "sk-…"
 	}
 	return "sk-…" + raw[len(raw)-4:]
+}
+
+// maxIDLength bounds a derived team ID. The ID ends up in every key the team is
+// issued, every log line, and every metric label, so it stays short.
+const maxIDLength = 48
+
+// Slug derives a team ID from a display name: lowercase ASCII letters and
+// digits, every run of anything else collapsed to one hyphen, none at either
+// end. "Acme Corp" becomes "acme-corp".
+//
+// A team ID is permanent — it is baked into every key the team is issued, and a
+// deleted team keeps its ID forever so a new team can never inherit its history
+// — so this runs once, at creation. Non-ASCII letters are dropped rather than
+// transliterated; a name with no ASCII letter or digit yields "", which the
+// caller must reject.
+func Slug(name string) string {
+	var b strings.Builder
+	pendingHyphen := false
+	for _, r := range strings.ToLower(name) {
+		isAlnum := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if !isAlnum {
+			pendingHyphen = b.Len() > 0
+			continue
+		}
+		if pendingHyphen {
+			b.WriteByte('-')
+			pendingHyphen = false
+		}
+		b.WriteRune(r)
+	}
+	id := b.String()
+	if len(id) > maxIDLength {
+		id = strings.TrimRight(id[:maxIDLength], "-")
+	}
+	return id
+}
+
+// Validate reports whether t is a usable team: the rules config.LoadTeams
+// applies to the seed file, applied to a team built any other way — today, one
+// created through the admin API.
+func (t Team) Validate() error {
+	if t.ID == "" {
+		return errors.New("id is required")
+	}
+	if strings.TrimSpace(t.Name) == "" {
+		return errors.New("name is required")
+	}
+	if len(t.AllowedProviders) == 0 {
+		return errors.New("at least one allowed provider is required")
+	}
+	if len(t.AllowedModels) == 0 {
+		return errors.New("at least one allowed model is required")
+	}
+	if err := validateLimits(t); err != nil {
+		return err
+	}
+	if t.Priority != PriorityRealtime && t.Priority != PriorityBatch {
+		return fmt.Errorf("priority must be %s or %s, got %q", PriorityRealtime, PriorityBatch, t.Priority)
+	}
+	return nil
 }

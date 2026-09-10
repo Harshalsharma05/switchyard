@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Harshalsharma05/switchyard/internal/auth"
@@ -226,6 +227,85 @@ func (s *Store) RevokeKey(ctx context.Context, id string) (auth.Team, error) {
 	return s.writeThrough(id, func(r *auth.Registry) (auth.Team, error) { return r.RevokeKey(id) })
 }
 
+// Postgres error codes Create branches on. Named rather than pulled from a
+// dependency — two constants do not justify a new module.
+const (
+	uniqueViolation     = "23505"
+	foreignKeyViolation = "23503"
+)
+
+// Create persists a new team and indexes it, so its key authenticates on the
+// very next request (Tier 1, Step 2.5).
+//
+// An ID already in the table — including a soft-deleted team's — is
+// auth.ErrTeamExists. IDs are never reused, so a new team cannot inherit a
+// deleted one's request history, or its Redis spend and rate-limit state.
+func (s *Store) Create(ctx context.Context, t auth.Team) (auth.Team, error) {
+	if err := t.Validate(); err != nil {
+		return auth.Team{}, err
+	}
+	if t.OrganizationID == "" {
+		t.OrganizationID = DefaultOrgID
+	}
+	// The caller that minted the key normally sets these; defaulting them keeps
+	// a bare Create from tripping key_source's CHECK constraint.
+	if t.KeySource == "" {
+		t.KeySource = auth.KeySourceCreated
+	}
+	if t.KeyCreatedAt == nil {
+		now := time.Now().UTC()
+		t.KeyCreatedAt = &now
+	}
+
+	if err := insertTeam(ctx, s.pool, t); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) {
+			switch {
+			case pgErr.Code == uniqueViolation && pgErr.ConstraintName == "teams_pkey":
+				return auth.Team{}, auth.ErrTeamExists
+			case pgErr.Code == foreignKeyViolation:
+				return auth.Team{}, auth.ErrUnknownOrganization
+			}
+		}
+		return auth.Team{}, fmt.Errorf("creating team %q: %w", t.ID, err)
+	}
+
+	return s.writeThrough(t.ID, func(r *auth.Registry) (auth.Team, error) {
+		err := r.Add(t)
+		if errors.Is(err, auth.ErrTeamExists) {
+			// A refresh landed between the insert and here and already loaded
+			// the team. Not a failure — the snapshot has it either way.
+			return r.Get(t.ID)
+		}
+		return t, err
+	})
+}
+
+// Delete soft-deletes a team. The row stays, so request-log and audit rows keep a
+// real team to point at; deleted_at hides it from every snapshot; and the key is
+// cleared in the same statement, so a deleted team can never authenticate even
+// if something forgot to filter on deleted_at. The key stops working on the next
+// request here, and at the next refresh on any other replica.
+func (s *Store) Delete(ctx context.Context, id string) (auth.Team, error) {
+	if err := s.exec(ctx, id,
+		`UPDATE teams SET deleted_at = now(), key_hash = NULL, key_source = $2, key_masked = '',
+		        key_created_at = NULL, updated_at = now()
+		 WHERE id = $1 AND deleted_at IS NULL`,
+		id, auth.KeySourceRevoked,
+	); err != nil {
+		return auth.Team{}, err
+	}
+
+	return s.writeThrough(id, func(r *auth.Registry) (auth.Team, error) {
+		team, err := r.Remove(id)
+		if errors.Is(err, auth.ErrUnknownTeam) {
+			// A refresh already dropped it. Gone is gone.
+			return auth.Team{ID: id}, nil
+		}
+		return team, err
+	})
+}
+
 // exec runs one team mutation and turns "matched no row" into ErrUnknownTeam,
 // so a caller branches on identity rather than on an affected-row count.
 func (s *Store) exec(ctx context.Context, id, sql string, args ...any) error {
@@ -259,7 +339,7 @@ func (s *Store) writeThrough(id string, apply func(*auth.Registry) (auth.Team, e
 }
 
 const selectTeamsSQL = `
-	SELECT id, name, priority, rpm, tpm, monthly_budget_micros,
+	SELECT id, organization_id, name, priority, rpm, tpm, monthly_budget_micros,
 	       allowed_providers, allowed_models, is_admin,
 	       key_hash, key_source, key_masked, key_created_at
 	FROM teams
@@ -279,7 +359,7 @@ func (s *Store) loadRegistry(ctx context.Context) (*auth.Registry, error) {
 		var priority string
 		var keyHash *string
 		if err := rows.Scan(
-			&t.ID, &t.Name, &priority, &t.RateLimits.RPM, &t.RateLimits.TPM,
+			&t.ID, &t.OrganizationID, &t.Name, &priority, &t.RateLimits.RPM, &t.RateLimits.TPM,
 			&t.MonthlyBudgetMicros, &t.AllowedProviders, &t.AllowedModels,
 			&t.IsAdmin, &keyHash, &t.KeySource, &t.KeyMasked, &t.KeyCreatedAt,
 		); err != nil {

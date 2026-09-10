@@ -11,9 +11,11 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	dto "github.com/prometheus/client_model/go"
 
 	"github.com/Harshalsharma05/switchyard/internal/auth"
 	"github.com/Harshalsharma05/switchyard/internal/logstore"
+	"github.com/Harshalsharma05/switchyard/internal/telemetry"
 	"github.com/Harshalsharma05/switchyard/migrations"
 )
 
@@ -265,5 +267,228 @@ func TestRefreshPicksUpExternalChanges(t *testing.T) {
 	}
 	if _, err := s.Authenticate(globexKey); !errors.Is(err, auth.ErrUnknownKey) {
 		t.Errorf("externally revoked key still authenticates after a refresh: %v", err)
+	}
+}
+
+// The checklist's "create a team, use its key immediately, restart the gateway,
+// key still works" — a second store stands in for the restarted process.
+func TestCreateSurvivesRestart(t *testing.T) {
+	pool, newPool, ctx := newSeededPool(t)
+	s := newStore(t, pool, ctx)
+
+	raw := "sk-switchyard-initech-test"
+	created, err := s.Create(ctx, auth.Team{
+		ID: "initech", Name: "Initech",
+		AllowedProviders: []string{"groq"}, AllowedModels: []string{"openai/gpt-oss-20b"},
+		RateLimits: auth.RateLimits{RPM: 30, TPM: 10_000}, MonthlyBudgetMicros: 2_000_000,
+		Priority: auth.PriorityBatch,
+		KeyHash:  auth.HashKey(raw), KeyMasked: auth.MaskKey(raw),
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if created.OrganizationID != DefaultOrgID || created.KeySource != auth.KeySourceCreated {
+		t.Errorf("created org/source = %q/%q, want %q/%q",
+			created.OrganizationID, created.KeySource, DefaultOrgID, auth.KeySourceCreated)
+	}
+	if _, err := s.Authenticate(raw); err != nil {
+		t.Fatalf("new key on the creating instance: %v", err)
+	}
+
+	restarted := newStore(t, newPool(), ctx)
+	got, err := restarted.Authenticate(raw)
+	if err != nil {
+		t.Fatalf("new key after restart: %v", err)
+	}
+	if got.RateLimits.RPM != 30 || got.OrganizationID != DefaultOrgID {
+		t.Errorf("after restart rpm/org = %d/%q, want 30/%q", got.RateLimits.RPM, got.OrganizationID, DefaultOrgID)
+	}
+}
+
+// Soft delete: the key dies on the next request, the team leaves every
+// snapshot, the row stays for request-log history, and the ID is burned.
+func TestDeleteIsSoftAndBurnsTheID(t *testing.T) {
+	pool, newPool, ctx := newSeededPool(t)
+	s := newStore(t, pool, ctx)
+
+	if _, err := s.Delete(ctx, "globex"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := s.Authenticate(globexKey); !errors.Is(err, auth.ErrUnknownKey) {
+		t.Errorf("deleted team's key still authenticates: %v", err)
+	}
+	if _, err := s.Get("globex"); !errors.Is(err, auth.ErrUnknownTeam) {
+		t.Errorf("deleted team still in the snapshot: %v", err)
+	}
+
+	var deletedAt *time.Time
+	var keyHash *string
+	if err := pool.QueryRow(ctx, "SELECT deleted_at, key_hash FROM teams WHERE id = 'globex'").Scan(&deletedAt, &keyHash); err != nil {
+		t.Fatalf("reading the deleted row: %v — a soft delete must leave it for request-log history", err)
+	}
+	if deletedAt == nil || keyHash != nil {
+		t.Errorf("deleted_at = %v, key_hash = %v; want set and NULL", deletedAt, keyHash)
+	}
+
+	restarted := newStore(t, newPool(), ctx)
+	if _, err := restarted.Get("globex"); !errors.Is(err, auth.ErrUnknownTeam) {
+		t.Errorf("deleted team came back after a restart: %v", err)
+	}
+
+	reuse := auth.Team{
+		ID: "globex", Name: "Globex Again",
+		AllowedProviders: []string{"groq"}, AllowedModels: []string{"m"},
+		RateLimits: auth.RateLimits{RPM: 1, TPM: 1}, MonthlyBudgetMicros: 1,
+		Priority: auth.PriorityBatch,
+	}
+	if _, err := s.Create(ctx, reuse); !errors.Is(err, auth.ErrTeamExists) {
+		t.Errorf("reusing a deleted team's ID: err = %v, want ErrTeamExists", err)
+	}
+}
+
+// Boot fails closed: with no teams there is no snapshot worth serving, and an
+// empty one would reject every key without saying why.
+func TestNewFailsOnAnEmptyTeamsTable(t *testing.T) {
+	pool, _, ctx := newSeededPool(t)
+	if _, err := pool.Exec(ctx, "DELETE FROM teams"); err != nil {
+		t.Fatalf("emptying teams: %v", err)
+	}
+	if _, err := New(ctx, pool, time.Minute, nil, discardLogger()); err == nil {
+		t.Fatal("New succeeded against an empty teams table")
+	}
+}
+
+// Every mutation on a team that does not exist is ErrUnknownTeam, so the admin
+// API can map it onto a 404 by identity — whether the miss is caught against
+// the snapshot or by an UPDATE that matched no row.
+func TestMutationsOnAnUnknownTeamAreErrUnknownTeam(t *testing.T) {
+	pool, _, ctx := newSeededPool(t)
+	s := newStore(t, pool, ctx)
+
+	rpm := 10
+	tests := map[string]func() error{
+		"update": func() error { _, err := s.Update(ctx, "nope", auth.TeamPatch{RPM: &rpm}); return err },
+		"rotate": func() error { _, err := s.RotateKey(ctx, "nope", auth.HashKey("k"), "sk-…k"); return err },
+		"revoke": func() error { _, err := s.RevokeKey(ctx, "nope"); return err },
+		"delete": func() error { _, err := s.Delete(ctx, "nope"); return err },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			if err := mutate(); !errors.Is(err, auth.ErrUnknownTeam) {
+				t.Errorf("err = %v, want ErrUnknownTeam", err)
+			}
+		})
+	}
+}
+
+func TestCreateWithAnUnknownOrganization(t *testing.T) {
+	pool, _, ctx := newSeededPool(t)
+	s := newStore(t, pool, ctx)
+
+	_, err := s.Create(ctx, auth.Team{
+		ID: "orphan", Name: "Orphan", OrganizationID: "no-such-org",
+		AllowedProviders: []string{"groq"}, AllowedModels: []string{"m"},
+		RateLimits: auth.RateLimits{RPM: 1, TPM: 1}, MonthlyBudgetMicros: 1,
+		Priority: auth.PriorityBatch,
+	})
+	if !errors.Is(err, auth.ErrUnknownOrganization) {
+		t.Fatalf("err = %v, want ErrUnknownOrganization", err)
+	}
+	if _, err := s.Get("orphan"); !errors.Is(err, auth.ErrUnknownTeam) {
+		t.Errorf("a team that failed to insert is in the snapshot: %v", err)
+	}
+}
+
+// Run's ticker is the TTL half of invalidation: a change made on another
+// replica reaches this one without anyone calling Refresh by hand.
+func TestRunRefreshesOnItsTicker(t *testing.T) {
+	pool, newPool, ctx := newSeededPool(t)
+	s, err := New(ctx, pool, 50*time.Millisecond, nil, discardLogger())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.Run(runCtx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	if _, err := newPool().Exec(ctx,
+		"UPDATE teams SET key_hash = NULL, key_source = $1 WHERE id = 'globex'", auth.KeySourceRevoked,
+	); err != nil {
+		t.Fatalf("revoking from another connection: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := s.Authenticate(globexKey); errors.Is(err, auth.ErrUnknownKey) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("an externally revoked key still authenticates after several ticks")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func counterValue(t *testing.T, c interface{ Write(*dto.Metric) error }) float64 {
+	t.Helper()
+	var m dto.Metric
+	if err := c.Write(&m); err != nil {
+		t.Fatalf("reading metric: %v", err)
+	}
+	if m.Counter != nil {
+		return m.GetCounter().GetValue()
+	}
+	return m.GetGauge().GetValue()
+}
+
+// The checklist wants the no-query-per-request claim and the degraded state
+// verified with metrics. Lookups count against the snapshot; a failed refresh
+// flips the degraded gauge and counts an error, and never touches the lookups.
+func TestMetricsReportLookupsAndDegradation(t *testing.T) {
+	pool, _, ctx := newSeededPool(t)
+	m, err := telemetry.NewMetrics()
+	if err != nil {
+		t.Fatalf("NewMetrics: %v", err)
+	}
+	s, err := New(ctx, pool, time.Minute, m, discardLogger())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	for i := 0; i < 5; i++ {
+		s.Authenticate(acmeKey)
+	}
+	s.Authenticate("sk-switchyard-unknown")
+
+	if got := counterValue(t, m.TeamLookupsTotal.WithLabelValues("hit")); got != 5 {
+		t.Errorf("hit lookups = %v, want 5", got)
+	}
+	if got := counterValue(t, m.TeamLookupsTotal.WithLabelValues("unknown")); got != 1 {
+		t.Errorf("unknown lookups = %v, want 1", got)
+	}
+	if got := counterValue(t, m.TeamSnapshotRefreshTotal.WithLabelValues("ok")); got != 1 {
+		t.Errorf("ok refreshes = %v, want 1 — six lookups must not have queried Postgres", got)
+	}
+	if got := counterValue(t, m.TeamStoreDegraded); got != 0 {
+		t.Errorf("degraded = %v before any failure, want 0", got)
+	}
+
+	pool.Close()
+	if err := s.Refresh(ctx); err == nil {
+		t.Fatal("Refresh succeeded against a closed pool")
+	}
+	if got := counterValue(t, m.TeamStoreDegraded); got != 1 {
+		t.Errorf("degraded = %v after a failed refresh, want 1", got)
+	}
+	if got := counterValue(t, m.TeamSnapshotRefreshTotal.WithLabelValues("error")); got != 1 {
+		t.Errorf("error refreshes = %v, want 1", got)
 	}
 }

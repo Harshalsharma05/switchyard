@@ -33,7 +33,7 @@ A [case study](CASE_STUDY.md) frames the whole project — the problem, the arch
 | | |
 |---|---|
 | **Drop-in OpenAI wire format** | Point your existing SDK at SwitchYard by changing one base URL. No client rewrite. |
-| **Per-team keys, limits, and budgets** | Each team gets its own API key, RPM/TPM limits, model allowlist, and monthly USD cap — all in YAML, hot-reloadable without a restart. |
+| **Per-team keys, limits, and budgets** | Each team gets its own API key, RPM/TPM limits, model allowlist, and monthly USD cap — stored in Postgres and editable live through the admin API. A limit edit or key rotation survives restarts and config reloads. |
 | **Token-bucket rate limiting** | Atomic check-and-consume in a single Redis round trip via Lua. Lazy refill, so no background timers and no drift across replicas. Burst-tolerant by design. |
 | **Real budget enforcement** | Costs tracked in integer micro-dollars — never floats. Reserve the worst case up front, reconcile against actual usage after. 80% warns, 100% blocks with a `402`. |
 | **Health-aware failover** | Active pings plus passive signals from live traffic. Down providers skipped, degraded ones deprioritized, requests fall back down a configured model tier. |
@@ -186,25 +186,26 @@ The console reads only from gateway endpoints — never Prometheus, Postgres, or
 
 ## Configuration
 
-YAML, all hot-reloadable via `POST /admin/reload` with no restart and no dropped in-flight requests. A config that fails validation is rejected outright; the running gateway keeps serving on the last good one.
+Provider and routing config is YAML, hot-reloadable via `POST /admin/reload` with no restart and no dropped in-flight requests. A config that fails validation is rejected outright; the running gateway keeps serving on the last good one. Teams are not part of a reload: they live in Postgres, and `configs/teams.yaml` only seeds an empty database on first boot.
 
 | File | Holds |
 |---|---|
 | [`configs/providers.yaml`](configs/providers.yaml) | Provider instances (`name` ≠ adapter `type`, so a free stand-in swaps for the real vendor by editing this file alone) and the fallback tiers that chain them. A model belongs to at most one tier. |
-| [`configs/teams.yaml`](configs/teams.yaml) | Per-team key hash (SHA-256; plaintext never stored), allowlists, RPM/TPM, monthly USD cap, priority, `is_admin`. |
+| [`configs/teams.yaml`](configs/teams.yaml) | **First-boot seed only.** Imported into Postgres by `cmd/migrate` when the `teams` table is empty, never read again after. Per-team key hash (SHA-256; plaintext never stored), allowlists, RPM/TPM, monthly USD cap, priority, `is_admin`. |
 | [`configs/cache.yaml`](configs/cache.yaml) | Cache on/off, the two-tier split, similarity threshold, per-content TTL rules, embedding source. |
 | [`configs/router.yaml`](configs/router.yaml) | Complexity level → tier, and the classifier's weights, saturation scales, and lexicons. |
 | [`configs/quality.yaml`](configs/quality.yaml) | Sampling policy, the judge model, worker concurrency and queue size. |
 
 <details>
-<summary><strong>Key environment variables</strong> — all optional, defaults shown</summary>
+<summary><strong>Key environment variables</strong> — defaults shown; only <code>POSTGRES_PASSWORD</code> is required</summary>
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `SWITCHYARD_ADDR` / `SWITCHYARD_ADMIN_ADDR` | `:8080` / `:9090` | Public and admin listeners — never expose the admin port publicly |
 | `SWITCHYARD_REDIS_ADDR` | `localhost:6379` | Limits, budgets, health, breaker state, cache |
-| `POSTGRES_PASSWORD` | — | Enables the request log; unset ⇒ no log, no Usage & Cost, no quality worker |
-| `SWITCHYARD_POSTGRES_HOST` | `localhost:5432` | Request-log database |
+| `POSTGRES_PASSWORD` | — | **Required.** Teams are stored in Postgres, so the gateway refuses to start without it |
+| `SWITCHYARD_POSTGRES_HOST` | `localhost:5432` | Team store and request-log database |
+| `SWITCHYARD_TEAM_REFRESH_INTERVAL` | `30s` | Team snapshot refresh — also the revocation window on any replica that did not make the change |
 | `GEMINI_API_KEY` | — | The semantic cache's embedding source (fatal at startup if the cache is on and this is unset) |
 | `SWITCHYARD_{CACHE,ROUTER,QUALITY}_CONFIG` | `configs/*.yaml` | Override each config path |
 | `SWITCHYARD_ENV` / `SWITCHYARD_CHAOS_ENABLED` | `production` / `false` | `dev` + the flag together unlock the chaos harness |
@@ -260,10 +261,10 @@ The chaos harness is reachable from the admin port only — nothing on the publi
 
 ```bash
 go test -race ./...                       # unit + package tests; the race detector is non-negotiable
-go test -race -tags=integration ./test/   # black-box: builds the real binary, drives it over HTTP
+go test -race -tags=integration ./test/   # black-box: needs Redis and Postgres (POSTGRES_PASSWORD set)
 ```
 
-The integration suite compiles `cmd/gateway`, spawns it against real Redis and mock upstreams, and drives it purely over HTTP — never importing internal packages. It proves the shipped artifact behaves: exact rate limiting under concurrency, budget cut-off, retry classification, fallback with allowlist enforcement, the full breaker cycle, progressive streaming, client-cancel propagation, and hot reload without dropping an in-flight request.
+The integration suite compiles `cmd/gateway` and `cmd/migrate`, seeds each test's teams into a throwaway Postgres database, spawns the gateway against it, real Redis, and mock upstreams, and drives it purely over HTTP — never importing internal packages. It proves the shipped artifact behaves: exact rate limiting under concurrency, budget cut-off, retry classification, fallback with allowlist enforcement, the full breaker cycle, progressive streaming, client-cancel propagation, and hot reload without dropping an in-flight request.
 
 Unit tests concentrate on the state machines and failure paths — the token bucket, the breaker, the health hysteresis, the classifier, the sampler, the middleware chain. Packages that are mostly HTTP/Redis/Postgres glue (`internal/cache`, `internal/logstore`) are covered by the integration and load tests rather than by unit tests against a mock. To rerun the load test, see [`docs/loadtest-results.md`](docs/loadtest-results.md).
 

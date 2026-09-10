@@ -213,7 +213,7 @@ PowerShell, from the repo root, with Docker Desktop running. `.env` must hold
 
 ```powershell
 # Main run
-.\scripts\start-loadtest-env.ps1        # flushes Redis + truncates the request log
+.\scripts\start-loadtest-env.ps1        # flushes Redis + recreates the load-test database
 k6 run scripts\loadtest.js              # writes k6-summary.json
 
 $H = @{ Authorization = "Bearer sk-loadtest-realtime-9f2b1c" }
