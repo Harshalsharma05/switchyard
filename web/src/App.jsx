@@ -37,9 +37,21 @@ function RequireSession({ children }) {
 export default function App() {
   const { status } = useSession()
 
-  // 'loading' renders nothing — DESIGN.md forbids a centred spinner, and a
-  // flash of the login page before /auth/me answers is worse than a blank beat.
-  if (status === 'loading') return null
+  // 'loading' renders nothing anywhere else — DESIGN.md forbids a centred
+  // spinner, and a flash of the login page before /auth/me answers is worse
+  // than a blank beat.
+  //
+  // /signing-in is the exception, and has to be: it is the interstitial for
+  // exactly this window. Bailing out here would leave the browser blank for the
+  // whole round trip after Google hands the user back, which reads as a crash.
+  if (status === 'loading') {
+    return (
+      <Routes>
+        <Route path="/signing-in" element={<AuthCallback />} />
+        <Route path="*" element={null} />
+      </Routes>
+    )
+  }
 
   return (
     <Routes>

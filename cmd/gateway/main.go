@@ -582,8 +582,13 @@ func run() error {
 
 	// Dashboard sign-in (Multi-user, Step 1.2). Humans authenticate here with
 	// Google; :8080 continues to authenticate team API keys and learns nothing
-	// about users. Unconfigured means the /auth routes are simply absent --
-	// the admin port is still gated by requireAdmin either way.
+	// about users.
+	//
+	// Required to boot, for the same reason POSTGRES_PASSWORD is. Since Step 1.5
+	// a session is the only way into the admin port, so a gateway without these
+	// is not degraded, it is unusable: every /admin route answers 401 and every
+	// /auth route 404s while the process reports itself healthy. Refusing to
+	// start is the honest failure.
 	var adminAuth admin.Auth
 	{
 		clientID := os.Getenv("GOOGLE_CLIENT_ID")
@@ -592,7 +597,9 @@ func run() error {
 
 		switch {
 		case clientID == "" || clientSecret == "" || jwtSecret == "":
-			log.Warn("dashboard sign-in is disabled: set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET and JWT_SECRET to enable it")
+			return errors.New("dashboard sign-in is unconfigured: set GOOGLE_CLIENT_ID, " +
+				"GOOGLE_CLIENT_SECRET and JWT_SECRET — since the admin port takes only a " +
+				"session, the gateway has no other way to authenticate a human")
 		default:
 			redirect := envOr("SWITCHYARD_OAUTH_REDIRECT_URL", defaultOAuthRedirectURL)
 			identityStore := identity.NewStore(dbPool,
