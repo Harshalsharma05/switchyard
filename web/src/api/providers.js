@@ -3,6 +3,6 @@
 // and model selects.
 import { request } from './client.js'
 
-export function fetchProviders(key, signal) {
-  return request('/admin/providers', { key, signal })
+export function fetchProviders(signal) {
+  return request('/admin/providers', { signal })
 }

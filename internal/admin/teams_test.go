@@ -127,7 +127,7 @@ func newTestAdminServer(t *testing.T, teams TeamStore, spend SpendReader, provid
 
 func newTestAdminServerWithReload(t *testing.T, teams TeamStore, spend SpendReader, providers ProviderLister, reload Reloader) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(NewRouter(func() bool { return true }, teams, spend, providers, fakeHealthReader{}, &fakeBreakerController{}, nil, reload, nil, nil, nil, nil, nil, nil, QualityFeedbackConfig{}, false, nil, nil, nil, testMetrics(t), discardLogger()))
+	srv := httptest.NewServer(NewRouter(func() bool { return true }, teams, spend, providers, fakeHealthReader{}, &fakeBreakerController{}, nil, reload, nil, nil, nil, nil, QualityFeedbackConfig{}, false, nil, nil, testAuth(true), testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -546,24 +546,6 @@ func TestRevokeKeyRemovesAuthentication(t *testing.T) {
 	}
 }
 
-// Revoking the key the request is authenticated with would lock the operator
-// out; it must be refused. Needs a real authenticator, so it runs on the
-// auth-wired server (acme = admin).
-func TestRevokeOwnKeyIsRefused(t *testing.T) {
-	srv := authedServer(t, &fakeSpendReader{})
-
-	req, _ := http.NewRequest(http.MethodDelete, srv.URL+"/admin/teams/acme/key", nil)
-	req.Header.Set("Authorization", "Bearer acme-key")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("DELETE: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusConflict {
-		t.Fatalf("status = %d, want 409", resp.StatusCode)
-	}
-}
-
 // --- POST /admin/teams, DELETE /admin/teams/{id} (Tier 1, Step 2.5) --------
 
 // failingAudit is an audit log that is down. Every team mutation writes its
@@ -581,7 +563,7 @@ func (failingAudit) ListAudit(context.Context, int, string) (logstore.AuditPage,
 func newCreateDeleteServer(t *testing.T, teams TeamStore, audit AuditRecorder) *httptest.Server {
 	t.Helper()
 	providers := fakeProviderLister{configs: []provider.Config{{Name: "groq", Models: []string{"m", "m2"}}}}
-	srv := httptest.NewServer(NewRouter(func() bool { return true }, teams, &fakeSpendReader{}, providers, fakeHealthReader{}, &fakeBreakerController{}, nil, fakeReloader, nil, nil, nil, nil, nil, nil, QualityFeedbackConfig{}, false, audit, nil, nil, testMetrics(t), discardLogger()))
+	srv := httptest.NewServer(NewRouter(func() bool { return true }, teams, &fakeSpendReader{}, providers, fakeHealthReader{}, &fakeBreakerController{}, nil, fakeReloader, nil, nil, nil, nil, QualityFeedbackConfig{}, false, audit, nil, testAuth(true), testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -720,18 +702,6 @@ func TestDeleteTeamRemovesAuthentication(t *testing.T) {
 	}
 	if _, err := store.Get("globex"); !errors.Is(err, auth.ErrUnknownTeam) {
 		t.Errorf("deleted team is still listed: %v", err)
-	}
-}
-
-// Deleting the team you are authenticated as would lock you out, and refusing
-// it is what guarantees an admin always remains. Needs a real authenticator, so
-// it runs on the auth-wired server (acme = admin).
-func TestDeleteOwnTeamIsRefused(t *testing.T) {
-	srv := authedServer(t, &fakeSpendReader{})
-
-	resp := deleteTeamRequest(t, srv, "acme", "acme-key")
-	if resp.StatusCode != http.StatusConflict {
-		t.Fatalf("status = %d, want 409", resp.StatusCode)
 	}
 }
 

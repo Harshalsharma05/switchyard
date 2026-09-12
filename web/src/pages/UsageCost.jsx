@@ -11,7 +11,7 @@ import { Card } from '../components/primitives.jsx'
 import { CostTrendChart } from '../components/charts.jsx'
 import SpendCard from '../components/SpendCard.jsx'
 import { EmptyState, ErrorState, Loading } from '../components/states.jsx'
-import { useAuth } from '../hooks/useAuth.js'
+import { useSession } from '../hooks/useSession.js'
 import { usePolling } from '../hooks/usePolling.js'
 import { formatUSD, isZeroUSD } from '../utils/format.js'
 import '../components/charts.css'
@@ -207,8 +207,8 @@ function QualityLoop({ loop }) {
   )
 }
 
-function QualityFeedbackCard({ getKey, range }) {
-  const load = useCallback((signal) => fetchQualityFeedback(getKey(), { range, signal }), [getKey, range])
+function QualityFeedbackCard({ range }) {
+  const load = useCallback((signal) => fetchQualityFeedback({ range, signal }), [range])
   const fb = usePolling(load, {
     interval: 30000,
     ignoreError: (e) => e.type === 'request_log_disabled' || e.status === 403,
@@ -262,22 +262,22 @@ function QualityFeedbackCard({ getKey, range }) {
 }
 
 export default function UsageCost() {
-  const { getKey, isAdmin } = useAuth()
+  const { isSuperadmin } = useSession()
   const [range, setRange] = useState('7d')
   const [by, setBy] = useState('provider')
 
   const loadSpend = useCallback(
-    (signal) => (isAdmin ? fetchTeams(getKey(), signal) : fetchMe(getKey(), signal)),
-    [getKey, isAdmin],
+    (signal) => (isSuperadmin ? fetchTeams(signal) : fetchMe(signal)),
+    [isSuperadmin],
   )
   const spend = usePolling(loadSpend, { interval: 10000 })
 
-  const loadRecon = useCallback((signal) => fetchReconciliation(getKey(), signal), [getKey])
-  const recon = usePolling(loadRecon, { interval: 30000, enabled: isAdmin })
+  const loadRecon = useCallback((signal) => fetchReconciliation(signal), [])
+  const recon = usePolling(loadRecon, { interval: 30000, enabled: isSuperadmin })
 
   const loadCosts = useCallback(
-    (signal) => fetchCosts(getKey(), { range, by, signal }),
-    [getKey, range, by],
+    (signal) => fetchCosts({ range, by, signal }),
+    [range, by],
   )
   const costs = usePolling(loadCosts, {
     interval: 15000,
@@ -285,16 +285,16 @@ export default function UsageCost() {
   })
 
   const loadAttribution = useCallback(
-    (signal) => fetchAttribution(getKey(), { range, signal }),
-    [getKey, range],
+    (signal) => fetchAttribution({ range, signal }),
+    [range],
   )
   const attribution = usePolling(loadAttribution, {
     interval: 30000,
     ignoreError: (e) => e.type === 'request_log_disabled',
   })
 
-  const teams = isAdmin ? (spend.data ?? []) : spend.data ? [spend.data] : []
-  const byOptions = isAdmin ? ['provider', 'model', 'team'] : ['provider', 'model']
+  const teams = isSuperadmin ? (spend.data ?? []) : spend.data ? [spend.data] : []
+  const byOptions = isSuperadmin ? ['provider', 'model', 'team'] : ['provider', 'model']
 
   return (
     <>
@@ -317,7 +317,7 @@ export default function UsageCost() {
               />
             ))}
           </div>
-          {isAdmin && <ReconStrip state={recon} />}
+          {isSuperadmin && <ReconStrip state={recon} />}
         </>
       )}
 
@@ -370,7 +370,7 @@ export default function UsageCost() {
         </div>
       </Card>
 
-      {isAdmin && <QualityFeedbackCard getKey={getKey} range={range} />}
+      {isSuperadmin && <QualityFeedbackCard range={range} />}
     </>
   )
 }

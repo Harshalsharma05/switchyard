@@ -46,14 +46,14 @@ type costsView struct {
 	Series      []costPointView `json:"series"`
 }
 
-func handleCosts(reqLog RequestLogReader, authr KeyAuthenticator, log *slog.Logger) http.HandlerFunc {
+func handleCosts(reqLog RequestLogReader, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if reqLog == nil {
 			writeRequestLogDisabled(w, log)
 			return
 		}
 
-		team, ok := authenticate(w, r, authr, log)
+		scope, ok := teamScope(w, r, log)
 		if !ok {
 			return
 		}
@@ -79,17 +79,6 @@ func handleCosts(reqLog RequestLogReader, authr KeyAuthenticator, log *slog.Logg
 		if !ok {
 			writeError(w, log, http.StatusBadRequest, "invalid_request_error",
 				"by must be one of provider, model, team")
-			return
-		}
-
-		// Same scoping rule as /admin/requests: a non-admin's team comes from its
-		// key, and naming another team is refused rather than ignored.
-		scope := team.ID
-		if team.IsAdmin {
-			scope = q.Get("team")
-		} else if want := q.Get("team"); want != "" && want != team.ID {
-			writeError(w, log, http.StatusBadRequest, "invalid_request_error",
-				"team "+team.ID+" may only read its own costs")
 			return
 		}
 

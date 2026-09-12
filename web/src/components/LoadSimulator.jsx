@@ -1,8 +1,10 @@
 // Live Ops load simulator (Step 4.4): browser-generated concurrent traffic
 // against the gateway with a live readout. Bounded and clearly labelled as
 // indicative, not a benchmark.
-import { useState } from 'react'
-import { useAuth } from '../hooks/useAuth.js'
+import { useEffect, useState } from 'react'
+import { useGatewayKey } from '../hooks/useGatewayKey.js'
+import { fetchProviders } from '../api/providers.js'
+import GatewayKeyField from './GatewayKeyField.jsx'
 import { MAX_CONCURRENCY, MAX_DURATION_S, useLoadSim } from '../hooks/useLoadSim.js'
 import { EmptyState } from './states.jsx'
 import { formatCount, formatMs } from '../utils/format.js'
@@ -17,9 +19,17 @@ function Stat({ label, value, tone }) {
 }
 
 export default function LoadSimulator() {
-  const { me, getKey } = useAuth()
-  const models = me?.allowed_models ?? []
-  const { running, stats, start, stop } = useLoadSim(getKey)
+  const [models, setModels] = useState([])
+  useEffect(() => {
+    const ac = new AbortController()
+    fetchProviders(ac.signal)
+      .then((list) => setModels((list ?? []).flatMap((p) => p.models ?? [])))
+      .catch(() => setModels([]))
+    return () => ac.abort()
+  }, [])
+
+  const { key: gatewayKey, hasKey } = useGatewayKey()
+  const { running, stats, start, stop } = useLoadSim(gatewayKey)
 
   const [model, setModel] = useState(models[0] ?? '')
   const [concurrency, setConcurrency] = useState(5)
@@ -30,7 +40,7 @@ export default function LoadSimulator() {
   const started = running || stats.completed > 0
 
   if (models.length === 0) {
-    return <EmptyState>This team has no allowed models, so there is nothing to send traffic to.</EmptyState>
+    return <EmptyState>No models are configured, so there is nothing to send traffic to.</EmptyState>
   }
 
   return (
@@ -65,13 +75,15 @@ export default function LoadSimulator() {
         ) : (
           <button
             type="button" className="sim-start"
-            disabled={!model}
+            disabled={!model || !hasKey}
             onClick={() => start(model, clamp(concurrency, MAX_CONCURRENCY), clamp(duration, MAX_DURATION_S))}
           >
             Start
           </button>
         )}
       </div>
+
+      <GatewayKeyField what="The load simulator" />
 
       {started ? (
         <div className="sim-readout">

@@ -24,6 +24,14 @@ import (
 // composition happens at the one place that is allowed to know about both.
 type Middleware func(http.Handler) http.Handler
 
+// Auth is the dashboard identity surface, built in cmd/ and passed in whole.
+// Router is mounted at /auth; Session and CSRF wrap the /admin group.
+type Auth struct {
+	Router  http.Handler
+	Session Middleware
+	CSRF    Middleware
+}
+
 // NewRouter builds the admin listener's handler.
 //
 // Steps 4.3 and 4.4 mount the team, provider, and reload endpoints here;
@@ -31,7 +39,7 @@ type Middleware func(http.Handler) http.Handler
 // Route paths carry an explicit /admin prefix even though the whole listener
 // is already the admin port, leaving room for /metrics and future operator
 // endpoints to live at the root without colliding with this namespace.
-func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers ProviderLister, healthReader HealthReader, breakers BreakerController, chaos ChaosController, reload Reloader, requestLog RequestLogReader, authr KeyAuthenticator, summarySvc SummaryService, cacheTuner CacheTuner, costCalc CostCalculator, routing RoutingInfo, qualityFeedback QualityFeedbackConfig, qualityEnabled bool, audit AuditRecorder, system SystemReporter, authRouter http.Handler, metrics *telemetry.Metrics, log *slog.Logger, middleware ...Middleware) http.Handler {
+func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers ProviderLister, healthReader HealthReader, breakers BreakerController, chaos ChaosController, reload Reloader, requestLog RequestLogReader, summarySvc SummaryService, cacheTuner CacheTuner, costCalc CostCalculator, qualityFeedback QualityFeedbackConfig, qualityEnabled bool, audit AuditRecorder, system SystemReporter, auth Auth, metrics *telemetry.Metrics, log *slog.Logger, middleware ...Middleware) http.Handler {
 	r := chi.NewRouter()
 
 	for _, mw := range middleware {
@@ -39,92 +47,66 @@ func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers 
 	}
 
 	// Dashboard sign-in. Built in cmd/ from internal/identity and handed in as
-	// an opaque handler, the same way Middleware is: this package never imports
-	// identity, so the two authentication systems cannot leak into each other.
-	// Nil when OAuth is unconfigured, and the routes simply do not exist.
-	if authRouter != nil {
-		r.Mount("/auth", authRouter)
+	// opaque handlers and middleware, the same way Middleware already is: this
+	// package never imports identity, so the two authentication systems cannot
+	// leak into each other. Nil when OAuth is unconfigured.
+	if auth.Router != nil {
+		r.Mount("/auth", auth.Router)
 	}
 
 	r.Get("/healthz", healthz)
 	r.Get("/readyz", readyz(ready))
 	r.Handle("/metrics", promhttp.HandlerFor(metrics.Registry(), promhttp.HandlerOpts{}))
 
-	// Routes that take a bearer key and scope their own response to the caller.
-	// /admin/me is the frontend's first call on load; the request-log routes
-	// pin a non-admin to its own rows internally. Neither is behind the admin
-	// gate — any valid key reaches them.
-	r.Get("/admin/me", handleMe(authr, spend, routing, log))
-	r.Get("/admin/summary", handleSummary(summarySvc, healthReader, cacheTuner != nil, qualityEnabled, authr, log))
-	r.Get("/admin/requests", listRequests(requestLog, authr, log))
-	r.Get("/admin/requests/{id}", getRequest(requestLog, authr, log))
-	r.Get("/admin/costs", handleCosts(requestLog, authr, log))
-	r.Get("/admin/attribution", handleAttribution(requestLog, costCalc, authr, log))
-
-	// Read-only operator surface: no key, same as the Prometheus scrape.
-	r.Get("/admin/providers", listProviders(providers, log))
-	r.Get("/admin/providers/health", listProviderHealth(healthReader, breakers, log))
-
-	// Everything mutating or cross-team now requires an admin key (Step 2.1).
-	// requireAdmin is inert when authr is nil, so tests that drive these
-	// handlers directly still work and a registry-less build keeps Part 1's
-	// open operator port.
+	// Everything under /admin now requires a signed-in session. A team API key
+	// reaches none of it: the session middleware never reads the Authorization
+	// header, so a key is not refused by a rule -- it is not an input.
 	r.Group(func(r chi.Router) {
-		r.Use(requireAdmin(authr, log))
+		if auth.Session != nil {
+			r.Use(auth.Session)
+		}
+		if auth.CSRF != nil {
+			r.Use(auth.CSRF)
+		}
 
-		r.Route("/admin/teams", func(r chi.Router) {
-			r.Get("/", listTeams(teams, spend, log))
-			r.Post("/", createTeam(teams, providers, audit, log))
-			r.Get("/{id}", getTeam(teams, spend, log))
-			r.Patch("/{id}", patchTeam(teams, spend, audit, log))
-			r.Delete("/{id}", deleteTeam(teams, audit, log))
-			r.Post("/{id}/reset-budget", resetBudget(teams, spend, audit, log))
+		r.Get("/admin/summary", handleSummary(summarySvc, healthReader, cacheTuner != nil, qualityEnabled, log))
+		r.Get("/admin/requests", listRequests(requestLog, log))
+		r.Get("/admin/requests/{id}", getRequest(requestLog, log))
+		r.Get("/admin/costs", handleCosts(requestLog, log))
+		r.Get("/admin/attribution", handleAttribution(requestLog, costCalc, log))
+		r.Get("/admin/providers", listProviders(providers, log))
+		r.Get("/admin/providers/health", listProviderHealth(healthReader, breakers, log))
 
-			// Step 6.4's key lifecycle. Both write an audit entry before they
-			// mutate the registry — a credential change the audit log missed is
-			// the failure this ordering rules out.
-			r.Post("/{id}/key/rotate", rotateKey(teams, audit, log))
-			r.Delete("/{id}/key", revokeKey(teams, audit, log))
-		})
+		// Everything that crosses tenants. Superadmin-only until Phase 2
+		// splits org admin from superadmin -- fail closed, not unscoped.
+		r.Group(func(r chi.Router) {
+			r.Use(requireSuperadmin(log))
 
-		// Step 6.4's audit view: every mutation above, newest first, paginated.
-		r.Get("/admin/audit", listAudit(audit, log))
+			r.Route("/admin/teams", func(r chi.Router) {
+				r.Get("/", listTeams(teams, spend, log))
+				r.Post("/", createTeam(teams, providers, audit, log))
+				r.Get("/{id}", getTeam(teams, spend, log))
+				r.Patch("/{id}", patchTeam(teams, spend, audit, log))
+				r.Delete("/{id}", deleteTeam(teams, audit, log))
+				r.Post("/{id}/reset-budget", resetBudget(teams, spend, audit, log))
+				r.Post("/{id}/key/rotate", rotateKey(teams, audit, log))
+				r.Delete("/{id}/key", revokeKey(teams, audit, log))
+			})
 
-		// Step 6.4's System panel: version, uptime, config hash, and live
-		// dependency probes. Admin-gated with the rest of Settings.
-		r.Get("/admin/system", handleSystem(system, providers, log))
+			r.Get("/admin/audit", listAudit(audit, log))
+			r.Get("/admin/system", handleSystem(system, providers, log))
+			r.Get("/admin/reconciliation", handleReconciliation(teams, spend, requestLog, log))
+			r.Post("/admin/providers/{name}/breaker/reset", resetBreaker(breakers, providers, log))
+			r.Post("/admin/reload", reloadConfig(reload, audit, log))
+			r.Get("/admin/cache/tune", tuneCache(cacheTuner, log))
+			r.Get("/admin/quality/feedback", handleQualityFeedback(requestLog, qualityFeedback, log))
+			r.Delete("/admin/cache", purgeCache(cacheTuner, log))
 
-		// Step 6.1: cross-checks Redis budget counters against the request log.
-		r.Get("/admin/reconciliation", handleReconciliation(teams, spend, requestLog, log))
-
-		// Registered after /admin/providers/health so chi's static-over-wildcard
-		// precedence is not the only thing keeping "health" from being read as a
-		// provider name; the literal route is more specific either way.
-		r.Post("/admin/providers/{name}/breaker/reset", resetBreaker(breakers, providers, log))
-		r.Post("/admin/reload", reloadConfig(reload, audit, log))
-
-		// Step 7.3's threshold tuning sweep. Answers 404 when the cache is
-		// disabled, matching the chaos routes: the routing table stays the
-		// same shape in every environment.
-		r.Get("/admin/cache/tune", tuneCache(cacheTuner, log))
-
-		// Step 9.3: the cache and routing feedback loops. Admin-gated because
-		// it is a gateway-tuning view, not per-team data.
-		r.Get("/admin/quality/feedback", handleQualityFeedback(requestLog, qualityFeedback, log))
-
-		// Step 7.4's manual invalidation. Registered under the admin gate
-		// because a purge crosses every team's entries.
-		r.Delete("/admin/cache", purgeCache(cacheTuner, log))
-
-		// Step 7.5's chaos controls. The routes are always registered and answer
-		// 404 unless the harness is available, rather than being conditionally
-		// mounted: the guard that matters is inside the harness, and keeping the
-		// routing table identical in every environment means a production gateway
-		// is indistinguishable from a build that never had chaos compiled in.
-		r.Route("/admin/chaos", func(r chi.Router) {
-			r.Get("/", getChaos(chaos, log))
-			r.Post("/", setChaos(chaos, log))
-			r.Delete("/", deleteChaos(chaos, log))
+			r.Route("/admin/chaos", func(r chi.Router) {
+				r.Get("/", getChaos(chaos, log))
+				r.Post("/", setChaos(chaos, log))
+				r.Delete("/", deleteChaos(chaos, log))
+			})
 		})
 	})
 

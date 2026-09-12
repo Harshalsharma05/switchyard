@@ -1,0 +1,326 @@
+/* Auth page. 55/45 split, hairline between the halves, no shadow and no
+   gradient — elevation here is surface colour and a border, same as everywhere
+   else in the console. */
+
+.auth {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 55fr 45fr;
+  background: var(--bg-base);
+}
+
+/* ---- left: brand ---- */
+
+/* One centred content column, with the wordmark pinned out of the flow.
+   space-between across the full viewport height was the bug: on a tall screen
+   it flung the zones apart and pushed the carousel past the fold. */
+.auth-brand {
+  position: relative;
+  background: var(--bg-surface);
+  border-right: 1px solid var(--border);
+  padding: 48px;
+  display: flex;
+  align-items: center;
+}
+
+.auth-brand-top {
+  position: absolute;
+  top: 48px;
+  left: 48px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 20px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.auth-brand-content {
+  width: 100%;
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  gap: 40px;
+}
+
+.auth-brand-mid { display: flex; flex-direction: column; gap: 14px; }
+
+.auth-eyebrow {
+  font-size: 14px;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.auth-headline {
+  font-size: 42px;
+  font-weight: 500;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+  max-width: 15ch;
+  margin: 0;
+}
+
+.auth-brand-bottom { display: flex; flex-direction: column; gap: 14px; }
+
+/* ---- right: form ---- */
+
+.auth-panel {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.auth-form {
+  width: 100%;
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.auth-form h1 {
+  font-size: 26px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.auth-sub {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin: 0 0 4px;
+}
+
+.auth-error {
+  font-size: 13px;
+  color: var(--status-error);
+  background: var(--status-error-bg);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 0;
+}
+
+/* Secondary, per DESIGN.md: the accent fill is reserved for a screen's single
+   most important action and is not spent on a sign-in button. With no email
+   form there is no submit here, so this page carries no accent fill at all --
+   the rule is a maximum, not a quota. */
+.auth-google {
+  height: 40px;
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 120ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.auth-google:hover:not(:disabled) { background: var(--bg-raised); }
+.auth-google:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+/* Disabled only while redirecting, and the label says so — never a silently
+   dead control. */
+.auth-google:disabled { cursor: default; color: var(--text-muted); }
+
+/* Sized to match the mark it replaces, so the loading state shifts nothing. */
+.auth-btn-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: auth-spin 700ms linear infinite;
+}
+
+.auth-note {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin: 4px 0 0;
+}
+
+.auth-footer {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+  margin: 12px 0 0;
+}
+
+/* ---- callback ---- */
+
+.auth-callback {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.auth-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: auth-spin 700ms linear infinite;
+}
+
+@keyframes auth-spin { to { transform: rotate(360deg); } }
+
+
+/* ---- typed tagline ---- */
+
+/* Mono so the caret reads as a terminal cursor rather than a marketing tic.
+   nowrap plus a reserved line box means lines of different lengths never
+   reflow the panel as they type. */
+.auth-tagline {
+  margin: 4px 0 0;
+  font-family: var(--font-mono);
+  font-size: 18px;
+  letter-spacing: -0.02em;
+  line-height: 1.5;
+  min-height: calc(18px * 1.5);
+  white-space: nowrap;
+  color: var(--text-secondary);
+  opacity: 1;
+  transition: opacity 350ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* The caret fades with the line it belongs to. */
+.auth-tagline.is-fading { opacity: 0; }
+
+.auth-caret {
+  display: inline-block;
+  width: 2.5px;
+  height: 1.05em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--accent);
+  animation: auth-blink 1.06s steps(1, end) infinite;
+}
+
+@keyframes auth-blink { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }
+
+/* ---- feature carousel ---- */
+
+/* Fixed height so cross-fading between cards of different copy lengths never
+   moves the dots beneath them. The card stretches to fill it, so a shorter
+   card does not read as a different component. */
+.auth-feature {
+  min-height: 128px;
+  display: flex;
+}
+
+.auth-feature-card {
+  flex: 1;
+  display: flex;
+  gap: 14px;
+  padding: 20px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  animation: feature-in 400ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* Fade plus a short upward drift. No horizontal slide — slide reads as a
+   marketing site, fade reads as a product. */
+@keyframes feature-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.auth-feature-icon {
+  color: var(--accent);
+  flex: 0 0 auto;
+  line-height: 0;
+  padding-top: 1px;
+}
+
+.auth-feature-card h3 {
+  margin: 0 0 5px;
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.auth-feature-card p {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+.auth-dots {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+/* The button is the hit target; the dash is drawn by ::after and centred in
+   it. The dash height is set explicitly rather than derived from insets —
+   index.css sets box-sizing: border-box globally, so a 3px height with 8px
+   padding collapses the content box to zero and an inset-based bar disappears
+   entirely. */
+.auth-dot {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  position: relative;
+}
+
+.auth-dot::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 3px;
+  margin-top: -1.5px;
+  background: var(--border-strong);
+  border-radius: 2px;
+  transition: background 120ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.auth-dot.is-active::after { background: var(--accent); }
+.auth-dot:hover::after { background: var(--text-muted); }
+.auth-dot.is-active:hover::after { background: var(--accent); }
+
+.auth-dot:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 2px;
+}
+
+/* Below 900px the brand panel is removed, not stacked. */
+@media (max-width: 900px) {
+  .auth { grid-template-columns: 1fr; }
+  .auth-brand { display: none; }
+  .auth-form { max-width: 400px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-spinner,
+  .auth-btn-spinner,
+  .auth-caret { animation: none; }
+  /* The card still changes on click; it just does not drift in. */
+  .auth-feature-card { animation: none; }
+  .auth-tagline { transition: none; }
+}

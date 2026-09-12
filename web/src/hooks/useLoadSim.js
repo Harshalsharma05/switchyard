@@ -36,7 +36,7 @@ function bucket(status) {
   return 'other'
 }
 
-export function useLoadSim(getKey) {
+export function useLoadSim(gatewayKey) {
   const [running, setRunning] = useState(false)
   const [stats, setStats] = useState(emptyStats)
   const acRef = useRef(null)
@@ -77,7 +77,7 @@ export function useLoadSim(getKey) {
       const worker = async () => {
         while (performance.now() < deadline && !ac.signal.aborted) {
           try {
-            const { status, ms } = await fireOne(getKey(), model, ac.signal)
+            const { status, ms } = await fireOne(gatewayKey, model, ac.signal)
             accRef.current.samples.push(ms)
             accRef.current.counts[bucket(status)] += 1
           } catch {
@@ -93,7 +93,7 @@ export function useLoadSim(getKey) {
         acRef.current = null
       })
     },
-    [getKey, snapshot],
+    [gatewayKey, snapshot],
   )
 
   // Leaving the screen mid-run stops the traffic.

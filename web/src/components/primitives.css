@@ -95,3 +95,84 @@
 .table tbody tr:hover { background: var(--bg-raised); }
 
 .ta-r { text-align: right; }
+
+/* Team API key for the gateway-port screens (Playground, load simulator).
+   A session identifies a person; :8080 authenticates teams. */
+.gateway-key {
+  border-top: 1px solid var(--border);
+  margin-top: 12px;
+  padding-top: 12px;
+}
+
+.gateway-key label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.gateway-key-why {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin: 0 0 8px;
+  max-width: 60ch;
+}
+
+.gateway-key-row {
+  display: flex;
+  gap: 8px;
+}
+
+.gateway-key-row input {
+  flex: 1;
+  height: 32px;
+  padding: 0 10px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.gateway-key-row input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.gateway-key-row button {
+  height: 32px;
+  padding: 0 12px;
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.gateway-key-row button:disabled { color: var(--text-muted); cursor: default; }
+
+.gateway-key-set {
+  border-top: 1px solid var(--border);
+  margin-top: 12px;
+  padding-top: 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.gateway-key-set code { font-family: var(--font-mono); color: var(--text-secondary); }
+
+.link-button {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font-size: 11px;
+  cursor: pointer;
+  text-decoration: underline;
+}

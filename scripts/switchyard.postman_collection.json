@@ -7,19 +7,75 @@
   },
   "auth": {
     "type": "bearer",
-    "bearer": [{ "key": "token", "value": "{{acme_key}}", "type": "string" }]
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{acme_key}}",
+        "type": "string"
+      }
+    ]
   },
   "variable": [
-    { "key": "base_url", "value": "http://localhost:8080", "type": "string" },
-    { "key": "admin_url", "value": "http://localhost:9090", "type": "string" },
-    { "key": "groq_model", "value": "openai/gpt-oss-20b", "type": "string" },
-    { "key": "groq_frontier_model", "value": "openai/gpt-oss-120b", "type": "string" },
-    { "key": "gemini_model", "value": "gemini-3.5-flash-lite", "type": "string" },
-    { "key": "ollama_model", "value": "llama3.2:3b", "type": "string" },
-    { "key": "team_id", "value": "acme", "type": "string" },
-    { "key": "acme_key", "value": "sk-switchyard-dev-acme-9f2b1c", "type": "string" },
-    { "key": "globex_key", "value": "sk-switchyard-dev-globex-7a4e0d", "type": "string" },
-    { "key": "globex_team_id", "value": "globex", "type": "string" }
+    {
+      "key": "base_url",
+      "value": "http://localhost:8080",
+      "type": "string"
+    },
+    {
+      "key": "admin_url",
+      "value": "http://localhost:9090",
+      "type": "string"
+    },
+    {
+      "key": "groq_model",
+      "value": "openai/gpt-oss-20b",
+      "type": "string"
+    },
+    {
+      "key": "groq_frontier_model",
+      "value": "openai/gpt-oss-120b",
+      "type": "string"
+    },
+    {
+      "key": "gemini_model",
+      "value": "gemini-3.5-flash-lite",
+      "type": "string"
+    },
+    {
+      "key": "ollama_model",
+      "value": "llama3.2:3b",
+      "type": "string"
+    },
+    {
+      "key": "team_id",
+      "value": "acme",
+      "type": "string"
+    },
+    {
+      "key": "acme_key",
+      "value": "sk-switchyard-dev-acme-9f2b1c",
+      "type": "string"
+    },
+    {
+      "key": "globex_key",
+      "value": "sk-switchyard-dev-globex-7a4e0d",
+      "type": "string"
+    },
+    {
+      "key": "globex_team_id",
+      "value": "globex",
+      "type": "string"
+    },
+    {
+      "key": "admin_cookie",
+      "value": "",
+      "description": "Dashboard session for the admin port: run `go run ./cmd/admintoken` and paste its output. The admin port no longer accepts a team key."
+    },
+    {
+      "key": "admin_csrf",
+      "value": "",
+      "description": "The sy_csrf value from the same admintoken output; required on mutating admin requests."
+    }
   ],
   "item": [
     {
@@ -46,16 +102,31 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"model\": \"{{groq_model}}\",\n  \"messages\": [\n    { \"role\": \"system\", \"content\": \"Be terse.\" },\n    { \"role\": \"user\", \"content\": \"Count from 1 to 5, one number per line.\" }\n  ],\n  \"temperature\": 0.2,\n  \"max_tokens\": 64\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{base_url}}/v1/chat/completions",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "chat", "completions"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
             },
             "description": "Non-streaming completion served by Groq, occupying the OpenAI slot via the openai-compatible adapter."
           }
@@ -79,16 +150,31 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"model\": \"{{gemini_model}}\",\n  \"messages\": [\n    { \"role\": \"system\", \"content\": \"Be terse.\" },\n    { \"role\": \"user\", \"content\": \"Count from 1 to 5, one number per line.\" }\n  ],\n  \"temperature\": 0.2,\n  \"max_tokens\": 64\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{base_url}}/v1/chat/completions",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "chat", "completions"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
             },
             "description": "Non-streaming completion served by Gemini, occupying the Anthropic slot via the gemini adapter (top-level system instruction, distinct usage/finish-reason vocabulary)."
           }
@@ -112,16 +198,31 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"model\": \"{{ollama_model}}\",\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"Count from 1 to 5, one number per line.\" }\n  ],\n  \"max_tokens\": 64\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{base_url}}/v1/chat/completions",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "chat", "completions"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
             },
             "description": "Non-streaming completion served by the local Ollama fallback. Requires `ollama serve` running with the configured model pulled."
           }
@@ -152,16 +253,31 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"model\": \"{{groq_model}}\",\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"Count from 1 to 10, one number per line.\" }\n  ],\n  \"max_tokens\": 128,\n  \"stream\": true\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{base_url}}/v1/chat/completions",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "chat", "completions"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
             },
             "description": "Streaming completion from Groq via the shared SSE reader (OpenAI dialect: data: lines, terminated by [DONE])."
           }
@@ -185,16 +301,31 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"model\": \"{{gemini_model}}\",\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"Count from 1 to 10, one number per line.\" }\n  ],\n  \"max_tokens\": 128,\n  \"stream\": true\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{base_url}}/v1/chat/completions",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "chat", "completions"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
             },
             "description": "Streaming completion from Gemini. Internally hits :streamGenerateContent?alt=sse, translated by SwitchYard into the same OpenAI-shaped chunks as every other provider."
           }
@@ -218,16 +349,31 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"model\": \"{{ollama_model}}\",\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"Count from 1 to 10, one number per line.\" }\n  ],\n  \"max_tokens\": 128,\n  \"stream\": true\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{base_url}}/v1/chat/completions",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "chat", "completions"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
             },
             "description": "Streaming completion from Ollama's newline-delimited-JSON dialect, translated to the same wire chunks as the SSE-based providers. Requires `ollama serve` running."
           }
@@ -250,16 +396,31 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"model\": \"not-a-real-model\",\n  \"messages\": [ { \"role\": \"user\", \"content\": \"hi\" } ],\n  \"stream\": true\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{base_url}}/v1/chat/completions",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "chat", "completions"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
             },
             "description": "Model resolution fails before Stream() is ever called, so streaming's own error semantics (Step 2.4) never come into play — this must be a normal JSON error response, not an SSE event."
           }
@@ -286,16 +447,31 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"model\": \"not-a-real-model\",\n  \"messages\": [ { \"role\": \"user\", \"content\": \"hi\" } ]\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{base_url}}/v1/chat/completions",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "chat", "completions"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
             }
           }
         },
@@ -314,12 +490,31 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": { "mode": "raw", "raw": "{nope", "options": { "raw": { "language": "json" } } },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{nope",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
             "url": {
               "raw": "{{base_url}}/v1/chat/completions",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "chat", "completions"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
             }
           }
         },
@@ -340,16 +535,31 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"messages\": [ { \"role\": \"user\", \"content\": \"hi\" } ]\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{base_url}}/v1/chat/completions",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "chat", "completions"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
             }
           }
         },
@@ -370,16 +580,31 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"model\": \"{{groq_model}}\",\n  \"messages\": []\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{base_url}}/v1/chat/completions",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "chat", "completions"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
             }
           }
         },
@@ -400,16 +625,31 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"model\": \"{{groq_model}}\",\n  \"messages\": [ { \"role\": \"wizard\", \"content\": \"hi\" } ]\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{base_url}}/v1/chat/completions",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "chat", "completions"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
             }
           }
         },
@@ -430,16 +670,31 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"model\": \"{{groq_model}}\",\n  \"messages\": [ { \"role\": \"user\", \"content\": \"hi\" } ],\n  \"max_tokens\": -5\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{base_url}}/v1/chat/completions",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "chat", "completions"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
             }
           }
         },
@@ -460,16 +715,31 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"model\": \"{{groq_model}}\",\n  \"messages\": [ { \"role\": \"user\", \"content\": \"hi\" } ],\n  \"temperature\": 9\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{base_url}}/v1/chat/completions",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "chat", "completions"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
             }
           }
         },
@@ -490,16 +760,31 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"model\": \"{{groq_model}}\",\n  \"messages\": [ { \"role\": \"user\", \"content\": \"hi\" } ],\n  \"max_token\": 50\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{base_url}}/v1/chat/completions",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "chat", "completions"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
             },
             "description": "max_token (missing the s) must be rejected, not silently ignored — DisallowUnknownFields is what makes a typo visible instead of quietly falling back to the default."
           }
@@ -519,16 +804,31 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "text/plain" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "text/plain"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"model\": \"{{groq_model}}\",\n  \"messages\": [ { \"role\": \"user\", \"content\": \"hi\" } ]\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{base_url}}/v1/chat/completions",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "chat", "completions"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
             }
           }
         }
@@ -542,13 +842,26 @@
           "event": [
             {
               "listen": "test",
-              "script": { "type": "text/javascript", "exec": ["pm.test(\"status is 200\", () => pm.response.to.have.status(200));"] }
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));"
+                ]
+              }
             }
           ],
           "request": {
             "method": "GET",
             "header": [],
-            "url": { "raw": "{{base_url}}/healthz", "host": ["{{base_url}}"], "path": ["healthz"] },
+            "url": {
+              "raw": "{{base_url}}/healthz",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "healthz"
+              ]
+            },
             "description": "Liveness only — always 200 whenever the process can serve HTTP, regardless of provider or config state."
           }
         },
@@ -557,13 +870,26 @@
           "event": [
             {
               "listen": "test",
-              "script": { "type": "text/javascript", "exec": ["pm.test(\"status is 200\", () => pm.response.to.have.status(200));"] }
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));"
+                ]
+              }
             }
           ],
           "request": {
             "method": "GET",
             "header": [],
-            "url": { "raw": "{{base_url}}/readyz", "host": ["{{base_url}}"], "path": ["readyz"] },
+            "url": {
+              "raw": "{{base_url}}/readyz",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "readyz"
+              ]
+            },
             "description": "Readiness — 503 if the provider config never loaded. 200 once the registry is built."
           }
         },
@@ -572,14 +898,36 @@
           "event": [
             {
               "listen": "test",
-              "script": { "type": "text/javascript", "exec": ["pm.test(\"status is 200\", () => pm.response.to.have.status(200));"] }
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));"
+                ]
+              }
             }
           ],
           "request": {
             "method": "GET",
-            "header": [],
-            "url": { "raw": "{{admin_url}}/healthz", "host": ["{{admin_url}}"], "path": ["healthz"] },
-            "description": "Same probe, mounted on the admin port (9090) so operators can check liveness without going through the public listener."
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "{{admin_cookie}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{admin_url}}/healthz",
+              "host": [
+                "{{admin_url}}"
+              ],
+              "path": [
+                "healthz"
+              ]
+            },
+            "description": "Same probe, mounted on the admin port (9090) so operators can check liveness without going through the public listener.",
+            "auth": {
+              "type": "noauth"
+            }
           }
         },
         {
@@ -587,13 +935,35 @@
           "event": [
             {
               "listen": "test",
-              "script": { "type": "text/javascript", "exec": ["pm.test(\"status is 200\", () => pm.response.to.have.status(200));"] }
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", () => pm.response.to.have.status(200));"
+                ]
+              }
             }
           ],
           "request": {
             "method": "GET",
-            "header": [],
-            "url": { "raw": "{{admin_url}}/readyz", "host": ["{{admin_url}}"], "path": ["readyz"] }
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "{{admin_cookie}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{admin_url}}/readyz",
+              "host": [
+                "{{admin_url}}"
+              ],
+              "path": [
+                "readyz"
+              ]
+            },
+            "auth": {
+              "type": "noauth"
+            }
           }
         }
       ]
@@ -624,9 +994,27 @@
           ],
           "request": {
             "method": "GET",
-            "header": [],
-            "url": { "raw": "{{admin_url}}/admin/teams", "host": ["{{admin_url}}"], "path": ["admin", "teams"] },
-            "description": "Lists every configured team with its configured RPM/TPM limits, configured monthly budget, and live spend for the current period read from Redis. Live RPM/TPM *remaining* is deliberately not shown here — see DECISIONS.md's Step 4.3 entry on why that needs a read-only Peek on the hand-written token bucket that does not exist yet."
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "{{admin_cookie}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{admin_url}}/admin/teams",
+              "host": [
+                "{{admin_url}}"
+              ],
+              "path": [
+                "admin",
+                "teams"
+              ]
+            },
+            "description": "Lists every configured team with its configured RPM/TPM limits, configured monthly budget, and live spend for the current period read from Redis. Live RPM/TPM *remaining* is deliberately not shown here — see DECISIONS.md's Step 4.3 entry on why that needs a read-only Peek on the hand-written token bucket that does not exist yet.",
+            "auth": {
+              "type": "noauth"
+            }
           }
         },
         {
@@ -649,11 +1037,26 @@
           ],
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "{{admin_cookie}}",
+                "type": "text"
+              }
+            ],
             "url": {
               "raw": "{{admin_url}}/admin/teams/{{team_id}}",
-              "host": ["{{admin_url}}"],
-              "path": ["admin", "teams", "{{team_id}}"]
+              "host": [
+                "{{admin_url}}"
+              ],
+              "path": [
+                "admin",
+                "teams",
+                "{{team_id}}"
+              ]
+            },
+            "auth": {
+              "type": "noauth"
             }
           }
         },
@@ -674,11 +1077,26 @@
           ],
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "{{admin_cookie}}",
+                "type": "text"
+              }
+            ],
             "url": {
               "raw": "{{admin_url}}/admin/teams/not-a-real-team",
-              "host": ["{{admin_url}}"],
-              "path": ["admin", "teams", "not-a-real-team"]
+              "host": [
+                "{{admin_url}}"
+              ],
+              "path": [
+                "admin",
+                "teams",
+                "not-a-real-team"
+              ]
+            },
+            "auth": {
+              "type": "noauth"
             }
           }
         },
@@ -700,18 +1118,46 @@
           ],
           "request": {
             "method": "PATCH",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Cookie",
+                "value": "{{admin_cookie}}",
+                "type": "text"
+              },
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{admin_csrf}}",
+                "type": "text"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"rpm\": 75\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{admin_url}}/admin/teams/{{team_id}}",
-              "host": ["{{admin_url}}"],
-              "path": ["admin", "teams", "{{team_id}}"]
+              "host": [
+                "{{admin_url}}"
+              ],
+              "path": [
+                "admin",
+                "teams",
+                "{{team_id}}"
+              ]
             },
-            "description": "Adjusts a team's RPM limit without a gateway restart. Only the fields present in the body change — tpm and monthly_budget_usd are untouched. Takes effect on the very next request that authenticates against this team (see DECISIONS.md's Step 4.3 entry on the copy-on-write registry). Assumes configs/teams.yaml's acme entry starts at rpm: 60, tpm: 100000 — the last request in this folder restores it."
+            "description": "Adjusts a team's RPM limit without a gateway restart. Only the fields present in the body change — tpm and monthly_budget_usd are untouched. Takes effect on the very next request that authenticates against this team (see DECISIONS.md's Step 4.3 entry on the copy-on-write registry). Assumes configs/teams.yaml's acme entry starts at rpm: 60, tpm: 100000 — the last request in this folder restores it.",
+            "auth": {
+              "type": "noauth"
+            }
           }
         },
         {
@@ -731,18 +1177,46 @@
           ],
           "request": {
             "method": "PATCH",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Cookie",
+                "value": "{{admin_cookie}}",
+                "type": "text"
+              },
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{admin_csrf}}",
+                "type": "text"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"monthly_budget_usd\": 75.50\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{admin_url}}/admin/teams/{{team_id}}",
-              "host": ["{{admin_url}}"],
-              "path": ["admin", "teams", "{{team_id}}"]
+              "host": [
+                "{{admin_url}}"
+              ],
+              "path": [
+                "admin",
+                "teams",
+                "{{team_id}}"
+              ]
             },
-            "description": "The body carries a decimal USD amount; the gateway converts it to integer micro-dollars once at the admin boundary, the same conversion internal/config performs at boot from configs/teams.yaml."
+            "description": "The body carries a decimal USD amount; the gateway converts it to integer micro-dollars once at the admin boundary, the same conversion internal/config performs at boot from configs/teams.yaml.",
+            "auth": {
+              "type": "noauth"
+            }
           }
         },
         {
@@ -760,18 +1234,46 @@
           ],
           "request": {
             "method": "PATCH",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Cookie",
+                "value": "{{admin_cookie}}",
+                "type": "text"
+              },
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{admin_csrf}}",
+                "type": "text"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"rpm\": 0\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{admin_url}}/admin/teams/{{team_id}}",
-              "host": ["{{admin_url}}"],
-              "path": ["admin", "teams", "{{team_id}}"]
+              "host": [
+                "{{admin_url}}"
+              ],
+              "path": [
+                "admin",
+                "teams",
+                "{{team_id}}"
+              ]
             },
-            "description": "A non-positive rpm must be rejected — and rejected atomically: this must not have partially applied alongside any other field in the same body."
+            "description": "A non-positive rpm must be rejected — and rejected atomically: this must not have partially applied alongside any other field in the same body.",
+            "auth": {
+              "type": "noauth"
+            }
           }
         },
         {
@@ -789,18 +1291,46 @@
           ],
           "request": {
             "method": "PATCH",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Cookie",
+                "value": "{{admin_cookie}}",
+                "type": "text"
+              },
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{admin_csrf}}",
+                "type": "text"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"rmp\": 10\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{admin_url}}/admin/teams/{{team_id}}",
-              "host": ["{{admin_url}}"],
-              "path": ["admin", "teams", "{{team_id}}"]
+              "host": [
+                "{{admin_url}}"
+              ],
+              "path": [
+                "admin",
+                "teams",
+                "{{team_id}}"
+              ]
             },
-            "description": "rmp (transposed from rpm) must be rejected, not silently ignored — the admin API rejects unknown fields the same way the public API's request decoding does."
+            "description": "rmp (transposed from rpm) must be rejected, not silently ignored — the admin API rejects unknown fields the same way the public API's request decoding does.",
+            "auth": {
+              "type": "noauth"
+            }
           }
         },
         {
@@ -818,16 +1348,44 @@
           ],
           "request": {
             "method": "PATCH",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Cookie",
+                "value": "{{admin_cookie}}",
+                "type": "text"
+              },
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{admin_csrf}}",
+                "type": "text"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"rpm\": 10\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{admin_url}}/admin/teams/not-a-real-team",
-              "host": ["{{admin_url}}"],
-              "path": ["admin", "teams", "not-a-real-team"]
+              "host": [
+                "{{admin_url}}"
+              ],
+              "path": [
+                "admin",
+                "teams",
+                "not-a-real-team"
+              ]
+            },
+            "auth": {
+              "type": "noauth"
             }
           }
         },
@@ -849,18 +1407,46 @@
           ],
           "request": {
             "method": "PATCH",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Cookie",
+                "value": "{{admin_cookie}}",
+                "type": "text"
+              },
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{admin_csrf}}",
+                "type": "text"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"rpm\": 60,\n  \"tpm\": 100000,\n  \"monthly_budget_usd\": 50.00\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{admin_url}}/admin/teams/{{team_id}}",
-              "host": ["{{admin_url}}"],
-              "path": ["admin", "teams", "{{team_id}}"]
+              "host": [
+                "{{admin_url}}"
+              ],
+              "path": [
+                "admin",
+                "teams",
+                "{{team_id}}"
+              ]
             },
-            "description": "Undoes the two PATCH requests above so this collection can be re-run without leaving acme's limits changed. PATCHes are persisted in Postgres, so without this they would outlive a restart and a reload. Values match acme's seeded entry in configs/teams.yaml — update this request if that file changes."
+            "description": "Undoes the two PATCH requests above so this collection can be re-run without leaving acme's limits changed. PATCHes are persisted in Postgres, so without this they would outlive a restart and a reload. Values match acme's seeded entry in configs/teams.yaml — update this request if that file changes.",
+            "auth": {
+              "type": "noauth"
+            }
           }
         },
         {
@@ -880,13 +1466,34 @@
           ],
           "request": {
             "method": "POST",
-            "header": [],
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "{{admin_cookie}}",
+                "type": "text"
+              },
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{admin_csrf}}",
+                "type": "text"
+              }
+            ],
             "url": {
               "raw": "{{admin_url}}/admin/teams/{{team_id}}/reset-budget",
-              "host": ["{{admin_url}}"],
-              "path": ["admin", "teams", "{{team_id}}", "reset-budget"]
+              "host": [
+                "{{admin_url}}"
+              ],
+              "path": [
+                "admin",
+                "teams",
+                "{{team_id}}",
+                "reset-budget"
+              ]
             },
-            "description": "Deletes the team's current-period spend counter in Redis outright (not a SET to 0) — see DECISIONS.md's Step 4.3 entry for why that distinction matters. Run a real /v1/chat/completions request against this team first if you want to see a nonzero spend_usd get reset."
+            "description": "Deletes the team's current-period spend counter in Redis outright (not a SET to 0) — see DECISIONS.md's Step 4.3 entry for why that distinction matters. Run a real /v1/chat/completions request against this team first if you want to see a nonzero spend_usd get reset.",
+            "auth": {
+              "type": "noauth"
+            }
           }
         },
         {
@@ -904,11 +1511,32 @@
           ],
           "request": {
             "method": "POST",
-            "header": [],
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "{{admin_cookie}}",
+                "type": "text"
+              },
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{admin_csrf}}",
+                "type": "text"
+              }
+            ],
             "url": {
               "raw": "{{admin_url}}/admin/teams/not-a-real-team/reset-budget",
-              "host": ["{{admin_url}}"],
-              "path": ["admin", "teams", "not-a-real-team", "reset-budget"]
+              "host": [
+                "{{admin_url}}"
+              ],
+              "path": [
+                "admin",
+                "teams",
+                "not-a-real-team",
+                "reset-budget"
+              ]
+            },
+            "auth": {
+              "type": "noauth"
             }
           }
         },
@@ -942,9 +1570,27 @@
           ],
           "request": {
             "method": "GET",
-            "header": [],
-            "url": { "raw": "{{admin_url}}/admin/providers", "host": ["{{admin_url}}"], "path": ["admin", "providers"] },
-            "description": "Static provider configuration only — no credentials, no health status (that is the separate endpoint below). Confirms the API key resolved from the environment at boot never reaches this response."
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "{{admin_cookie}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{admin_url}}/admin/providers",
+              "host": [
+                "{{admin_url}}"
+              ],
+              "path": [
+                "admin",
+                "providers"
+              ]
+            },
+            "description": "Static provider configuration only — no credentials, no health status (that is the separate endpoint below). Confirms the API key resolved from the environment at boot never reaches this response.",
+            "auth": {
+              "type": "noauth"
+            }
           }
         },
         {
@@ -975,13 +1621,28 @@
           ],
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "{{admin_cookie}}",
+                "type": "text"
+              }
+            ],
             "url": {
               "raw": "{{admin_url}}/admin/providers/health",
-              "host": ["{{admin_url}}"],
-              "path": ["admin", "providers", "health"]
+              "host": [
+                "{{admin_url}}"
+              ],
+              "path": [
+                "admin",
+                "providers",
+                "health"
+              ]
             },
-            "description": "Phase 5's live health picture: per provider status, error rate, p99, last check, and the retained transition history. This is the setup check for the Phase 6 fallback folder — run it after stopping Ollama to confirm the gateway has actually noticed before asserting on fallback ordering. Statuses are echoed to the Postman console."
+            "description": "Phase 5's live health picture: per provider status, error rate, p99, last check, and the retained transition history. This is the setup check for the Phase 6 fallback folder — run it after stopping Ollama to confirm the gateway has actually noticed before asserting on fallback ordering. Statuses are echoed to the Postman console.",
+            "auth": {
+              "type": "noauth"
+            }
           }
         },
         {
@@ -1003,9 +1664,32 @@
           ],
           "request": {
             "method": "POST",
-            "header": [],
-            "url": { "raw": "{{admin_url}}/admin/reload", "host": ["{{admin_url}}"], "path": ["admin", "reload"] },
-            "description": "Re-reads configs/providers.yaml from disk, validates it fully, and only then atomically swaps it in — a valid reload here is what picks up any hand edits made to that file since boot. Teams are not part of a reload: they live in Postgres, so a reload does not undo a PATCH from the folder above (the restore request at the end of that folder does). The rejected-reload path (a bad YAML file must leave the gateway running on its old config) is intentionally not exercised here — it would mean this collection corrupting your local configs/providers.yaml mid-run. That path is covered by cmd/gateway's own `go test -race ./cmd/gateway/...` (TestReloadRejectedLeavesStoreOnOldConfig), which is safe to run because it never touches the real config files."
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "{{admin_cookie}}",
+                "type": "text"
+              },
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{admin_csrf}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{admin_url}}/admin/reload",
+              "host": [
+                "{{admin_url}}"
+              ],
+              "path": [
+                "admin",
+                "reload"
+              ]
+            },
+            "description": "Re-reads configs/providers.yaml from disk, validates it fully, and only then atomically swaps it in — a valid reload here is what picks up any hand edits made to that file since boot. Teams are not part of a reload: they live in Postgres, so a reload does not undo a PATCH from the folder above (the restore request at the end of that folder does). The rejected-reload path (a bad YAML file must leave the gateway running on its old config) is intentionally not exercised here — it would mean this collection corrupting your local configs/providers.yaml mid-run. That path is covered by cmd/gateway's own `go test -race ./cmd/gateway/...` (TestReloadRejectedLeavesStoreOnOldConfig), which is safe to run because it never touches the real config files.",
+            "auth": {
+              "type": "noauth"
+            }
           }
         }
       ]
@@ -1035,16 +1719,31 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"model\": \"{{groq_model}}\",\n  \"messages\": [ { \"role\": \"user\", \"content\": \"Say hi in three words.\" } ],\n  \"max_tokens\": 32\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{base_url}}/v1/chat/completions",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "chat", "completions"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
             },
             "description": "The happy path, run with everything healthy. X-Switchyard-Fallback is explicitly \"false\" rather than omitted — a caller scripting against it should never have to read an absent header as a negative. Note the served model can differ from the requested one even here if the provider reports a dated model ID (e.g. ...-0125); that is not a fallback, which is why the boolean exists separately from comparing the two strings."
           }
@@ -1071,16 +1770,31 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"model\": \"{{ollama_model}}\",\n  \"messages\": [ { \"role\": \"user\", \"content\": \"Say hi in three words.\" } ],\n  \"max_tokens\": 32\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{base_url}}/v1/chat/completions",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "chat", "completions"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
             },
             "description": "Needs SETUP A (Ollama stopped). The requested model's provider is gone, so the chain walks the rest of the `fast` tier and something else answers. Check the gateway log for the `falling back to next candidate` line — it names from/to, the attempts spent, the reason kind, and Step 6.4's estimated_cost_delta_micros."
           }
@@ -1117,19 +1831,40 @@
           "request": {
             "auth": {
               "type": "bearer",
-              "bearer": [{ "key": "token", "value": "{{globex_key}}", "type": "string" }]
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{globex_key}}",
+                  "type": "string"
+                }
+              ]
             },
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"model\": \"{{ollama_model}}\",\n  \"messages\": [ { \"role\": \"user\", \"content\": \"Say hi in three words.\" } ],\n  \"max_tokens\": 32\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{base_url}}/v1/chat/completions",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "chat", "completions"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
             },
             "description": "Needs SETUP A + SETUP B, and authenticates as globex (whose configs/teams.yaml entry allows groq and ollama, never gemini). Both providers globex may use are broken; gemini is healthy and would have answered. It gets an error instead, and the breakdown proves gemini was never in the chain at all. Run the request below as acme against the identical gateway state to see gemini serve it — same failure, different team, different answer. That contrast is the whole compliance point."
           }
@@ -1151,16 +1886,31 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"model\": \"{{ollama_model}}\",\n  \"messages\": [ { \"role\": \"user\", \"content\": \"Say hi in three words.\" } ],\n  \"max_tokens\": 32\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{base_url}}/v1/chat/completions",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "chat", "completions"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
             },
             "description": "Needs SETUP A + SETUP B, authenticated as acme. Identical request and identical gateway state as the globex one above — the only difference is the team's allowed_providers, and that alone decides whether this is a 200 or a 503."
           }
@@ -1183,16 +1933,31 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"model\": \"{{groq_model}}\",\n  \"messages\": [ { \"role\": \"user\", \"content\": \"hi\" } ],\n  \"max_tokens\": 99999999\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{base_url}}/v1/chat/completions",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "chat", "completions"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
             },
             "description": "A max_tokens far beyond the model's ceiling is a request the provider will never accept. It is classified invalid_request, which is neither retryable nor fallback-eligible, so the caller gets the 4xx immediately instead of the same answer three providers and several round trips later. Confirm in the log that exactly one attempt was made and no `falling back` line was emitted.\n\nCaveat: some providers clamp an oversized max_tokens instead of rejecting it. If this returns 200, that provider clamped — check the log for a single attempt rather than treating it as a gateway bug."
           }
@@ -1215,13 +1980,28 @@
           ],
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "{{admin_cookie}}",
+                "type": "text"
+              }
+            ],
             "url": {
               "raw": "{{admin_url}}/admin/teams/{{team_id}}",
-              "host": ["{{admin_url}}"],
-              "path": ["admin", "teams", "{{team_id}}"]
+              "host": [
+                "{{admin_url}}"
+              ],
+              "path": [
+                "admin",
+                "teams",
+                "{{team_id}}"
+              ]
             },
-            "description": "Step 6.4's billing check, run right after \"Fast Tier Fallback\". The requested model was Ollama's (free, $0.00 in configs/providers.yaml) and a paid provider actually served it — so a nonzero spend here proves the request was billed at the *served* model's price, not the requested one's. For a clean reading, POST /admin/teams/{{team_id}}/reset-budget first, then run the fallback request, then this."
+            "description": "Step 6.4's billing check, run right after \"Fast Tier Fallback\". The requested model was Ollama's (free, $0.00 in configs/providers.yaml) and a paid provider actually served it — so a nonzero spend here proves the request was billed at the *served* model's price, not the requested one's. For a clean reading, POST /admin/teams/{{team_id}}/reset-budget first, then run the fallback request, then this.",
+            "auth": {
+              "type": "noauth"
+            }
           }
         }
       ]
@@ -1248,9 +2028,27 @@
           ],
           "request": {
             "method": "GET",
-            "header": [],
-            "url": { "raw": "{{admin_url}}/admin/chaos", "host": ["{{admin_url}}"], "path": ["admin", "chaos"] },
-            "description": "THE GUARD. Run this once against a gateway started normally (`go run ./cmd/gateway`, no SWITCHYARD_ENV, no SWITCHYARD_CHAOS_ENABLED) — then restart with the SETUP env above for every other request in this folder.\n\n404 rather than 403 is deliberate: a 403 would confirm the endpoint exists and is merely refusing, which tells anyone probing a production gateway that the capability is there and worth attacking. A 404 is the same answer a build that never had chaos compiled in would give.\n\nAlso worth trying once: start with SWITCHYARD_CHAOS_ENABLED=true but WITHOUT SWITCHYARD_ENV=dev. Still 404, and the startup log carries `chaos harness was requested but refused: not a dev environment`. Both conditions are required, and neither is sufficient alone."
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "{{admin_cookie}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{admin_url}}/admin/chaos",
+              "host": [
+                "{{admin_url}}"
+              ],
+              "path": [
+                "admin",
+                "chaos"
+              ]
+            },
+            "description": "THE GUARD. Run this once against a gateway started normally (`go run ./cmd/gateway`, no SWITCHYARD_ENV, no SWITCHYARD_CHAOS_ENABLED) — then restart with the SETUP env above for every other request in this folder.\n\n404 rather than 403 is deliberate: a 403 would confirm the endpoint exists and is merely refusing, which tells anyone probing a production gateway that the capability is there and worth attacking. A 404 is the same answer a build that never had chaos compiled in would give.\n\nAlso worth trying once: start with SWITCHYARD_CHAOS_ENABLED=true but WITHOUT SWITCHYARD_ENV=dev. Still 404, and the startup log carries `chaos harness was requested but refused: not a dev environment`. Both conditions are required, and neither is sufficient alone.",
+            "auth": {
+              "type": "noauth"
+            }
           }
         },
         {
@@ -1271,9 +2069,27 @@
           ],
           "request": {
             "method": "GET",
-            "header": [],
-            "url": { "raw": "{{admin_url}}/admin/chaos", "host": ["{{admin_url}}"], "path": ["admin", "chaos"] },
-            "description": "Confirms the SETUP env actually took. If this 404s, the gateway is not running with both SWITCHYARD_ENV=dev and SWITCHYARD_CHAOS_ENABLED=true — check the startup log for the `chaos harness is ENABLED` warning line."
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "{{admin_cookie}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{admin_url}}/admin/chaos",
+              "host": [
+                "{{admin_url}}"
+              ],
+              "path": [
+                "admin",
+                "chaos"
+              ]
+            },
+            "description": "Confirms the SETUP env actually took. If this 404s, the gateway is not running with both SWITCHYARD_ENV=dev and SWITCHYARD_CHAOS_ENABLED=true — check the startup log for the `chaos harness is ENABLED` warning line.",
+            "auth": {
+              "type": "noauth"
+            }
           }
         },
         {
@@ -1293,14 +2109,45 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Cookie",
+                "value": "{{admin_cookie}}",
+                "type": "text"
+              },
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{admin_csrf}}",
+                "type": "text"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"rules\": [ { \"mode\": \"error\" } ]\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
-            "url": { "raw": "{{admin_url}}/admin/chaos", "host": ["{{admin_url}}"], "path": ["admin", "chaos"] },
-            "description": "A rule naming neither a provider nor a model would break every call the gateway makes. Even in dev that should not be reachable by fat-fingering one field, so it is rejected at validation."
+            "url": {
+              "raw": "{{admin_url}}/admin/chaos",
+              "host": [
+                "{{admin_url}}"
+              ],
+              "path": [
+                "admin",
+                "chaos"
+              ]
+            },
+            "description": "A rule naming neither a provider nor a model would break every call the gateway makes. Even in dev that should not be reachable by fat-fingering one field, so it is rejected at validation.",
+            "auth": {
+              "type": "noauth"
+            }
           }
         },
         {
@@ -1321,14 +2168,45 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Cookie",
+                "value": "{{admin_cookie}}",
+                "type": "text"
+              },
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{admin_csrf}}",
+                "type": "text"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"rules\": [ { \"provider\": \"groq\", \"mode\": \"explode\" } ]\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
-            "url": { "raw": "{{admin_url}}/admin/chaos", "host": ["{{admin_url}}"], "path": ["admin", "chaos"] },
-            "description": "The four valid modes are error, latency, rate_limit and drop. Rules are validated in full before any of them is stored, so a bad rule at the end of a list cannot leave half a rule set applied."
+            "url": {
+              "raw": "{{admin_url}}/admin/chaos",
+              "host": [
+                "{{admin_url}}"
+              ],
+              "path": [
+                "admin",
+                "chaos"
+              ]
+            },
+            "description": "The four valid modes are error, latency, rate_limit and drop. Rules are validated in full before any of them is stored, so a bad rule at the end of a list cannot leave half a rule set applied.",
+            "auth": {
+              "type": "noauth"
+            }
           }
         },
         {
@@ -1353,14 +2231,45 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Cookie",
+                "value": "{{admin_cookie}}",
+                "type": "text"
+              },
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{admin_csrf}}",
+                "type": "text"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"rules\": [\n    { \"provider\": \"groq\", \"model\": \"{{groq_model}}\", \"mode\": \"error\" }\n  ]\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
-            "url": { "raw": "{{admin_url}}/admin/chaos", "host": ["{{admin_url}}"], "path": ["admin", "chaos"] },
-            "description": "Targets ONE model on ONE provider, which is what makes request 8 (the sibling-model check) meaningful. Groq keeps serving its 120b model normally; only the fast model breaks.\n\nThe forged failure is a retryable KindServerError, so it exercises retry, then fallback, then the breaker — a non-retryable fault would exercise the give-up path and leave all three untested."
+            "url": {
+              "raw": "{{admin_url}}/admin/chaos",
+              "host": [
+                "{{admin_url}}"
+              ],
+              "path": [
+                "admin",
+                "chaos"
+              ]
+            },
+            "description": "Targets ONE model on ONE provider, which is what makes request 8 (the sibling-model check) meaningful. Groq keeps serving its 120b model normally; only the fast model breaks.\n\nThe forged failure is a retryable KindServerError, so it exercises retry, then fallback, then the breaker — a non-retryable fault would exercise the give-up path and leave all three untested.",
+            "auth": {
+              "type": "noauth"
+            }
           }
         },
         {
@@ -1383,16 +2292,31 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"model\": \"{{groq_model}}\",\n  \"messages\": [ { \"role\": \"user\", \"content\": \"Say hi in three words.\" } ],\n  \"max_tokens\": 32\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{base_url}}/v1/chat/completions",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "chat", "completions"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
             },
             "description": "PRESS SEND THREE TIMES (matching SWITCHYARD_BREAKER_FAILURE_THRESHOLD=3 from the SETUP).\n\nEach send is exactly one failure against the groq+fast-model breaker — not one per retry. The breaker hears one verdict per candidate per request, because otherwise a single client request could contribute a whole threshold's worth of failures on its own.\n\nEvery send returns 200. That is the headline result of Phase 6 + 7 together: the primary is broken, the caller is unaffected. Watch the gateway log for the `falling back to next candidate` line on each send, and for `circuit breaker transition ... to=open reason=failure_threshold_exceeded` on the third — that log line is the \"opens at the configured threshold, not before\" checklist item.\n\nOn the 4th and later sends the log shows `skipping candidate on open circuit breaker` instead of a retry-then-fallback sequence: no provider call is made at all."
           }
@@ -1425,13 +2349,28 @@
           ],
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "{{admin_cookie}}",
+                "type": "text"
+              }
+            ],
             "url": {
               "raw": "{{admin_url}}/admin/providers/health",
-              "host": ["{{admin_url}}"],
-              "path": ["admin", "providers", "health"]
+              "host": [
+                "{{admin_url}}"
+              ],
+              "path": [
+                "admin",
+                "providers",
+                "health"
+              ]
             },
-            "description": "Step 7.4's health integration: the gateway is already refusing groq traffic, so reporting it healthy would contradict its own behaviour.\n\nTIMING: health status is recomputed on the active checker's tick (default every 30s), NOT on the request path — that is what keeps Phase 5 inside the 10ms overhead budget. So there is up to a 30-second lag between the breaker opening and this endpoint saying so. If the test fails, wait and resend.\n\nDegraded and never down is deliberate: escalating to down would drag /readyz through AllDown() on what may be a perfectly healthy fleet."
+            "description": "Step 7.4's health integration: the gateway is already refusing groq traffic, so reporting it healthy would contradict its own behaviour.\n\nTIMING: health status is recomputed on the active checker's tick (default every 30s), NOT on the request path — that is what keeps Phase 5 inside the 10ms overhead budget. So there is up to a 30-second lag between the breaker opening and this endpoint saying so. If the test fails, wait and resend.\n\nDegraded and never down is deliberate: escalating to down would drag /readyz through AllDown() on what may be a perfectly healthy fleet.",
+            "auth": {
+              "type": "noauth"
+            }
           }
         },
         {
@@ -1457,16 +2396,31 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"model\": \"{{groq_frontier_model}}\",\n  \"messages\": [ { \"role\": \"user\", \"content\": \"Say hi in three words.\" } ],\n  \"max_tokens\": 32\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{base_url}}/v1/chat/completions",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "chat", "completions"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
             },
             "description": "Step 7.4's granularity rule: the breaker is keyed on provider+model, so groq's 120b is untouched by the 20b breaker being open. Same provider instance, same API key, same base URL — only the model differs.\n\nRUN THIS WITHIN ~30 SECONDS OF REQUEST 6 for the strict version. Here is the subtlety worth understanding: the *breaker* is per provider+model, but *health status* is per provider — so once the health checker notices the open breaker and marks groq degraded, groq's other models sink below healthy providers in chain ordering and gemini may serve this instead. That is correct behaviour (degraded sinks, it does not skip), but it stops being evidence of per-model isolation.\n\nThe unambiguous proof of isolation is TestBreakerIsPerProviderAndModelEndToEnd in internal/proxy, which uses one mock serving both models so anything keyed by provider alone would skip them together."
           }
@@ -1492,14 +2446,45 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Cookie",
+                "value": "{{admin_cookie}}",
+                "type": "text"
+              },
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{admin_csrf}}",
+                "type": "text"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"rules\": [\n    { \"provider\": \"groq\", \"model\": \"{{groq_model}}\", \"mode\": \"latency\", \"latency_ms\": 8000 }\n  ]\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
-            "url": { "raw": "{{admin_url}}/admin/chaos", "host": ["{{admin_url}}"], "path": ["admin", "chaos"] },
-            "description": "Sets up the next request. POST replaces the whole rule set rather than appending, so a demo script can put the gateway in a known state with one call instead of clearing first and hoping nothing was left behind.\n\nLatency mode delays the call and then lets it proceed — it does not fail it. Groq would now take 8 seconds to answer this model *if it were called at all*. Request 10 proves it is not."
+            "url": {
+              "raw": "{{admin_url}}/admin/chaos",
+              "host": [
+                "{{admin_url}}"
+              ],
+              "path": [
+                "admin",
+                "chaos"
+              ]
+            },
+            "description": "Sets up the next request. POST replaces the whole rule set rather than appending, so a demo script can put the gateway in a known state with one call instead of clearing first and hoping nothing was left behind.\n\nLatency mode delays the call and then lets it proceed — it does not fail it. Groq would now take 8 seconds to answer this model *if it were called at all*. Request 10 proves it is not.",
+            "auth": {
+              "type": "noauth"
+            }
           }
         },
         {
@@ -1521,16 +2506,31 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"model\": \"{{groq_model}}\",\n  \"messages\": [ { \"role\": \"user\", \"content\": \"Say hi in three words.\" } ],\n  \"max_tokens\": 32\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{base_url}}/v1/chat/completions",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "chat", "completions"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
             },
             "description": "THE POINT OF THE WHOLE PHASE, as a number you can read off the response.\n\nAn 8-second fault is armed on the primary. If the breaker were closed, this request would wait out that 8 seconds (times the retry count) before falling back. Because the breaker is open, the candidate is skipped before the budget check, before resolution, and before any provider call — so the request costs a cached state read instead.\n\nThat is the difference between a breaker and plain fallback: fallback alone still pays the full timeout on every request to a dead provider. Run this before request 12 (the reset) — afterwards the breaker is closed and this request really will take 8+ seconds, which is itself a useful contrast worth trying once."
           }
@@ -1552,9 +2552,32 @@
           ],
           "request": {
             "method": "DELETE",
-            "header": [],
-            "url": { "raw": "{{admin_url}}/admin/chaos", "host": ["{{admin_url}}"], "path": ["admin", "chaos"] },
-            "description": "Back to normal behaviour. The breaker is still open at this point — clearing the fault does not close the circuit, which is exactly why the manual reset below exists."
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "{{admin_cookie}}",
+                "type": "text"
+              },
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{admin_csrf}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{admin_url}}/admin/chaos",
+              "host": [
+                "{{admin_url}}"
+              ],
+              "path": [
+                "admin",
+                "chaos"
+              ]
+            },
+            "description": "Back to normal behaviour. The breaker is still open at this point — clearing the fault does not close the circuit, which is exactly why the manual reset below exists.",
+            "auth": {
+              "type": "noauth"
+            }
           }
         },
         {
@@ -1576,13 +2599,35 @@
           ],
           "request": {
             "method": "POST",
-            "header": [],
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "{{admin_cookie}}",
+                "type": "text"
+              },
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{admin_csrf}}",
+                "type": "text"
+              }
+            ],
             "url": {
               "raw": "{{admin_url}}/admin/providers/groq/breaker/reset",
-              "host": ["{{admin_url}}"],
-              "path": ["admin", "providers", "groq", "breaker", "reset"]
+              "host": [
+                "{{admin_url}}"
+              ],
+              "path": [
+                "admin",
+                "providers",
+                "groq",
+                "breaker",
+                "reset"
+              ]
             },
-            "description": "Step 7.4's manual intervention: an operator who already knows a provider is healthy should not have to wait out a cooldown to prove it. Closes every breaker belonging to this provider and clears the shared Redis episode with it.\n\nbreakers_reset is the count actually touched, which is what distinguishes a provider name that matched nothing from one whose breakers were all already closed. Expect 1 or 2 here depending on whether request 8 caused groq's 120b breaker to be created.\n\nIf the shared Redis state cannot be cleared this returns 502 rather than 200 — the local breakers were still reset, but the rest of the fleet may be holding the old episode, and that is worth telling the operator rather than reporting a clean success."
+            "description": "Step 7.4's manual intervention: an operator who already knows a provider is healthy should not have to wait out a cooldown to prove it. Closes every breaker belonging to this provider and clears the shared Redis episode with it.\n\nbreakers_reset is the count actually touched, which is what distinguishes a provider name that matched nothing from one whose breakers were all already closed. Expect 1 or 2 here depending on whether request 8 caused groq's 120b breaker to be created.\n\nIf the shared Redis state cannot be cleared this returns 502 rather than 200 — the local breakers were still reset, but the rest of the fleet may be holding the old episode, and that is worth telling the operator rather than reporting a clean success.",
+            "auth": {
+              "type": "noauth"
+            }
           }
         },
         {
@@ -1604,16 +2649,31 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
               "raw": "{\n  \"model\": \"{{groq_model}}\",\n  \"messages\": [ { \"role\": \"user\", \"content\": \"Say hi in three words.\" } ],\n  \"max_tokens\": 32\n}",
-              "options": { "raw": { "language": "json" } }
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
             },
             "url": {
               "raw": "{{base_url}}/v1/chat/completions",
-              "host": ["{{base_url}}"],
-              "path": ["v1", "chat", "completions"]
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
             },
             "description": "The gateway is serving normally again with no chaos and no open breaker.\n\nDo not assert on the provider here. Groq's *health status* is still degraded from the error rate the chaos run left in the passive window (last 100 requests or last 60s, whichever is shorter), so groq sinks below healthy gemini in chain ordering and gemini may well serve this. That is correct — degraded sinks, it does not skip — and it clears itself within about a minute.\n\nThe direct evidence that the reset worked is request 12's own breakers_reset count, plus GET /admin/providers/health returning groq to healthy once the window ages out."
           }
@@ -1635,13 +2695,35 @@
           ],
           "request": {
             "method": "POST",
-            "header": [],
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "{{admin_cookie}}",
+                "type": "text"
+              },
+              {
+                "key": "X-CSRF-Token",
+                "value": "{{admin_csrf}}",
+                "type": "text"
+              }
+            ],
             "url": {
               "raw": "{{admin_url}}/admin/providers/grok/breaker/reset",
-              "host": ["{{admin_url}}"],
-              "path": ["admin", "providers", "grok", "breaker", "reset"]
+              "host": [
+                "{{admin_url}}"
+              ],
+              "path": [
+                "admin",
+                "providers",
+                "grok",
+                "breaker",
+                "reset"
+              ]
             },
-            "description": "\"grok\" instead of \"groq\". The name is validated against the configured provider list so a typo at incident time reads as an error rather than a silent no-op success."
+            "description": "\"grok\" instead of \"groq\". The name is validated against the configured provider list so a typo at incident time reads as an error rather than a silent no-op success.",
+            "auth": {
+              "type": "noauth"
+            }
           }
         },
         {
@@ -1660,13 +2742,28 @@
           ],
           "request": {
             "method": "GET",
-            "header": [],
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "{{admin_cookie}}",
+                "type": "text"
+              }
+            ],
             "url": {
               "raw": "{{admin_url}}/admin/providers/health",
-              "host": ["{{admin_url}}"],
-              "path": ["admin", "providers", "health"]
+              "host": [
+                "{{admin_url}}"
+              ],
+              "path": [
+                "admin",
+                "providers",
+                "health"
+              ]
             },
-            "description": "Mounting POST /admin/providers/{name}/breaker/reset puts a wildcard under /admin/providers, so the one routing hazard is \"health\" being read as a provider name. This confirms the literal route still wins."
+            "description": "Mounting POST /admin/providers/{name}/breaker/reset puts a wildcard under /admin/providers, so the one routing hazard is \"health\" being read as a provider name. This confirms the literal route still wins.",
+            "auth": {
+              "type": "noauth"
+            }
           }
         }
       ]
@@ -1679,13 +2776,27 @@
           "event": [
             {
               "listen": "test",
-              "script": { "type": "text/javascript", "exec": ["pm.test(\"status is 404\", () => pm.response.to.have.status(404));"] }
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 404\", () => pm.response.to.have.status(404));"
+                ]
+              }
             }
           ],
           "request": {
             "method": "GET",
             "header": [],
-            "url": { "raw": "{{base_url}}/v1/nope", "host": ["{{base_url}}"], "path": ["v1", "nope"] }
+            "url": {
+              "raw": "{{base_url}}/v1/nope",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "nope"
+              ]
+            }
           }
         },
         {
@@ -1693,13 +2804,28 @@
           "event": [
             {
               "listen": "test",
-              "script": { "type": "text/javascript", "exec": ["pm.test(\"status is 405\", () => pm.response.to.have.status(405));"] }
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 405\", () => pm.response.to.have.status(405));"
+                ]
+              }
             }
           ],
           "request": {
             "method": "GET",
             "header": [],
-            "url": { "raw": "{{base_url}}/v1/chat/completions", "host": ["{{base_url}}"], "path": ["v1", "chat", "completions"] }
+            "url": {
+              "raw": "{{base_url}}/v1/chat/completions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            }
           }
         }
       ]

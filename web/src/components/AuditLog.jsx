@@ -31,7 +31,7 @@ function fmt(v) {
   return String(v)
 }
 
-export default function AuditLog({ getKey }) {
+export default function AuditLog() {
   const [cursors, setCursors] = useState([''])
   const cursor = cursors[cursors.length - 1]
   const [nonce, setNonce] = useState(0)
@@ -39,14 +39,14 @@ export default function AuditLog({ getKey }) {
 
   useEffect(() => {
     const ac = new AbortController()
-    fetchAudit(getKey(), { cursor, signal: ac.signal })
+    fetchAudit({ cursor, signal: ac.signal })
       .then((data) => setState({ loading: false, error: null, data }))
       .catch((err) => {
         if (err.name === 'AbortError') return
         setState({ loading: false, error: err, data: null })
       })
     return () => ac.abort()
-  }, [getKey, cursor, nonce])
+  }, [cursor, nonce])
 
   const rows = state.data?.entries ?? []
   const hasNext = Boolean(state.data?.next_cursor)

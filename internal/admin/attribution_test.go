@@ -27,7 +27,7 @@ func TestAttributionReportsFallbackDelta(t *testing.T) {
 	}
 	srv := newRequestLogServer(t, reader)
 
-	resp := getWithKey(t, srv, "/admin/attribution?range=7d", "acme-key")
+	resp := get(t, srv, "/admin/attribution?range=7d")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -45,27 +45,28 @@ func TestAttributionReportsFallbackDelta(t *testing.T) {
 }
 
 func TestAttributionScopingAndParams(t *testing.T) {
-	t.Run("non-admin is scoped to its own team", func(t *testing.T) {
+	t.Run("a superadmin spans every team", func(t *testing.T) {
 		reader := &fakeRequestLogReader{}
 		srv := newRequestLogServer(t, reader)
-		if resp := getWithKey(t, srv, "/admin/attribution", "globex-key"); resp.StatusCode != http.StatusOK {
+		if resp := get(t, srv, "/admin/attribution"); resp.StatusCode != http.StatusOK {
 			t.Fatalf("status = %d, want 200", resp.StatusCode)
 		}
-		if reader.gotTeamID != "globex" {
-			t.Errorf("scope = %q, want globex", reader.gotTeamID)
+		if reader.gotTeamID != "" {
+			t.Errorf("scope = %q, want empty (all teams)", reader.gotTeamID)
 		}
 	})
 
-	t.Run("non-admin naming another team is refused", func(t *testing.T) {
-		srv := newRequestLogServer(t, &fakeRequestLogReader{})
-		if resp := getWithKey(t, srv, "/admin/attribution?team=acme", "globex-key"); resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400", resp.StatusCode)
+	t.Run("anyone else is refused until org scoping ships", func(t *testing.T) {
+		reader := &fakeRequestLogReader{}
+		srv := newRequestLogServerAs(t, reader, testAuth(false))
+		if resp := get(t, srv, "/admin/attribution?team=acme"); resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403", resp.StatusCode)
 		}
 	})
 
 	t.Run("bad range is 400", func(t *testing.T) {
 		srv := newRequestLogServer(t, &fakeRequestLogReader{})
-		if resp := getWithKey(t, srv, "/admin/attribution?range=1y", "acme-key"); resp.StatusCode != http.StatusBadRequest {
+		if resp := get(t, srv, "/admin/attribution?range=1y"); resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400", resp.StatusCode)
 		}
 	})
@@ -73,7 +74,7 @@ func TestAttributionScopingAndParams(t *testing.T) {
 
 func TestAttributionDisabledWithoutRequestLog(t *testing.T) {
 	srv := newRequestLogServer(t, nil)
-	if resp := getWithKey(t, srv, "/admin/attribution", "acme-key"); resp.StatusCode != http.StatusServiceUnavailable {
+	if resp := get(t, srv, "/admin/attribution"); resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", resp.StatusCode)
 	}
 }
@@ -167,11 +168,11 @@ func attributionBody(t *testing.T, reader RequestLogReader, calc CostCalculator)
 	t.Helper()
 	srv := httptest.NewServer(NewRouter(func() bool { return true },
 		testTeamStore(t), &fakeSpendReader{}, fakeProviderLister{}, fakeHealthReader{},
-		&fakeBreakerController{}, nil, fakeReloader, reader, requestLogRegistry(t),
-		nil, nil, calc, nil, QualityFeedbackConfig{}, false, nil, nil, nil, testMetrics(t), discardLogger()))
+		&fakeBreakerController{}, nil, fakeReloader, reader,
+		nil, nil, calc, QualityFeedbackConfig{}, false, nil, nil, testAuth(true), testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)
 
-	resp := getWithKey(t, srv, "/admin/attribution?range=24h", "acme-key")
+	resp := get(t, srv, "/admin/attribution?range=24h")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", resp.StatusCode)

@@ -11,7 +11,7 @@ import ProviderHealthPanel from '../components/ProviderHealthPanel.jsx'
 import BreakerPanel from '../components/BreakerPanel.jsx'
 import LiveFeed from '../components/LiveFeed.jsx'
 import { EmptyState, ErrorState, Loading } from '../components/states.jsx'
-import { useAuth } from '../hooks/useAuth.js'
+import { useSession } from '../hooks/useSession.js'
 import { usePolling } from '../hooks/usePolling.js'
 import { useTimeRange } from '../hooks/useTimeRange.js'
 import { formatCount, formatMs, formatPercent, formatUSD } from '../utils/format.js'
@@ -36,12 +36,12 @@ function grafanaURL(range) {
 const kpi = (v, fmt) => (v == null ? null : fmt(v))
 
 export default function Overview() {
-  const { getKey, isAdmin } = useAuth()
+  const { isSuperadmin } = useSession()
   const { range } = useTimeRange()
 
-  const loadSummary = useCallback((signal) => fetchSummary(getKey(), range, signal), [getKey, range])
-  const loadHealth = useCallback((signal) => fetchProviderHealth(getKey(), signal), [getKey])
-  const loadFeed = useCallback((signal) => fetchRequests(getKey(), { limit: 25, signal }), [getKey])
+  const loadSummary = useCallback((signal) => fetchSummary(range, signal), [range])
+  const loadHealth = useCallback((signal) => fetchProviderHealth(signal), [])
+  const loadFeed = useCallback((signal) => fetchRequests({ limit: 25, signal }), [])
 
   const summary = usePolling(loadSummary, { interval: 5000 })
   const health = usePolling(loadHealth, { interval: 5000 })
@@ -169,7 +169,7 @@ export default function Overview() {
             <ErrorState message="Could not read the request log." onRetry={feed.refresh} />
           )
         ) : (
-          <LiveFeed rows={feed.data?.requests} showTeam={isAdmin} />
+          <LiveFeed rows={feed.data?.requests} showTeam={isSuperadmin} />
         )}
       </Card>
     </>

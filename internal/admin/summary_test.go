@@ -25,32 +25,36 @@ func (f *fakeSummary) Build(_ context.Context, opts summary.Options) summary.Res
 }
 
 func summaryServer(t *testing.T, svc SummaryService, health HealthReader) *httptest.Server {
+	return summaryServerAs(t, svc, health, testAuth(true))
+}
+
+func summaryServerAs(t *testing.T, svc SummaryService, health HealthReader, auth Auth) *httptest.Server {
 	t.Helper()
 	reg := requestLogRegistry(t) // acme = admin, globex = not
 	srv := httptest.NewServer(NewRouter(func() bool { return true },
 		registryStore{reg: reg}, &fakeSpendReader{}, fakeProviderLister{}, health, &fakeBreakerController{},
-		nil, fakeReloader, nil, reg, svc, nil, nil, nil, QualityFeedbackConfig{}, false, nil, nil, nil, testMetrics(t), discardLogger()))
+		nil, fakeReloader, nil, svc, nil, nil, QualityFeedbackConfig{}, false, nil, nil, auth, testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)
 	return srv
 }
 
 func TestSummaryScoping(t *testing.T) {
 	cases := map[string]struct {
-		key      string
-		query    string
-		wantTeam string
-		wantCode int
+		superadmin bool
+		query      string
+		wantTeam   string
+		wantCode   int
 	}{
-		"non-admin is pinned to its own team": {"globex-key", "", "globex", 200},
-		"non-admin cannot name another team":  {"globex-key", "?team=acme", "", 400},
-		"admin defaults to all teams":         {"acme-key", "", "", 200},
-		"admin may filter to one team":        {"acme-key", "?team=globex", "globex", 200},
+		"superadmin defaults to all teams": {true, "", "", 200},
+		"superadmin may filter to one":     {true, "?team=globex", "globex", 200},
+		"anyone else is refused":           {false, "", "", 403},
+		"anyone else naming a team too":    {false, "?team=acme", "", 403},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			f := &fakeSummary{}
-			srv := summaryServer(t, f, fakeHealthReader{})
-			resp := getWithKey(t, srv, "/admin/summary"+tc.query, tc.key)
+			srv := summaryServerAs(t, f, fakeHealthReader{}, testAuth(tc.superadmin))
+			resp := get(t, srv, "/admin/summary"+tc.query)
 			if resp.StatusCode != tc.wantCode {
 				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.wantCode)
 			}
@@ -65,20 +69,20 @@ func TestSummaryRangeValidation(t *testing.T) {
 	f := &fakeSummary{}
 	srv := summaryServer(t, f, fakeHealthReader{})
 
-	if got := getWithKey(t, srv, "/admin/summary", "acme-key"); got.StatusCode != 200 || f.got.Range != "24h" {
+	if got := get(t, srv, "/admin/summary"); got.StatusCode != 200 || f.got.Range != "24h" {
 		t.Errorf("default: status=%d range=%q, want 200/24h", got.StatusCode, f.got.Range)
 	}
-	if got := getWithKey(t, srv, "/admin/summary?range=1h", "acme-key"); got.StatusCode != 200 || f.got.Range != "1h" {
+	if got := get(t, srv, "/admin/summary?range=1h"); got.StatusCode != 200 || f.got.Range != "1h" {
 		t.Errorf("explicit: status=%d range=%q, want 200/1h", got.StatusCode, f.got.Range)
 	}
-	if got := getWithKey(t, srv, "/admin/summary?range=90m", "acme-key"); got.StatusCode != http.StatusBadRequest {
+	if got := get(t, srv, "/admin/summary?range=90m"); got.StatusCode != http.StatusBadRequest {
 		t.Errorf("bad range: status = %d, want 400", got.StatusCode)
 	}
 }
 
 func TestSummaryDisabledWhenNil(t *testing.T) {
 	srv := summaryServer(t, nil, fakeHealthReader{})
-	if got := getWithKey(t, srv, "/admin/summary", "acme-key").StatusCode; got != http.StatusServiceUnavailable {
+	if got := get(t, srv, "/admin/summary").StatusCode; got != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want 503", got)
 	}
 }
@@ -90,7 +94,7 @@ func TestSummaryMergesProviderHealthAndCachePlaceholder(t *testing.T) {
 	}}
 	srv := summaryServer(t, f, health)
 
-	resp := getWithKey(t, srv, "/admin/summary", "acme-key")
+	resp := get(t, srv, "/admin/summary")
 	var v summaryView
 	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
 		t.Fatalf("decode: %v", err)

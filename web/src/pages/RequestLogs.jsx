@@ -8,7 +8,7 @@ import { Card, StatusCode } from '../components/primitives.jsx'
 import LogFilters from '../components/LogFilters.jsx'
 import RequestDrawer from '../components/RequestDrawer.jsx'
 import { EmptyState, ErrorState, Loading } from '../components/states.jsx'
-import { useAuth } from '../hooks/useAuth.js'
+import { useSession } from '../hooks/useSession.js'
 import { formatCostShort, formatDateTime, formatMs, middleTruncate } from '../utils/format.js'
 import './RequestLogs.css'
 
@@ -30,18 +30,18 @@ function ModelCell({ requested, served }) {
 }
 
 export default function RequestLogs() {
-  const { getKey, isAdmin } = useAuth()
+  const { isSuperadmin } = useSession()
   const [searchParams, setSearchParams] = useSearchParams()
 
   const filters = useMemo(() => {
     const f = {}
     for (const k of NARROWING) {
-      if (k === 'team' && !isAdmin) continue // a non-admin cannot filter by team
+      if (k === 'team' && !isSuperadmin) continue // a non-admin cannot filter by team
       const v = searchParams.get(k)
       if (v) f[k] = v
     }
     return f
-  }, [searchParams, isAdmin])
+  }, [searchParams, isSuperadmin])
   const range = searchParams.get('range') || '24h'
 
   // One cursor per page visited; '' is the first page. Keyset pagination, never
@@ -58,14 +58,14 @@ export default function RequestLogs() {
     // `since` is a pinned lower bound derived from the range; computed here in
     // the effect because Date.now() is impure and must not run during render.
     const since = new Date(Date.now() - (RANGE_MS[range] ?? RANGE_MS['24h'])).toISOString()
-    fetchRequests(getKey(), { cursor, filters: { since, ...filters }, signal: ac.signal })
+    fetchRequests({ cursor, filters: { since, ...filters }, signal: ac.signal })
       .then((data) => setState({ loading: false, error: null, data }))
       .catch((err) => {
         if (err.name === 'AbortError') return
         setState({ loading: false, error: err, data: null })
       })
     return () => ac.abort()
-  }, [getKey, cursor, nonce, filters, range])
+  }, [cursor, nonce, filters, range])
 
   const rows = state.data?.requests ?? []
   const hasNext = Boolean(state.data?.next_cursor)
@@ -128,7 +128,7 @@ export default function RequestLogs() {
               <tr>
                 <th>Time</th>
                 <th>Request</th>
-                {isAdmin && <th>Team</th>}
+                {isSuperadmin && <th>Team</th>}
                 <th>Provider</th>
                 <th>Model</th>
                 <th>Routing</th>
@@ -156,7 +156,7 @@ export default function RequestLogs() {
                 >
                   <td className="num">{formatDateTime(r.timestamp)}</td>
                   <td className="num" title={r.id}>{middleTruncate(r.id)}</td>
-                  {isAdmin && <td>{r.team_id}</td>}
+                  {isSuperadmin && <td>{r.team_id}</td>}
                   <td>{r.provider || '—'}</td>
                   <td><ModelCell requested={r.requested_model} served={r.served_model} /></td>
                   <td>
@@ -214,8 +214,7 @@ export default function RequestLogs() {
       <h1 className="page-title">Request logs</h1>
       <Card>
         <LogFilters
-          getKey={getKey}
-          isAdmin={isAdmin}
+          isAdmin={isSuperadmin}
           filters={filters}
           range={range}
           set={set}

@@ -306,3 +306,38 @@ func TestRecorderRecordsStatusAndBytes(t *testing.T) {
 		}
 	})
 }
+
+// End to end on the public port: a session cookie buys nothing, and the same
+// request with a team key succeeds.
+func TestGatewayPortRequiresATeamKeyNotASession(t *testing.T) {
+	srv := httptest.NewServer(NewRouter(stubResolver{}, stubAuthenticator{}, stubRateLimiter{},
+		stubBudgetTracker{}, stubCostCalculator{}, stubHealthRecorder{}, nil, nil, nil,
+		noRetryConfig(t), nil, nil, discardLogger(), func() bool { return true }))
+	t.Cleanup(srv.Close)
+
+	body := `{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`
+
+	withCookie, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/chat/completions", strings.NewReader(body))
+	withCookie.Header.Set("Content-Type", "application/json")
+	withCookie.AddCookie(&http.Cookie{Name: "sy_session", Value: "irrelevant-here"})
+	resp, err := srv.Client().Do(withCookie)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("session cookie on :8080: status = %d, want 401", resp.StatusCode)
+	}
+
+	withKey, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/chat/completions", strings.NewReader(body))
+	withKey.Header.Set("Content-Type", "application/json")
+	withKey.Header.Set("Authorization", "Bearer sk-test")
+	resp2, err := srv.Client().Do(withKey)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode == http.StatusUnauthorized {
+		t.Fatal("a team key was rejected on the gateway port")
+	}
+}

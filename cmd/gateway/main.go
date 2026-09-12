@@ -57,8 +57,18 @@ const (
 	defaultOAuthRedirectURL = "http://localhost:9090/auth/google/callback"
 	// Where the browser lands after the callback. Same-origin paths, never
 	// taken from the request.
-	dashboardPath       = "/"
-	loginPath           = "/login"
+	//
+	// Deliberately outside /auth: the console proxies that whole prefix to this
+	// port, so a client-side route under it would be answered by the gateway
+	// with a 404 instead of by the SPA. The landing page exists so the gap while
+	// GET /auth/me resolves shows "Signing you in…" rather than a blank screen.
+	signInLandingPath = "/signing-in"
+	loginPath         = "/login"
+
+	// The access TTL is also the post-logout compromise window: a revoked
+	// session's access token stays valid until it expires.
+	defaultAccessTTL    = 15 * time.Minute
+	defaultRefreshTTL   = 720 * time.Hour
 	defaultDrainTimeout = 25 * time.Second
 
 	// Health check cadence (Phase 5). These stay process-level env vars rather
@@ -574,7 +584,7 @@ func run() error {
 	// Google; :8080 continues to authenticate team API keys and learns nothing
 	// about users. Unconfigured means the /auth routes are simply absent --
 	// the admin port is still gated by requireAdmin either way.
-	var authRouter http.Handler
+	var adminAuth admin.Auth
 	{
 		clientID := os.Getenv("GOOGLE_CLIENT_ID")
 		clientSecret := os.Getenv("GOOGLE_CLIENT_SECRET")
@@ -592,26 +602,49 @@ func run() error {
 			if !identityStore.SuperadminConfigured() {
 				log.Warn("SWITCHYARD_SUPERADMIN_EMAIL is unset: no account will be created as superadmin")
 			}
-			authRouter = identity.NewHandlers(
-				oauth.Config{ClientID: clientID, ClientSecret: clientSecret, RedirectURL: redirect},
-				identityStore,
-				[]byte(jwtSecret),
-				dashboardPath, loginPath,
-				strings.HasPrefix(redirect, "https://"),
-				log,
-			).Routes()
+			handlers := identity.NewHandlers(identity.Config{
+				OAuth:      oauth.Config{ClientID: clientID, ClientSecret: clientSecret, RedirectURL: redirect},
+				Secret:     []byte(jwtSecret),
+				SuccessURL: signInLandingPath,
+				FailureURL: loginPath,
+				Secure:     strings.HasPrefix(redirect, "https://"),
+				AccessTTL:  durationOr("SWITCHYARD_ACCESS_TOKEN_TTL", defaultAccessTTL),
+				RefreshTTL: durationOr("SWITCHYARD_REFRESH_TOKEN_TTL", defaultRefreshTTL),
+				RoutingOptions: func() []string {
+					if complexityRouter == nil {
+						return nil
+					}
+					return complexityRouter.Options()
+				},
+			}, identityStore, log)
+
+			// The one place that knows about both packages. identity verifies
+			// the cookie and hands over its claims; admin.WithCaller puts them
+			// into the context shape admin owns. Neither imports the other.
+			adminAuth = admin.Auth{
+				Router: handlers.Routes(),
+				Session: handlers.RequireSession(func(ctx context.Context, c identity.Claims) context.Context {
+					return admin.WithCaller(ctx, admin.Caller{
+						UserID:       c.UserID,
+						OrgID:        c.OrgID,
+						IsSuperadmin: c.Superadmin,
+						SessionID:    c.SessionID,
+					})
+				}),
+				CSRF: handlers.RequireCSRF,
+			}
 			log.Info("dashboard sign-in enabled", slog.String("redirect_url", redirect))
 		}
 	}
 
 	adminSrv := &http.Server{
 		Addr: envOr("SWITCHYARD_ADMIN_ADDR", defaultAdminAddr),
-		Handler: admin.NewRouter(isReady, store, budgetTracker, store, healthMonitor, breakerRegistry, chaosAdapter{chaos}, newReloader(store, providersPath), reqLogReader, store, summarySvc, cacheTuner, store, complexityRouter,
+		Handler: admin.NewRouter(isReady, store, budgetTracker, store, healthMonitor, breakerRegistry, chaosAdapter{chaos}, newReloader(store, providersPath), reqLogReader, summarySvc, cacheTuner, store,
 			admin.QualityFeedbackConfig{LowScoreThreshold: qualityCfg.Feedback.LowScoreThreshold, ExampleLimit: qualityCfg.Feedback.ExampleLimit},
 			qualityWorker != nil,
 			auditRec,
 			sysInfo,
-			authRouter,
+			adminAuth,
 			promMetrics, log,
 			proxy.Recoverer(log, promMetrics),
 			proxy.RequestID,

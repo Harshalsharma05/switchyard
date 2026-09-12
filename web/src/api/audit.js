@@ -2,10 +2,10 @@
 // newest-first. Returns { entries: [...], next_cursor? }.
 import { request } from './client.js'
 
-export function fetchAudit(key, { cursor = '', limit, signal } = {}) {
+export function fetchAudit({ cursor = '', limit, signal } = {}) {
   const q = new URLSearchParams()
   if (cursor) q.set('cursor', cursor)
   if (limit) q.set('limit', String(limit))
   const qs = q.toString()
-  return request(`/admin/audit${qs ? `?${qs}` : ''}`, { key, signal })
+  return request(`/admin/audit${qs ? `?${qs}` : ''}`, { signal })
 }

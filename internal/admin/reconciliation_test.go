@@ -10,10 +10,14 @@ import (
 
 func newReconServer(t *testing.T, spend SpendReader, reqLog RequestLogReader) *httptest.Server {
 	t.Helper()
-	reg := requestLogRegistry(t) // acme = admin, globex = not
+	return newReconServerAs(t, spend, reqLog, testAuth(true))
+}
+
+func newReconServerAs(t *testing.T, spend SpendReader, reqLog RequestLogReader, auth Auth) *httptest.Server {
+	reg := requestLogRegistry(t)
 	srv := httptest.NewServer(NewRouter(func() bool { return true },
 		registryStore{reg: reg}, spend, fakeProviderLister{}, fakeHealthReader{}, &fakeBreakerController{},
-		nil, fakeReloader, reqLog, reg, nil, nil, nil, nil, QualityFeedbackConfig{}, false, nil, nil, nil, testMetrics(t), discardLogger()))
+		nil, fakeReloader, reqLog, nil, nil, nil, QualityFeedbackConfig{}, false, nil, nil, auth, testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -101,15 +105,15 @@ func TestReconciliationDegradesOnRedisError(t *testing.T) {
 }
 
 func TestReconciliationAccessControl(t *testing.T) {
-	srv := newReconServer(t, &fakeSpendReader{}, &fakeRequestLogReader{})
-
-	t.Run("non-admin key is forbidden", func(t *testing.T) {
-		if resp := getWithKey(t, srv, "/admin/reconciliation", "globex-key"); resp.StatusCode != http.StatusForbidden {
+	t.Run("a non-superadmin session is forbidden", func(t *testing.T) {
+		srv := newReconServerAs(t, &fakeSpendReader{}, &fakeRequestLogReader{}, testAuth(false))
+		if resp := get(t, srv, "/admin/reconciliation"); resp.StatusCode != http.StatusForbidden {
 			t.Fatalf("status = %d, want 403", resp.StatusCode)
 		}
 	})
-	t.Run("no key is unauthorized", func(t *testing.T) {
-		if resp := getWithKey(t, srv, "/admin/reconciliation", ""); resp.StatusCode != http.StatusUnauthorized {
+	t.Run("no session is unauthorized", func(t *testing.T) {
+		srv := newReconServerAs(t, &fakeSpendReader{}, &fakeRequestLogReader{}, Auth{})
+		if resp := get(t, srv, "/admin/reconciliation"); resp.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("status = %d, want 401", resp.StatusCode)
 		}
 	})
@@ -117,7 +121,7 @@ func TestReconciliationAccessControl(t *testing.T) {
 
 func TestReconciliationDisabledWithoutRequestLog(t *testing.T) {
 	srv := newReconServer(t, &fakeSpendReader{}, nil)
-	if resp := getWithKey(t, srv, "/admin/reconciliation", "acme-key"); resp.StatusCode != http.StatusServiceUnavailable {
+	if resp := get(t, srv, "/admin/reconciliation"); resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", resp.StatusCode)
 	}
 }

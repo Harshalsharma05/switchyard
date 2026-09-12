@@ -64,14 +64,14 @@ type attributionView struct {
 	Routing     *routingAttrView `json:"routing"`
 }
 
-func handleAttribution(reqLog RequestLogReader, calc CostCalculator, authr KeyAuthenticator, log *slog.Logger) http.HandlerFunc {
+func handleAttribution(reqLog RequestLogReader, calc CostCalculator, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if reqLog == nil {
 			writeRequestLogDisabled(w, log)
 			return
 		}
 
-		team, ok := authenticate(w, r, authr, log)
+		scope, ok := teamScope(w, r, log)
 		if !ok {
 			return
 		}
@@ -84,15 +84,6 @@ func handleAttribution(reqLog RequestLogReader, calc CostCalculator, authr KeyAu
 		if !ok {
 			writeError(w, log, http.StatusBadRequest, "invalid_request_error",
 				"range must be one of 24h, 7d, 30d")
-			return
-		}
-
-		scope := team.ID
-		if team.IsAdmin {
-			scope = r.URL.Query().Get("team")
-		} else if want := r.URL.Query().Get("team"); want != "" && want != team.ID {
-			writeError(w, log, http.StatusBadRequest, "invalid_request_error",
-				"team "+team.ID+" may only read its own attribution")
 			return
 		}
 

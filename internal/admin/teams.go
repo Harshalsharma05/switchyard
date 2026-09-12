@@ -434,14 +434,6 @@ func revokeKey(store TeamStore, audit AuditRecorder, log *slog.Logger) http.Hand
 			return
 		}
 
-		// Revoking the key you are authenticated with locks you out of the admin
-		// API with no way back short of a restart. Refuse it.
-		if caller := adminTeam(r); caller != nil && caller.ID == id {
-			writeError(w, log, http.StatusConflict, "cannot_revoke_own_key",
-				"refusing to revoke the key this request is authenticated with; rotate it instead, or use another admin key")
-			return
-		}
-
 		if err := recordAudit(r.Context(), audit, logstore.AuditEntry{
 			ActorTeamID:  actorID(r),
 			ActorAddr:    r.RemoteAddr,
@@ -679,15 +671,6 @@ func deleteTeam(store TeamStore, audit AuditRecorder, log *slog.Logger) http.Han
 		before, err := store.Get(id)
 		if err != nil {
 			writeTeamLookupError(w, log, id, err)
-			return
-		}
-
-		// Deleting the team you are authenticated as locks you out of the admin
-		// API. Refusing it also guarantees an admin always remains: only an admin
-		// can delete a team, and never its own.
-		if caller := adminTeam(r); caller != nil && caller.ID == id {
-			writeError(w, log, http.StatusConflict, "cannot_delete_own_team",
-				"refusing to delete the team this request is authenticated as; use another admin key")
 			return
 		}
 

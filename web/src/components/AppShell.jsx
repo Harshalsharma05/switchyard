@@ -3,7 +3,7 @@
 // content. See DESIGN.md "Shell".
 import { useMemo, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
-import { useAuth } from '../hooks/useAuth.js'
+import { useSession } from '../hooks/useSession.js'
 import { RANGES, TimeRangeContext } from '../hooks/useTimeRange.js'
 import ChaosProvider from '../hooks/ChaosProvider.jsx'
 import ChaosBanner from './ChaosBanner.jsx'
@@ -30,13 +30,13 @@ const NAV = [
 // Cost each own their own range control (DESIGN.md), so neither is listed here.
 const RANGE_ROUTES = new Set(['/'])
 
-function SideRail({ isAdmin }) {
+function SideRail({ isSuperadmin }) {
   return (
     <nav className="rail" aria-label="Primary">
       {NAV.map((item, i) =>
         item.divider ? (
           <div key={`d${i}`} className="rail-divider" />
-        ) : item.admin && !isAdmin ? null : (
+        ) : item.admin && !isSuperadmin ? null : (
           <NavLink
             key={item.to}
             to={item.to}
@@ -71,13 +71,13 @@ function RangeSelector({ range, setRange }) {
   )
 }
 
-function TopBar({ team, isAdmin, onSignOut, range, setRange, showRange }) {
+function TopBar({ user, isSuperadmin, onSignOut, range, setRange, showRange }) {
   return (
     <header className="topbar">
       <span className="topbar-brand">SwitchYard</span>
       <span className="topbar-team">
-        {team?.name}
-        {isAdmin && <span className="pill pill-info">Admin</span>}
+        {user?.name || user?.email}
+        {isSuperadmin && <span className="pill pill-info">Superadmin</span>}
       </span>
       <div className="topbar-right">
         {showRange && <RangeSelector range={range} setRange={setRange} />}
@@ -91,7 +91,7 @@ function TopBar({ team, isAdmin, onSignOut, range, setRange, showRange }) {
 }
 
 export default function AppShell() {
-  const { me, isAdmin, signOut, getKey } = useAuth()
+  const { user, isSuperadmin, signOut } = useSession()
   const { pathname } = useLocation()
   const [range, setRange] = useState('24h')
   const timeRange = useMemo(() => ({ range, setRange }), [range])
@@ -108,17 +108,17 @@ export default function AppShell() {
   return (
     <TimeRangeContext.Provider value={timeRange}>
       <div className="shell">
-        <SideRail isAdmin={isAdmin} />
+        <SideRail isAdmin={isSuperadmin} />
         <div className="shell-main">
           <TopBar
-            team={me}
-            isAdmin={isAdmin}
+            user={user}
+            isSuperadmin={isSuperadmin}
             onSignOut={signOut}
             range={range}
             setRange={setRange}
             showRange={RANGE_ROUTES.has(pathname)}
           />
-          {isAdmin ? <ChaosProvider getKey={getKey}>{content}</ChaosProvider> : content}
+          {isSuperadmin ? <ChaosProvider>{content}</ChaosProvider> : content}
         </div>
       </div>
     </TimeRangeContext.Provider>

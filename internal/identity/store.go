@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -67,6 +68,9 @@ func (s *Store) FindOrCreateGoogleUser(ctx context.Context, p oauth.Profile) (Us
 	u, err := s.signInExisting(ctx, tx, p)
 	switch {
 	case err == nil:
+		if u, err = s.applyBootstrap(ctx, tx, u); err != nil {
+			return User{}, false, err
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return User{}, false, dbErr("committing sign-in", err)
 		}
@@ -87,6 +91,9 @@ func (s *Store) FindOrCreateGoogleUser(ctx context.Context, p oauth.Profile) (Us
 
 	created, err := s.create(ctx, tx, p, email)
 	if err != nil {
+		return User{}, false, err
+	}
+	if created, err = s.applyBootstrap(ctx, tx, created); err != nil {
 		return User{}, false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -158,9 +165,9 @@ func (s *Store) create(ctx context.Context, tx pgx.Tx, p oauth.Profile, email st
 	err = tx.QueryRow(ctx, `
 		INSERT INTO users (id, organization_id, email, email_verified_at, name, avatar_url,
 		                   google_sub, is_superadmin, last_login_at)
-		VALUES ($1, $2, $3, now(), $4, $5, $6, $7, now())
+		VALUES ($1, $2, $3, now(), $4, $5, $6, false, now())
 		RETURNING `+userColumns,
-		userID, orgID, email, p.Name, p.Picture, p.Sub, superadmin,
+		userID, orgID, email, p.Name, p.Picture, p.Sub,
 	).Scan(
 		&u.ID, &u.OrganizationID, &u.Email, &u.Name, &u.AvatarURL,
 		&u.GoogleSub, &u.IsSuperadmin, &u.CreatedAt, &u.LastLoginAt,
@@ -169,10 +176,15 @@ func (s *Store) create(ctx context.Context, tx pgx.Tx, p oauth.Profile, email st
 		return User{}, dbErr("creating user", err)
 	}
 
-	if _, err := tx.Exec(ctx,
-		`UPDATE organizations SET owner_user_id = $2 WHERE id = $1 AND owner_user_id IS NULL`,
-		orgID, userID); err != nil {
-		return User{}, dbErr("setting organization owner", err)
+	// Only for a user's own fresh organisation. The default organisation is
+	// claimed by applyBootstrap instead, so that adoption goes through the one
+	// audited path rather than happening silently here.
+	if !superadmin {
+		if _, err := tx.Exec(ctx,
+			`UPDATE organizations SET owner_user_id = $2 WHERE id = $1 AND owner_user_id IS NULL`,
+			orgID, userID); err != nil {
+			return User{}, dbErr("setting organization owner", err)
+		}
 	}
 
 	return u, nil
@@ -201,6 +213,99 @@ func dbErr(op string, err error) error {
 		return fmt.Errorf("%s: postgres %s", op, pgErr.Code)
 	}
 	return fmt.Errorf("%s: %w", op, err)
+}
+
+// bootstrapReason is recorded on every audit entry these two statements write,
+// so an operator reading the log sees why the change happened, not just that it
+// did.
+const bootstrapReason = "bootstrap: email matched SWITCHYARD_SUPERADMIN_EMAIL"
+
+// applyBootstrap grants superadmin to the configured bootstrap address and
+// gives the default organisation an owner.
+//
+// It runs on every sign-in, not only the first, so a mistyped environment
+// variable is fixed by correcting it and signing in again rather than by
+// hand-written SQL. Both statements are idempotent and both are audited: a user
+// gaining superadmin is the most privileged change in the system and must not
+// happen silently inside a login handler.
+//
+// It never demotes. Losing the flag because an environment variable changed
+// would be a lockout, so removing superadmin is a deliberate manual action with
+// no automated path.
+func (s *Store) applyBootstrap(ctx context.Context, tx pgx.Tx, u User) (User, error) {
+	if s.superadminEmail == "" || u.Email != s.superadminEmail {
+		return u, nil
+	}
+
+	if !u.IsSuperadmin {
+		if err := s.audit(ctx, tx, u.ID, "user.superadmin.grant",
+			map[string]any{"is_superadmin": false},
+			map[string]any{"is_superadmin": true, "reason": bootstrapReason}); err != nil {
+			return User{}, err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE users SET is_superadmin = true WHERE id = $1`, u.ID); err != nil {
+			return User{}, dbErr("granting superadmin", err)
+		}
+		u.IsSuperadmin = true
+	}
+
+	// The organisation Tier 1's YAML import created owns the imported teams and
+	// has had no owner until now. Claimed only while it is still unowned, so a
+	// later sign-in never reassigns it.
+	var owner string
+	switch err := tx.QueryRow(ctx,
+		`SELECT coalesce(owner_user_id, '') FROM organizations WHERE id = $1`,
+		s.defaultOrgID).Scan(&owner); {
+	case errors.Is(err, pgx.ErrNoRows):
+		return u, nil
+	case err != nil:
+		return User{}, dbErr("reading default organization owner", err)
+	case owner != "":
+		return u, nil
+	}
+
+	if err := s.audit(ctx, tx, u.ID, "organization.owner.set",
+		map[string]any{"organization_id": s.defaultOrgID, "owner_user_id": nil},
+		map[string]any{"organization_id": s.defaultOrgID, "owner_user_id": u.ID, "reason": bootstrapReason}); err != nil {
+		return User{}, err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE organizations SET owner_user_id = $2 WHERE id = $1 AND owner_user_id IS NULL`,
+		s.defaultOrgID, u.ID); err != nil {
+		return User{}, dbErr("setting default organization owner", err)
+	}
+	return u, nil
+}
+
+// audit writes one entry inside the caller's transaction, so the entry and the
+// change it describes land together or not at all. actor_team_id carries a user
+// ID here -- see DECISIONS.md, Step 1.5.
+func (s *Store) audit(ctx context.Context, tx pgx.Tx, actor, action string, before, after map[string]any) error {
+	id, err := newID("")
+	if err != nil {
+		return err
+	}
+	b, err := json.Marshal(before)
+	if err != nil {
+		return fmt.Errorf("marshalling audit before: %w", err)
+	}
+	a, err := json.Marshal(after)
+	if err != nil {
+		return fmt.Errorf("marshalling audit after: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO audit_log (id, ts, actor_team_id, actor_addr, action, target_team_id, before, after)
+		VALUES ($1, now(), $2, $3, $4, NULL, $5, $6)`,
+		id, actor, "bootstrap", action, b, a); err != nil {
+		return dbErr("writing audit entry", err)
+	}
+	return nil
+}
+
+// UserByID loads one user. Used by GET /auth/me, which needs the display
+// fields the token deliberately does not carry.
+func (s *Store) UserByID(ctx context.Context, id string) (User, error) {
+	return s.userByID(ctx, s.pool, id)
 }
 
 // Ping reports whether the identity tables are reachable.

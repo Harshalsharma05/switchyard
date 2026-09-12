@@ -25,6 +25,17 @@ GRAFANA_URL="${SWITCHYARD_GRAFANA_URL:-http://localhost:3000}"
 # is non-admin, rpm 10, budget $5.
 ACME_KEY="sk-switchyard-dev-acme-9f2b1c"
 GLOBEX_KEY="sk-switchyard-dev-globex-7a4e0d"
+
+# The admin port takes a dashboard session, not a team key. cmd/admintoken
+# signs one from JWT_SECRET -- the same secret the gateway verifies with, so
+# this grants nothing a .env reader did not already have.
+if [ -z "${JWT_SECRET:-}" ]; then
+    echo "JWT_SECRET is unset; the admin-port scenes need it. Export it or source .env." >&2
+    exit 1
+fi
+ADMIN_COOKIE="$(go run ./cmd/admintoken 2>/dev/null)"
+ADMIN_CSRF="${ADMIN_COOKIE##*sy_csrf=}"
+admin_curl() { curl -s -H "Cookie: $ADMIN_COOKIE" -H "X-CSRF-Token: $ADMIN_CSRF" "$@"; }
 GLOBEX_BUDGET_USD="5.00"
 
 CACHE_PROMPT="Explain what a write-ahead log is, in two sentences."
@@ -88,8 +99,8 @@ cleanup() {
   echo
   echo "Restoring the gateway to a clean state..."
   [ -n "$bg_pid" ] && kill "$bg_pid" >/dev/null 2>&1 || true
-  curl -s -X DELETE "$ADMIN_URL/admin/chaos" >/dev/null 2>&1 || true
-  curl -s -X PATCH "$ADMIN_URL/admin/teams/globex" \
+  admin_curl -X DELETE "$ADMIN_URL/admin/chaos" >/dev/null 2>&1 || true
+  admin_curl -X PATCH "$ADMIN_URL/admin/teams/globex" \
     -H "Content-Type: application/json" \
     -d "{\"monthly_budget_usd\": $GLOBEX_BUDGET_USD}" >/dev/null 2>&1 || true
 }
@@ -105,28 +116,28 @@ if ! curl -sf "$BASE_URL/healthz" >/dev/null; then
 fi
 echo "Gateway is up: $BASE_URL (admin $ADMIN_URL)"
 
-if [ "$(curl -s -o /dev/null -w '%{http_code}' "$ADMIN_URL/admin/chaos")" != "200" ]; then
+if [ "$(admin_curl -o /dev/null -w '%{http_code}' "$ADMIN_URL/admin/chaos")" != "200" ]; then
   echo "Scenes 5-6 need the chaos harness. Start the gateway with"
   echo "SWITCHYARD_ENV=dev and SWITCHYARD_CHAOS_ENABLED=true (the compose file sets both)."
   exit 1
 fi
 echo "Chaos harness available."
 
-if [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $ACME_KEY" "$ADMIN_URL/admin/requests?limit=1")" != "200" ]; then
+if [ "$(admin_curl -o /dev/null -w '%{http_code}' "$ADMIN_URL/admin/requests?limit=1")" != "200" ]; then
   echo "Request Logs not available — Postgres is not wired (POSTGRES_PASSWORD unset)."
   echo "Scenes 9-10 need it. Use the compose stack, not a bare 'go run ./cmd/gateway'."
   exit 1
 fi
 echo "Request log available."
 
-me=$(curl -s -H "Authorization: Bearer $ACME_KEY" "$ADMIN_URL/admin/me")
+me=$(admin_curl "$ADMIN_URL/auth/me")
 echo "$me" | grep -q '"routing"' && echo "Cost-aware routing enabled." || echo "NOTE: routing may be off — scene 4 will be thin."
 
 if ! curl -sf "$UI_URL" >/dev/null 2>&1; then
   echo "NOTE: console not reachable at $UI_URL — the UI narration steps will not have a page to show."
 fi
 
-health_json=$(curl -s "$ADMIN_URL/admin/providers/health")
+health_json=$(admin_curl "$ADMIN_URL/admin/providers/health")
 if echo "$health_json" | grep -q '"status":"down"\|"status":"degraded"'; then
   echo
   echo "WARNING: a provider is already degraded/down. Scene 5's failover still"
@@ -142,7 +153,7 @@ pause
 # --- 1. Overview with live traffic ---------------------------------------
 scene "1 · Overview, live"
 echo "Traffic is flowing. A couple of the requests just logged:"
-curl -s -H "Authorization: Bearer $ACME_KEY" "$ADMIN_URL/admin/requests?team=acme&limit=3" | pp
+admin_curl "$ADMIN_URL/admin/requests?team=acme&limit=3" | pp
 ui "Open $UI_URL → Overview. KPI row (requests, overhead p95, error rate, cache"
 ui "hit rate, cost) updating without a refresh; the traffic and overhead charts"
 ui "moving; the provider-health strip and breaker states live; the request feed"
@@ -205,7 +216,7 @@ pause
 # --- 5. Failure simulation — the chain reaction ------------------------
 scene "5 · Fail groq — the chain reaction"
 echo "Forcing groq/openai/gpt-oss-20b into synthetic errors:"
-curl -s -X POST "$ADMIN_URL/admin/chaos" -H "Content-Type: application/json" \
+admin_curl -X POST "$ADMIN_URL/admin/chaos" -H "Content-Type: application/json" \
   -d '{"rules":[{"provider":"groq","model":"openai/gpt-oss-20b","mode":"error"}]}' | pp
 echo
 echo "Six requests as acme (allowed to fall back to Gemini):"
@@ -215,7 +226,7 @@ for i in $(seq 1 6); do
 done
 echo
 echo "Provider health now:"
-curl -s "$ADMIN_URL/admin/providers/health" | pp
+admin_curl "$ADMIN_URL/admin/providers/health" | pp
 ui "Live Ops. In real time: groq's status flips healthy → degraded → down, its"
 ui "breaker closed → open, and the request feed shows fallback to gemini. The"
 ui "chaos control on this screen does exactly what the POST above just did."
@@ -224,7 +235,7 @@ pause
 # --- 6. Recovery ---------------------------------------------------------
 scene "6 · Recovery"
 echo "Clearing the fault:"
-curl -s -X DELETE "$ADMIN_URL/admin/chaos" | pp
+admin_curl -X DELETE "$ADMIN_URL/admin/chaos" | pp
 echo
 echo "Waiting out the breaker cooldown (~11s)..."
 sleep 11
@@ -263,14 +274,14 @@ pause
 scene "8 · Budget exhausted → 402"
 echo "Capping globex's monthly budget to \$0.00001 (the same PATCH an operator"
 echo "would use live):"
-curl -s -X PATCH "$ADMIN_URL/admin/teams/globex" -H "Content-Type: application/json" \
+admin_curl -X PATCH "$ADMIN_URL/admin/teams/globex" -H "Content-Type: application/json" \
   -d '{"monthly_budget_usd": 0.00001}' | pp
 echo
 echo "One request as globex — denied before any provider is called:"
 chat "$GLOBEX_KEY" "openai/gpt-oss-20b" "hi"
 echo
 echo "Restoring globex to \$$GLOBEX_BUDGET_USD:"
-curl -s -X PATCH "$ADMIN_URL/admin/teams/globex" -H "Content-Type: application/json" \
+admin_curl -X PATCH "$ADMIN_URL/admin/teams/globex" -H "Content-Type: application/json" \
   -d "{\"monthly_budget_usd\": $GLOBEX_BUDGET_USD}" | pp
 ui "The 402 body reads '\$X of \$Y'. Usage & Cost shows globex's budget bar at"
 ui "100% — the blocked state, not just the 80% warning."
@@ -279,7 +290,7 @@ pause
 # --- 9. Request Logs + Jaeger ---------------------------------------------
 scene "9 · Request Logs → Jaeger"
 echo "The failures from scene 5, from the request log:"
-rows=$(curl -s -H "Authorization: Bearer $ACME_KEY" "$ADMIN_URL/admin/requests?provider=groq&fallback=true&limit=5")
+rows=$(admin_curl "$ADMIN_URL/admin/requests?provider=groq&fallback=true&limit=5")
 echo "$rows" | pp
 if $have_jq; then
   trace=$(echo "$rows" | jq -r '.requests[0].trace_id // empty')
@@ -299,10 +310,10 @@ pause
 # --- 10. Usage & Cost ---------------------------------------------------
 scene "10 · Usage & Cost"
 echo "Attribution over the last 24h:"
-curl -s -H "Authorization: Bearer $ACME_KEY" "$ADMIN_URL/admin/attribution?range=24h" | pp
+admin_curl "$ADMIN_URL/admin/attribution?range=24h" | pp
 echo
 echo "Redis budget counters vs the request-log sum:"
-curl -s -H "Authorization: Bearer $ACME_KEY" "$ADMIN_URL/admin/reconciliation" | pp
+admin_curl "$ADMIN_URL/admin/reconciliation" | pp
 ui "Usage & Cost. Cost saved by cache and cost saved by routing, each its own"
 ui "number; the cost the fallback shifted; per-team spend bars; and the"
 ui "reconciliation strip showing Redis and the request log agree."

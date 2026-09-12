@@ -32,7 +32,7 @@ func TestCostsAssemblesBucketsAndKeys(t *testing.T) {
 	}}
 	srv := newRequestLogServer(t, reader)
 
-	resp := getWithKey(t, srv, "/admin/costs?range=24h&by=provider", "acme-key")
+	resp := get(t, srv, "/admin/costs?range=24h&by=provider")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -60,24 +60,24 @@ func TestCostsAssemblesBucketsAndKeys(t *testing.T) {
 }
 
 func TestCostsScoping(t *testing.T) {
-	t.Run("non-admin is pinned to its own team", func(t *testing.T) {
+	t.Run("a superadmin spans every team", func(t *testing.T) {
 		reader := &fakeRequestLogReader{}
 		srv := newRequestLogServer(t, reader)
 
-		if resp := getWithKey(t, srv, "/admin/costs?by=team", "globex-key"); resp.StatusCode != http.StatusOK {
+		if resp := get(t, srv, "/admin/costs?by=team"); resp.StatusCode != http.StatusOK {
 			t.Fatalf("status = %d, want 200", resp.StatusCode)
 		}
-		if reader.gotCostQuery.TeamID != "globex" {
-			t.Errorf("scope = %q, want globex", reader.gotCostQuery.TeamID)
+		if reader.gotCostQuery.TeamID != "" {
+			t.Errorf("scope = %q, want empty (all teams)", reader.gotCostQuery.TeamID)
 		}
 	})
 
-	t.Run("non-admin naming another team is refused", func(t *testing.T) {
+	t.Run("anyone else is refused and never reaches the database", func(t *testing.T) {
 		reader := &fakeRequestLogReader{}
-		srv := newRequestLogServer(t, reader)
+		srv := newRequestLogServerAs(t, reader, testAuth(false))
 
-		if resp := getWithKey(t, srv, "/admin/costs?team=acme", "globex-key"); resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		if resp := get(t, srv, "/admin/costs?team=acme"); resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403", resp.StatusCode)
 		}
 		if reader.gotCostQuery.Dimension != "" {
 			t.Error("the query ran despite being refused")
@@ -88,11 +88,11 @@ func TestCostsScoping(t *testing.T) {
 		reader := &fakeRequestLogReader{}
 		srv := newRequestLogServer(t, reader)
 
-		getWithKey(t, srv, "/admin/costs", "acme-key")
+		get(t, srv, "/admin/costs")
 		if reader.gotCostQuery.TeamID != "" {
 			t.Errorf("admin unscoped = %q, want empty", reader.gotCostQuery.TeamID)
 		}
-		getWithKey(t, srv, "/admin/costs?team=globex", "acme-key")
+		get(t, srv, "/admin/costs?team=globex")
 		if reader.gotCostQuery.TeamID != "globex" {
 			t.Errorf("admin narrowed = %q, want globex", reader.gotCostQuery.TeamID)
 		}
@@ -102,7 +102,7 @@ func TestCostsScoping(t *testing.T) {
 func TestCostsRejectsBadParams(t *testing.T) {
 	srv := newRequestLogServer(t, &fakeRequestLogReader{})
 	for _, path := range []string{"/admin/costs?range=1y", "/admin/costs?by=day"} {
-		if resp := getWithKey(t, srv, path, "acme-key"); resp.StatusCode != http.StatusBadRequest {
+		if resp := get(t, srv, path); resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("%s: status = %d, want 400", path, resp.StatusCode)
 		}
 	}
@@ -110,7 +110,7 @@ func TestCostsRejectsBadParams(t *testing.T) {
 
 func TestCostsDisabledWithoutRequestLog(t *testing.T) {
 	srv := newRequestLogServer(t, nil)
-	if resp := getWithKey(t, srv, "/admin/costs", "acme-key"); resp.StatusCode != http.StatusServiceUnavailable {
+	if resp := get(t, srv, "/admin/costs"); resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", resp.StatusCode)
 	}
 }

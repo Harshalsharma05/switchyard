@@ -4,11 +4,9 @@ package admin
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -111,19 +109,19 @@ func toRequestView(r logstore.Record) requestView {
 
 // --- handlers -----------------------------------------------------------
 
-func listRequests(reader RequestLogReader, authr KeyAuthenticator, log *slog.Logger) http.HandlerFunc {
+func listRequests(reader RequestLogReader, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if reader == nil {
 			writeRequestLogDisabled(w, log)
 			return
 		}
 
-		team, ok := authenticate(w, r, authr, log)
+		scope, ok := teamScope(w, r, log)
 		if !ok {
 			return
 		}
 
-		filter, err := parseFilter(r, team)
+		filter, err := parseFilter(r, scope)
 		if err != nil {
 			writeError(w, log, http.StatusBadRequest, "invalid_request_error", err.Error())
 			return
@@ -145,24 +143,16 @@ func listRequests(reader RequestLogReader, authr KeyAuthenticator, log *slog.Log
 	}
 }
 
-func getRequest(reader RequestLogReader, authr KeyAuthenticator, log *slog.Logger) http.HandlerFunc {
+func getRequest(reader RequestLogReader, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if reader == nil {
 			writeRequestLogDisabled(w, log)
 			return
 		}
 
-		team, ok := authenticate(w, r, authr, log)
+		scope, ok := teamScope(w, r, log)
 		if !ok {
 			return
-		}
-
-		// An admin passes an empty scope and can read any row; everyone else is
-		// pinned to their own team, so a guessed id answers 404 rather than
-		// handing back another team's data.
-		scope := team.ID
-		if team.IsAdmin {
-			scope = ""
 		}
 
 		rec, err := reader.Get(r.Context(), chi.URLParam(r, "id"), scope)
@@ -185,49 +175,15 @@ func writeRequestLogDisabled(w http.ResponseWriter, log *slog.Logger) {
 		"the request log is not configured; set POSTGRES_PASSWORD to enable it")
 }
 
-// authenticate resolves the bearer token, writing the 401 itself on failure.
-func authenticate(w http.ResponseWriter, r *http.Request, authr KeyAuthenticator, log *slog.Logger) (*auth.Team, bool) {
-	const prefix = "Bearer "
-
-	h := r.Header.Get("Authorization")
-	if !strings.HasPrefix(h, prefix) {
-		writeError(w, log, http.StatusUnauthorized, "invalid_api_key",
-			"missing or malformed Authorization header; expected a Bearer key")
-		return nil, false
-	}
-
-	team, err := authr.Authenticate(strings.TrimSpace(strings.TrimPrefix(h, prefix)))
-	if err != nil {
-		if errors.Is(err, auth.ErrUnknownKey) {
-			writeError(w, log, http.StatusUnauthorized, "invalid_api_key",
-				"the provided API key was not recognized")
-			return nil, false
-		}
-		log.ErrorContext(r.Context(), "authenticating admin request", slog.Any("error", err))
-		writeError(w, log, http.StatusInternalServerError, "internal_error",
-			"the gateway could not authenticate this request")
-		return nil, false
-	}
-	return team, true
-}
-
-// parseFilter builds the query filter from the URL. A non-admin caller's
-// TeamID always comes from its key, never from the query string, so no
-// parameter a client can set widens what it sees.
-func parseFilter(r *http.Request, team *auth.Team) (logstore.Filter, error) {
+// parseFilter builds the query filter from the URL. The team scope is resolved
+// by teamScope from the caller's session, never taken from the query string by
+// a caller who has not earned it.
+func parseFilter(r *http.Request, scope string) (logstore.Filter, error) {
 	q := r.URL.Query()
 	f := logstore.Filter{
 		Provider: q.Get("provider"),
 		Model:    q.Get("model"),
-	}
-
-	if team.IsAdmin {
-		f.TeamID = q.Get("team")
-	} else {
-		if want := q.Get("team"); want != "" && want != team.ID {
-			return f, fmt.Errorf("team %q may only read its own requests", team.ID)
-		}
-		f.TeamID = team.ID
+		TeamID:   scope,
 	}
 
 	if v := q.Get("status"); v != "" {

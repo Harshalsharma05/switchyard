@@ -8,7 +8,10 @@ import { awaitRequestRow } from '../api/requests.js'
 import { fetchMe } from '../api/session.js'
 import { Card } from '../components/primitives.jsx'
 import { EmptyState } from '../components/states.jsx'
-import { useAuth } from '../hooks/useAuth.js'
+import { useSession } from '../hooks/useSession.js'
+import { useGatewayKey } from '../hooks/useGatewayKey.js'
+import GatewayKeyField from '../components/GatewayKeyField.jsx'
+import { fetchProviders } from '../api/providers.js'
 import { getHistory, pushHistory, subscribeHistory } from '../hooks/playgroundHistory.js'
 import { formatClock, formatMicroDollars, formatMs, formatPercent, formatUSD } from '../utils/format.js'
 import './Playground.css'
@@ -127,12 +130,22 @@ function ErrorPanel({ error, budget, partial }) {
 }
 
 export default function Playground() {
-  const { me, getKey } = useAuth()
-  const models = me?.allowed_models ?? []
+  // Model names come from the provider catalogue now. A session identifies a
+  // person, not a team, so there is no per-team allowlist to read here.
+  const [models, setModels] = useState([])
+  useEffect(() => {
+    const ac = new AbortController()
+    fetchProviders(ac.signal)
+      .then((list) => setModels((list ?? []).flatMap((p) => p.models ?? [])))
+      .catch(() => setModels([]))
+    return () => ac.abort()
+  }, [])
+
   // What this gateway accepts in `model` beyond real model names — "auto" and
   // each routable tier. Empty when routing is off, so the selector simply does
   // not offer it; the tier names come from the API, never from here.
-  const routingOptions = me?.routing_options ?? []
+  const { routingOptions } = useSession()
+  const { key: gatewayKey, hasKey } = useGatewayKey()
 
   const [prompt, setPrompt] = useState('')
   const [model, setModel] = useState(models[0] ?? '')
@@ -175,7 +188,7 @@ export default function Playground() {
     let captured = null
     try {
       await sendChat({
-        key: getKey(),
+        key: gatewayKey,
         prompt: text,
         model: useModel,
         stream: useStream,
@@ -191,7 +204,7 @@ export default function Playground() {
       // The 402 body states the numbers as text; pull them as fields from a
       // fresh /admin/me so the panel can show cap and spend distinctly.
       if (apiErr.status === 402) {
-        fetchMe(getKey(), ac.signal).then((identity) => {
+        fetchMe(ac.signal).then((identity) => {
           if (!ac.signal.aborted) setBudget(identity)
         }).catch(() => { /* fall back to the message text */ })
       }
@@ -201,7 +214,7 @@ export default function Playground() {
 
     if (captured?.requestId) {
       setRowPending(true)
-      const r = await awaitRequestRow(getKey(), captured.requestId, { signal: ac.signal })
+      const r = await awaitRequestRow(captured.requestId, { signal: ac.signal })
       if (!ac.signal.aborted) {
         setRow(r)
         setRowPending(false)
@@ -280,11 +293,13 @@ export default function Playground() {
                 type="button"
                 className="pg-send"
                 onClick={() => run()}
-                disabled={running || !prompt.trim() || !model}
+                disabled={running || !prompt.trim() || !model || !hasKey}
               >
                 {running ? 'Sending…' : 'Send'}
               </button>
             </div>
+
+            <GatewayKeyField what="Playground" />
           </Card>
 
           <Card title="Response">

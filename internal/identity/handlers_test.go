@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Harshalsharma05/switchyard/internal/oauth"
 )
@@ -14,10 +15,12 @@ import (
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 func testHandlers() *Handlers {
-	return NewHandlers(
-		oauth.Config{ClientID: "client-1", ClientSecret: "secret", RedirectURL: "http://localhost:9090/auth/google/callback"},
-		nil, []byte("test-signing-secret"), "/", "/login", false, discardLogger(),
-	)
+	return NewHandlers(Config{
+		OAuth:      oauth.Config{ClientID: "client-1", ClientSecret: "secret", RedirectURL: "http://localhost:9090/auth/google/callback"},
+		Secret:     []byte("test-signing-secret"),
+		SuccessURL: "/", FailureURL: "/login",
+		AccessTTL: 15 * time.Minute, RefreshTTL: 720 * time.Hour,
+	}, nil, discardLogger())
 }
 
 // The state check is the CSRF defence for the whole flow, so every way of
@@ -65,7 +68,7 @@ func TestSealOpenRoundTrip(t *testing.T) {
 	}
 
 	// A cookie sealed with a different secret is not ours.
-	other := NewHandlers(oauth.Config{}, nil, []byte("a-different-secret"), "/", "/login", false, discardLogger())
+	other := NewHandlers(Config{Secret: []byte("a-different-secret")}, nil, discardLogger())
 	if _, _, ok := h.open(other.seal("state-abc", "verifier-xyz")); ok {
 		t.Fatal("accepted a cookie signed with another secret")
 	}

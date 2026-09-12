@@ -9,15 +9,13 @@ import TeamTable from '../components/TeamTable.jsx'
 import AuditLog from '../components/AuditLog.jsx'
 import SystemPanel from '../components/SystemPanel.jsx'
 import { ErrorState, Loading } from '../components/states.jsx'
-import { useAuth } from '../hooks/useAuth.js'
 import { usePolling } from '../hooks/usePolling.js'
 import '../components/TeamTable.css'
 import './Settings.css'
 
 export default function Settings() {
-  const { getKey, me } = useAuth()
 
-  const loadTeams = useCallback((signal) => fetchTeams(getKey(), signal), [getKey])
+  const loadTeams = useCallback((signal) => fetchTeams(signal), [])
   const teams = usePolling(loadTeams, { interval: 30000 })
 
   // Bumped after any team mutation so the audit log jumps back to page 1 and
@@ -41,8 +39,6 @@ export default function Settings() {
         ) : (
           <TeamTable
             teams={teams.data}
-            callerTeamId={me?.id}
-            getKey={getKey}
             onChanged={onChanged}
           />
         )}
@@ -50,7 +46,7 @@ export default function Settings() {
 
       <Card title="Audit log">
         {/* Remount on a mutation so the log reopens on page 1 with the new entry. */}
-        <AuditLog key={auditNonce} getKey={getKey} />
+        <AuditLog key={auditNonce} />
       </Card>
 
       <Card title="System">

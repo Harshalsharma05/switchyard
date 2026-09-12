@@ -5,7 +5,6 @@ import { useCallback, useState } from 'react'
 import { fetchSystem, reloadConfig } from '../api/system.js'
 import { StatusPill } from './primitives.jsx'
 import { EmptyState, ErrorState, Loading } from './states.jsx'
-import { useAuth } from '../hooks/useAuth.js'
 import { usePolling } from '../hooks/usePolling.js'
 
 function uptime(seconds) {
@@ -25,7 +24,7 @@ function uptime(seconds) {
 const DEP_TONE = { up: 'healthy', down: 'down', degraded: 'warn', not_configured: 'info' }
 const DEP_LABEL = { up: 'up', down: 'down', degraded: 'degraded', not_configured: 'not configured' }
 
-function ReloadControl({ getKey, onReloaded }) {
+function ReloadControl({ onReloaded }) {
   const [phase, setPhase] = useState('idle') // idle | confirm | pending
   const [result, setResult] = useState(null)
   const [error, setError] = useState(null)
@@ -34,7 +33,7 @@ function ReloadControl({ getKey, onReloaded }) {
     setPhase('pending')
     setError(null)
     try {
-      const r = await reloadConfig(getKey())
+      const r = await reloadConfig()
       setResult(r)
       setPhase('idle')
       onReloaded?.()
@@ -71,8 +70,7 @@ function ReloadControl({ getKey, onReloaded }) {
 }
 
 export default function SystemPanel() {
-  const { getKey } = useAuth()
-  const load = useCallback((signal) => fetchSystem(getKey(), signal), [getKey])
+  const load = useCallback((signal) => fetchSystem(signal), [])
   const sys = usePolling(load, { interval: 15000 })
   const d = sys.data
 
@@ -118,7 +116,7 @@ export default function SystemPanel() {
         </ul>
       </div>
 
-      <ReloadControl getKey={getKey} onReloaded={sys.refresh} />
+      <ReloadControl onReloaded={sys.refresh} />
     </div>
   )
 }

@@ -31,30 +31,30 @@ function Field({ label, value, onChange, children }) {
   )
 }
 
-export default function LogFilters({ getKey, isAdmin, filters, range, set, clearAll, activeCount }) {
+export default function LogFilters({ isAdmin, filters, range, set, clearAll, activeCount }) {
   const [providers, setProviders] = useState([])
   const [models, setModels] = useState([])
   const [teams, setTeams] = useState([])
 
   useEffect(() => {
     const ac = new AbortController()
-    fetchProviders(getKey(), ac.signal)
+    fetchProviders(ac.signal)
       .then((list) => {
         setProviders(list.map((p) => p.name))
         setModels([...new Set(list.flatMap((p) => p.models ?? []))].sort())
       })
       .catch(() => {})
     return () => ac.abort()
-  }, [getKey])
+  }, [])
 
   useEffect(() => {
     if (!isAdmin) return
     const ac = new AbortController()
-    fetchTeams(getKey(), ac.signal)
+    fetchTeams(ac.signal)
       .then((list) => setTeams(list.map((t) => ({ id: t.id, name: t.name }))))
       .catch(() => {})
     return () => ac.abort()
-  }, [getKey, isAdmin])
+  }, [isAdmin])
 
   return (
     <div className="logf">

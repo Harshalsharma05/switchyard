@@ -69,7 +69,7 @@ function ShowOncePanel({ result, onDismiss }) {
   )
 }
 
-function TeamRow({ team, callerTeamId, getKey, onChanged }) {
+function TeamRow({ team, callerTeamId, onChanged }) {
   const [editing, setEditing] = useState(false)
   const [form, setForm] = useState({ rpm: '', tpm: '', budget: '' })
   const [busy, setBusy] = useState(null) // 'save' | 'reset' | 'key' | 'delete'
@@ -106,7 +106,7 @@ function TeamRow({ team, callerTeamId, getKey, onChanged }) {
     setBusy('save')
     setError(null)
     try {
-      await patchTeam(getKey(), team.id, patch)
+      await patchTeam(team.id, patch)
       setEditing(false)
       onChanged()
     } catch (e) {
@@ -121,7 +121,7 @@ function TeamRow({ team, callerTeamId, getKey, onChanged }) {
     setBusy('reset')
     setError(null)
     try {
-      await resetTeamBudget(getKey(), team.id)
+      await resetTeamBudget(team.id)
       onChanged()
     } catch (e) {
       setError(e.message || 'the reset was not applied')
@@ -135,7 +135,7 @@ function TeamRow({ team, callerTeamId, getKey, onChanged }) {
     setBusy('key')
     setError(null)
     try {
-      const result = await rotateTeamKey(getKey(), team.id)
+      const result = await rotateTeamKey(team.id)
       setRotated(result)
       onChanged()
     } catch (e) {
@@ -150,7 +150,7 @@ function TeamRow({ team, callerTeamId, getKey, onChanged }) {
     setBusy('key')
     setError(null)
     try {
-      await revokeTeamKey(getKey(), team.id)
+      await revokeTeamKey(team.id)
       onChanged()
     } catch (e) {
       setError(e.message || 'the key was not revoked')
@@ -171,7 +171,7 @@ function TeamRow({ team, callerTeamId, getKey, onChanged }) {
     setBusy('delete')
     setError(null)
     try {
-      await deleteTeam(getKey(), team.id)
+      await deleteTeam(team.id)
       onChanged() // the refreshed list no longer contains this row
     } catch (e) {
       setError(e.message || 'the team was not deleted')
@@ -324,7 +324,7 @@ function TeamRow({ team, callerTeamId, getKey, onChanged }) {
 // concept is visible, not so a new one can be invented here. Models are offered
 // grouped under the providers that are ticked, so a model can only be allowed
 // alongside a provider that serves it.
-function CreateTeamForm({ teams, getKey, onCreated, onCancel }) {
+function CreateTeamForm({ teams, onCreated, onCancel }) {
   const orgs = [...new Set(teams.map((t) => t.organization_id).filter(Boolean))].sort()
 
   const [form, setForm] = useState({
@@ -339,13 +339,13 @@ function CreateTeamForm({ teams, getKey, onCreated, onCancel }) {
 
   useEffect(() => {
     const ac = new AbortController()
-    fetchProviders(getKey(), ac.signal)
+    fetchProviders(ac.signal)
       .then((list) => setCatalogue(list.map((p) => ({ name: p.name, models: p.models ?? [] }))))
       .catch((e) => {
         if (e.name !== 'AbortError') setCatalogueError('Could not load the provider list.')
       })
     return () => ac.abort()
-  }, [getKey])
+  }, [])
 
   const set = (name) => (e) => {
     const value = e.target.type === 'checkbox' ? e.target.checked : e.target.value
@@ -396,7 +396,7 @@ function CreateTeamForm({ teams, getKey, onCreated, onCancel }) {
     setBusy(true)
     setError(null)
     try {
-      onCreated(await createTeam(getKey(), body))
+      onCreated(await createTeam(body))
     } catch (err) {
       setError(err.message || 'the team was not created')
       setBusy(false)
@@ -487,7 +487,7 @@ function CreateTeamForm({ teams, getKey, onCreated, onCancel }) {
   )
 }
 
-export default function TeamTable({ teams, callerTeamId, getKey, onChanged }) {
+export default function TeamTable({ teams, callerTeamId, onChanged }) {
   const [creating, setCreating] = useState(false)
   const [created, setCreated] = useState(null) // { team, api_key, key, warning }
 
@@ -516,7 +516,7 @@ export default function TeamTable({ teams, callerTeamId, getKey, onChanged }) {
         </thead>
         <tbody>
           {teams.map((t) => (
-            <TeamRow key={t.id} team={t} callerTeamId={callerTeamId} getKey={getKey} onChanged={onChanged} />
+            <TeamRow key={t.id} team={t} callerTeamId={callerTeamId} onChanged={onChanged} />
           ))}
         </tbody>
       </table>
@@ -532,7 +532,7 @@ export default function TeamTable({ teams, callerTeamId, getKey, onChanged }) {
       )}
 
       {creating ? (
-        <CreateTeamForm teams={teams} getKey={getKey} onCreated={onCreated} onCancel={() => setCreating(false)} />
+        <CreateTeamForm teams={teams} onCreated={onCreated} onCancel={() => setCreating(false)} />
       ) : (
         <div className="tt-create-bar">
           <button type="button" className="tt-btn" onClick={() => { setCreated(null); setCreating(true) }}>

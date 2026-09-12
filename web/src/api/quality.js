@@ -2,6 +2,6 @@
 // threshold and the routing classifier honest. Non-admin keys get 403.
 import { request } from './client.js'
 
-export function fetchQualityFeedback(key, { range = '7d', signal } = {}) {
-  return request(`/admin/quality/feedback?range=${encodeURIComponent(range)}`, { key, signal })
+export function fetchQualityFeedback({ range = '7d', signal } = {}) {
+  return request(`/admin/quality/feedback?range=${encodeURIComponent(range)}`, { signal })
 }

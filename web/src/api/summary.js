@@ -2,6 +2,6 @@
 // snapshot; breaker state and transition history come from health.js.
 import { request } from './client.js'
 
-export function fetchSummary(key, range, signal) {
-  return request(`/admin/summary?range=${encodeURIComponent(range)}`, { key, signal })
+export function fetchSummary(range, signal) {
+  return request(`/admin/summary?range=${encodeURIComponent(range)}`, { signal })
 }

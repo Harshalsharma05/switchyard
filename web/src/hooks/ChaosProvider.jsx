@@ -11,8 +11,8 @@ import { usePolling } from './usePolling.js'
 // a connection problem.
 const isUnavailable = (err) => err.status === 404
 
-export default function ChaosProvider({ getKey, children }) {
-  const load = useCallback((signal) => fetchChaos(getKey(), signal), [getKey])
+export default function ChaosProvider({ children }) {
+  const load = useCallback((signal) => fetchChaos(signal), [])
   const poll = usePolling(load, { interval: 5000, ignoreError: isUnavailable })
 
   const unavailable = poll.error?.status === 404
@@ -21,16 +21,16 @@ export default function ChaosProvider({ getKey, children }) {
 
   const applyRules = useCallback(
     async (next) => {
-      await setChaosRules(getKey(), next)
+      await setChaosRules(next)
       poll.refresh()
     },
-    [getKey, poll],
+    [poll],
   )
 
   const clearAll = useCallback(async () => {
-    await clearChaos(getKey())
+    await clearChaos()
     poll.refresh()
-  }, [getKey, poll])
+  }, [poll])
 
   const value = useMemo(
     () => ({ available, rules, applyRules, clearAll, refresh: poll.refresh }),

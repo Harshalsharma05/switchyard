@@ -80,7 +80,9 @@ func TestReloadDoesNotDropAnInFlightRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("building reload request: %v", err)
 	}
-	reloadReq.Header.Set("Authorization", "Bearer "+team.key)
+	cookie, csrf := adminSession(t)
+	reloadReq.Header.Set("Cookie", cookie)
+	reloadReq.Header.Set("X-CSRF-Token", csrf)
 	reloadResp, err := gw.Client.Do(reloadReq)
 	if err != nil {
 		t.Fatalf("POST /admin/reload: %v", err)

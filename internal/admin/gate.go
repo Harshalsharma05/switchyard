@@ -1,64 +1,93 @@
-// Admin-only route gate (Part 2, Step 2.1).
+// The admin port's caller: a signed-in dashboard user (Multi-user, Step 1.5).
 //
-// Part 1 left the admin listener as unauthenticated operator surface. Part 2's
-// frontend reaches it with a team key, so the mutating and cross-team routes
-// now demand one: 401 without a valid key, 403 with a non-admin one. The read
-// paths that a non-admin legitimately needs — /admin/me, its own request-log
-// rows — do their own scoping and are not gated here.
+// Part 2 authenticated this surface with a team API key. It now takes a session
+// only, and a team key reaches nothing here -- the session middleware does not
+// read the Authorization header at all. The middleware lives in
+// internal/identity; this package never imports it, and cmd/ supplies the
+// adapter that fills in the Caller below.
 package admin
 
 import (
 	"context"
 	"log/slog"
 	"net/http"
-
-	"github.com/Harshalsharma05/switchyard/internal/auth"
 )
 
-// adminTeamCtxKey carries the authenticated admin team from requireAdmin down to
-// the handler, so a mutating handler can attribute an audit entry to a real
-// identity instead of just a remote address. Unexported key type — nothing
-// outside this package sets or reads it.
-type adminTeamCtxKey struct{}
-
-// adminTeam returns the team requireAdmin authenticated, or nil when the gate
-// was inert (a registry-less test build).
-func adminTeam(r *http.Request) *auth.Team {
-	t, _ := r.Context().Value(adminTeamCtxKey{}).(*auth.Team)
-	return t
+// Caller is the authenticated user behind an admin request.
+type Caller struct {
+	UserID       string
+	OrgID        string
+	IsSuperadmin bool
+	SessionID    string
 }
 
-// actorID is the audit "who": the authenticated team's ID, or "unknown" when
-// the gate is inert.
+type callerCtxKey struct{}
+
+// WithCaller is called by cmd/'s session adapter. Exported because the writer
+// lives outside this package; the key stays unexported so nothing else can
+// forge one.
+func WithCaller(ctx context.Context, c Caller) context.Context {
+	return context.WithValue(ctx, callerCtxKey{}, c)
+}
+
+func caller(r *http.Request) (Caller, bool) {
+	c, ok := r.Context().Value(callerCtxKey{}).(Caller)
+	return c, ok
+}
+
+// actorID is the audit "who". It is the user ID now rather than a team ID --
+// forced, not chosen: after Step 1.5 there is no team on an admin request.
+// The plan puts this in Phase 2, Step 2.5; there is nothing else it could be.
 func actorID(r *http.Request) string {
-	if t := adminTeam(r); t != nil {
-		return t.ID
+	if c, ok := caller(r); ok {
+		return c.UserID
 	}
 	return "unknown"
 }
 
-// requireAdmin rejects any request whose bearer key is missing, unknown, or
-// belongs to a non-admin team. When authr is nil the gate is inert — the port
-// falls back to Part 1's open operator surface, the same way a nil request-log
-// reader disables those routes. cmd/gateway always wires a registry, so a
-// deployed gateway is always gated.
-func requireAdmin(authr KeyAuthenticator, log *slog.Logger) func(http.Handler) http.Handler {
+// requireSuperadmin gates everything that crosses tenants: team management,
+// chaos, reload, audit, the system panel.
+//
+// Every signed-in user is an admin of their own organisation, but nothing here
+// is organisation-scoped yet, so the fail-closed reading is the only safe one
+// until Phase 2 splits org admin from superadmin.
+func requireSuperadmin(log *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
-		if authr == nil {
-			return next
-		}
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			team, ok := authenticate(w, r, authr, log)
+			c, ok := caller(r)
 			if !ok {
+				writeError(w, log, http.StatusUnauthorized, "no_session",
+					"this endpoint requires a signed-in session")
 				return
 			}
-			if !team.IsAdmin {
-				writeError(w, log, http.StatusForbidden, "admin_required",
-					"this endpoint requires an admin team key")
+			if !c.IsSuperadmin {
+				writeError(w, log, http.StatusForbidden, "superadmin_required",
+					"this endpoint is superadmin-only until organisation scoping ships")
 				return
 			}
-			ctx := context.WithValue(r.Context(), adminTeamCtxKey{}, team)
-			next.ServeHTTP(w, r.WithContext(ctx))
+			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// teamScope resolves the ?team= filter the cross-team read endpoints accept.
+//
+// A superadmin reads any team or all of them, which is exactly what an admin
+// key did before. Everyone else is refused rather than served unscoped: these
+// queries have no organisation filter yet, so the alternative would hand a new
+// user every other organisation's rows. Phase 2, Step 2.2 replaces this with a
+// real org filter.
+func teamScope(w http.ResponseWriter, r *http.Request, log *slog.Logger) (string, bool) {
+	c, ok := caller(r)
+	if !ok {
+		writeError(w, log, http.StatusUnauthorized, "no_session",
+			"this endpoint requires a signed-in session")
+		return "", false
+	}
+	if !c.IsSuperadmin {
+		writeError(w, log, http.StatusForbidden, "org_scope_pending",
+			"organisation-scoped views are not available yet; this endpoint is superadmin-only")
+		return "", false
+	}
+	return r.URL.Query().Get("team"), true
 }

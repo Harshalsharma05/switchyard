@@ -8,13 +8,11 @@ import ProviderPanel from '../components/ProviderPanel.jsx'
 import BreakerViz from '../components/BreakerViz.jsx'
 import LoadSimulator from '../components/LoadSimulator.jsx'
 import { ErrorState, Loading } from '../components/states.jsx'
-import { useAuth } from '../hooks/useAuth.js'
 import { usePolling } from '../hooks/usePolling.js'
 import './LiveOps.css'
 
 export default function LiveOps() {
-  const { getKey } = useAuth()
-  const loadHealth = useCallback((signal) => fetchProviderHealth(getKey(), signal), [getKey])
+  const loadHealth = useCallback((signal) => fetchProviderHealth(signal), [])
   const health = usePolling(loadHealth, { interval: 5000 })
 
   return (
@@ -38,7 +36,7 @@ export default function LiveOps() {
         ) : health.error && !health.data ? (
           <ErrorState message="Could not read breaker state." onRetry={health.refresh} />
         ) : (
-          <BreakerViz providers={health.data} getKey={getKey} onReset={health.refresh} />
+          <BreakerViz providers={health.data} onReset={health.refresh} />
         )}
       </Card>
 

@@ -21,12 +21,16 @@ func (f fakeSystemReporter) Dependencies(context.Context) map[string]string {
 }
 
 func systemServer(t *testing.T, sys SystemReporter) *httptest.Server {
+	return systemServerAs(t, sys, testAuth(true))
+}
+
+func systemServerAs(t *testing.T, sys SystemReporter, auth Auth) *httptest.Server {
 	t.Helper()
 	reg := requestLogRegistry(t) // acme = admin, globex = not
 	srv := httptest.NewServer(NewRouter(func() bool { return true },
 		registryStore{reg: reg}, &fakeSpendReader{}, configuredProviders(), fakeHealthReader{}, &fakeBreakerController{},
-		nil, fakeReloader, nil, reg, nil, nil, nil, nil, QualityFeedbackConfig{}, false, nil, sys,
-		nil, testMetrics(t), discardLogger()))
+		nil, fakeReloader, nil, nil, nil, nil, QualityFeedbackConfig{}, false, nil, sys,
+		auth, testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -37,7 +41,7 @@ func TestSystemReturnsProcessInfo(t *testing.T) {
 	}}
 	srv := systemServer(t, sys)
 
-	resp := getWithKey(t, srv, "/admin/system", "acme-key")
+	resp := get(t, srv, "/admin/system")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -57,15 +61,15 @@ func TestSystemReturnsProcessInfo(t *testing.T) {
 	}
 }
 
-// The Settings screen's real enforcement: a non-admin key never gets past the
-// gate, whatever the UI shows.
-func TestSystemIsAdminOnly(t *testing.T) {
-	srv := systemServer(t, fakeSystemReporter{deps: map[string]string{}})
+// The Settings screen's real enforcement: nothing but a superadmin session gets
+// past the gate, whatever the UI shows.
+func TestSystemIsSuperadminOnly(t *testing.T) {
+	rep := fakeSystemReporter{deps: map[string]string{}}
 
-	if got := getWithKey(t, srv, "/admin/system", "globex-key").StatusCode; got != http.StatusForbidden {
-		t.Errorf("non-admin GET /admin/system: status = %d, want 403", got)
+	if got := get(t, systemServerAs(t, rep, testAuth(false)), "/admin/system").StatusCode; got != http.StatusForbidden {
+		t.Errorf("non-superadmin GET /admin/system: status = %d, want 403", got)
 	}
-	if got := getWithKey(t, srv, "/admin/system", "").StatusCode; got != http.StatusUnauthorized {
-		t.Errorf("no-key GET /admin/system: status = %d, want 401", got)
+	if got := get(t, systemServerAs(t, rep, Auth{}), "/admin/system").StatusCode; got != http.StatusUnauthorized {
+		t.Errorf("sessionless GET /admin/system: status = %d, want 401", got)
 	}
 }

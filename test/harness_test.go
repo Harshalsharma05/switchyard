@@ -13,7 +13,9 @@ package integration
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -454,6 +456,37 @@ func apiKeyEnvVar(providerName string) string {
 	return "SWITCHYARD_TEST_KEY_" + safe
 }
 
+// harnessJWTSecret signs the admin sessions these tests use. Anyone holding a
+// signing secret can mint a session, which is why cmd/admintoken exists for
+// scripts; this is the same trick inlined so the suite needs no subprocess.
+const harnessJWTSecret = "integration-harness-signing-secret"
+
+// adminSession returns the Cookie and X-CSRF-Token values for a superadmin
+// request to the admin port.
+func adminSession(t *testing.T) (cookie, csrf string) {
+	t.Helper()
+	enc := base64.RawURLEncoding.EncodeToString
+	sign := func(b string) string {
+		m := hmac.New(sha256.New, []byte(harnessJWTSecret))
+		m.Write([]byte(b))
+		return enc(m.Sum(nil))
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"sub": "usr_harness", "org": "personal", "sa": true, "sid": "ses_harness",
+		"iat": time.Now().Unix(), "exp": time.Now().Add(time.Hour).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("marshalling harness claims: %v", err)
+	}
+	body := enc([]byte(`{"alg":"HS256","typ":"JWT"}`)) + "." + enc(payload)
+	token := body + "." + sign(body)
+
+	nonce := "harness"
+	csrf = nonce + "." + sign(nonce)
+	return "sy_session=" + token + "; sy_csrf=" + csrf, csrf
+}
+
 type gatewayInstance struct {
 	BaseURL  string
 	AdminURL string
@@ -515,6 +548,13 @@ func startGateway(t *testing.T, cfg harnessConfig, upstreams ...*mockUpstream) *
 		"SWITCHYARD_RETRY_MAX_ATTEMPTS":       "1",
 		"SWITCHYARD_RETRY_BASE_DELAY":         "10ms",
 		"SWITCHYARD_RETRY_MAX_TOTAL_ATTEMPTS": "5",
+
+		// The admin port takes a session, not a team key. The harness signs its
+		// own with this secret -- see adminSession.
+		"JWT_SECRET":                  harnessJWTSecret,
+		"GOOGLE_CLIENT_ID":            "harness-client-id",
+		"GOOGLE_CLIENT_SECRET":        "harness-client-secret",
+		"SWITCHYARD_SUPERADMIN_EMAIL": "harness@example.invalid",
 	}
 	for _, p := range cfg.providers {
 		env[apiKeyEnvVar(p.name)] = "test-key"

@@ -104,11 +104,15 @@ func requestLogRegistry(t *testing.T) *auth.Registry {
 }
 
 func newRequestLogServer(t *testing.T, reader RequestLogReader) *httptest.Server {
+	return newRequestLogServerAs(t, reader, testAuth(true))
+}
+
+func newRequestLogServerAs(t *testing.T, reader RequestLogReader, auth Auth) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(NewRouter(func() bool { return true },
 		testTeamStore(t), &fakeSpendReader{}, fakeProviderLister{}, fakeHealthReader{},
-		&fakeBreakerController{}, nil, fakeReloader, reader, requestLogRegistry(t),
-		nil, nil, nil, nil, QualityFeedbackConfig{}, false, nil, nil, nil, testMetrics(t), discardLogger()))
+		&fakeBreakerController{}, nil, fakeReloader, reader,
+		nil, nil, nil, QualityFeedbackConfig{}, false, nil, nil, auth, testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -130,49 +134,37 @@ func getWithKey(t *testing.T, srv *httptest.Server, path, key string) *http.Resp
 	return resp
 }
 
-// The headline control: a non-admin key is pinned to its own rows, and asking
-// for another team by query parameter is refused rather than quietly ignored.
-func TestListRequestsNonAdminCannotEscapeItsTeam(t *testing.T) {
-	t.Run("no team parameter pins to the caller", func(t *testing.T) {
-		reader := &fakeRequestLogReader{}
-		srv := newRequestLogServer(t, reader)
+// The fail-closed rule from Step 1.5: these views have no organisation filter
+// yet, so anyone who is not a superadmin is refused rather than served
+// unscoped. Phase 2, Step 2.2 must deliberately replace this.
+func TestRequestLogRefusesNonSuperadmin(t *testing.T) {
+	reader := &fakeRequestLogReader{}
+	srv := newRequestLogServerAs(t, reader, testAuth(false))
 
-		resp := getWithKey(t, srv, "/admin/requests", "globex-key")
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("status = %d, want 200", resp.StatusCode)
+	for _, path := range []string{"/admin/requests", "/admin/requests?team=acme", "/admin/requests/any-id"} {
+		if resp := get(t, srv, path); resp.StatusCode != http.StatusForbidden {
+			t.Errorf("GET %s: status = %d, want 403", path, resp.StatusCode)
 		}
-		if reader.gotFilter.TeamID != "globex" {
-			t.Errorf("filter team = %q, want %q", reader.gotFilter.TeamID, "globex")
-		}
-	})
-
-	t.Run("another team parameter is rejected", func(t *testing.T) {
-		reader := &fakeRequestLogReader{}
-		srv := newRequestLogServer(t, reader)
-
-		resp := getWithKey(t, srv, "/admin/requests?team=acme", "globex-key")
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400", resp.StatusCode)
-		}
-		if reader.gotFilter.TeamID != "" {
-			t.Error("the query reached the database despite being rejected")
-		}
-	})
+	}
+	if reader.gotFilter.TeamID != "" || reader.gotTeamID != "" {
+		t.Error("a refused request still reached the database")
+	}
 }
 
-// An admin key may look across teams, and may narrow to one.
-func TestListRequestsAdminSeesAcrossTeams(t *testing.T) {
+// A superadmin may look across teams, and may narrow to one -- unchanged from
+// what an admin key did.
+func TestListRequestsSuperadminSeesAcrossTeams(t *testing.T) {
 	reader := &fakeRequestLogReader{}
 	srv := newRequestLogServer(t, reader)
 
-	if resp := getWithKey(t, srv, "/admin/requests", "acme-key"); resp.StatusCode != http.StatusOK {
+	if resp := get(t, srv, "/admin/requests"); resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 	if reader.gotFilter.TeamID != "" {
 		t.Errorf("admin filter team = %q, want empty (all teams)", reader.gotFilter.TeamID)
 	}
 
-	if resp := getWithKey(t, srv, "/admin/requests?team=globex", "acme-key"); resp.StatusCode != http.StatusOK {
+	if resp := get(t, srv, "/admin/requests?team=globex"); resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 	if reader.gotFilter.TeamID != "globex" {
@@ -180,36 +172,27 @@ func TestListRequestsAdminSeesAcrossTeams(t *testing.T) {
 	}
 }
 
-// A non-admin fetching a row by id is scoped in the query itself, so a guessed
-// id cannot confirm another team's request even by its status code.
-func TestGetRequestScopesByTeam(t *testing.T) {
+// A superadmin reads any row; the scope passed to the store is empty.
+func TestGetRequestSuperadminScope(t *testing.T) {
 	reader := &fakeRequestLogReader{getErr: logstore.ErrNotFound}
 	srv := newRequestLogServer(t, reader)
 
-	resp := getWithKey(t, srv, "/admin/requests/somebody-elses-id", "globex-key")
-	if resp.StatusCode != http.StatusNotFound {
+	if resp := get(t, srv, "/admin/requests/missing-id"); resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", resp.StatusCode)
 	}
-	if reader.gotTeamID != "globex" {
-		t.Errorf("lookup scope = %q, want %q", reader.gotTeamID, "globex")
-	}
-
 	reader.getErr = nil
-	getWithKey(t, srv, "/admin/requests/any-id", "acme-key")
+	get(t, srv, "/admin/requests/any-id")
 	if reader.gotTeamID != "" {
-		t.Errorf("admin lookup scope = %q, want empty (any team)", reader.gotTeamID)
+		t.Errorf("superadmin lookup scope = %q, want empty (any team)", reader.gotTeamID)
 	}
 }
 
-func TestRequestLogRequiresAKey(t *testing.T) {
-	tests := map[string]string{"no key": "", "unknown key": "nope"}
-	for name, key := range tests {
-		t.Run(name, func(t *testing.T) {
-			srv := newRequestLogServer(t, &fakeRequestLogReader{})
-			if resp := getWithKey(t, srv, "/admin/requests", key); resp.StatusCode != http.StatusUnauthorized {
-				t.Errorf("status = %d, want 401", resp.StatusCode)
-			}
-		})
+// No session at all -- the state a request arrives in when the cookie is
+// missing or the middleware is not wired.
+func TestRequestLogRequiresASession(t *testing.T) {
+	srv := newRequestLogServerAs(t, &fakeRequestLogReader{}, Auth{})
+	if resp := get(t, srv, "/admin/requests"); resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", resp.StatusCode)
 	}
 }
 
@@ -248,7 +231,7 @@ func TestListRequestsParsesFilters(t *testing.T) {
 func TestRequestLogDisabledReports503(t *testing.T) {
 	srv := newRequestLogServer(t, nil)
 
-	resp := getWithKey(t, srv, "/admin/requests", "acme-key")
+	resp := get(t, srv, "/admin/requests")
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", resp.StatusCode)
 	}
@@ -259,4 +242,28 @@ func TestRequestLogDisabledReports503(t *testing.T) {
 	if body.Error.Type != "request_log_disabled" {
 		t.Errorf("error type = %q, want %q", body.Error.Type, "request_log_disabled")
 	}
+}
+
+// testAuth wires the router the way cmd/ does, minus identity: a middleware
+// that attaches a caller. Superadmin false is the fail-closed path that Phase 2
+// replaces with real organisation scoping.
+func testAuth(superadmin bool) Auth {
+	return Auth{Session: func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			c := Caller{UserID: "usr_test", OrgID: "personal", IsSuperadmin: superadmin, SessionID: "ses_test"}
+			next.ServeHTTP(w, r.WithContext(WithCaller(r.Context(), c)))
+		})
+	}}
+}
+
+// get issues a signed-in GET. The admin port no longer takes a key at all, so
+// there is nothing to pass: the session comes from testAuth.
+func get(t *testing.T, srv *httptest.Server, path string) *http.Response {
+	t.Helper()
+	resp, err := srv.Client().Get(srv.URL + path)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
 }

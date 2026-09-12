@@ -122,3 +122,19 @@ func TestAuthSurfacesUnexpectedErrorAs500(t *testing.T) {
 		t.Fatalf("status = %d, want 500", rec.Code)
 	}
 }
+
+// The other half of the identity boundary (Multi-user, Step 1.5).
+//
+// This is not hypothetical: cookies are scoped by host and ignore port, so a
+// browser signed in to the console at localhost:9090 genuinely attaches
+// sy_session to a localhost:8080 request. The gateway must not care. A dashboard
+// session authorises no completion; only a team key does.
+func TestSessionCookieIsIgnoredOnTheGatewayPort(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.AddCookie(&http.Cookie{Name: "sy_session", Value: "a.perfectly.valid.looking.session"})
+	req.AddCookie(&http.Cookie{Name: "sy_csrf", Value: "nonce.signature"})
+
+	if _, ok := bearerToken(req); ok {
+		t.Fatal("a cookie was accepted as a bearer token on the gateway port")
+	}
+}

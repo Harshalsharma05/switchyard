@@ -44,13 +44,13 @@ function BreakerDetail({ b }) {
 // ResetControl is inline (no modal) and never optimistic — it shows a pending
 // state and only clears once the server confirms, per DESIGN.md's control-plane
 // rule.
-function ResetControl({ provider, getKey, onDone }) {
+function ResetControl({ provider, onDone }) {
   const [phase, setPhase] = useState('idle') // idle | confirming | pending | error
 
   async function run() {
     setPhase('pending')
     try {
-      await resetProviderBreaker(getKey(), provider)
+      await resetProviderBreaker(provider)
       setPhase('idle')
       onDone()
     } catch {
@@ -78,7 +78,7 @@ function ResetControl({ provider, getKey, onDone }) {
   )
 }
 
-export default function BreakerViz({ providers, getKey, onReset }) {
+export default function BreakerViz({ providers, onReset }) {
   const groups = (providers ?? [])
     .map((p) => ({ provider: p.provider, breakers: p.breakers ?? [] }))
     .filter((g) => g.breakers.length > 0)
@@ -98,7 +98,7 @@ export default function BreakerViz({ providers, getKey, onReset }) {
         <section key={g.provider} className="breaker-group">
           <header className="breaker-group-head">
             <span className="breaker-group-name">{g.provider}</span>
-            <ResetControl provider={g.provider} getKey={getKey} onDone={onReset} />
+            <ResetControl provider={g.provider} onDone={onReset} />
           </header>
 
           {g.breakers.map((b) => (

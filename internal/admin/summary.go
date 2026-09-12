@@ -151,7 +151,7 @@ func toSummaryView(res summary.Result, health HealthReader, cacheEnabled, qualit
 
 // --- handler ----------------------------------------------------------
 
-func handleSummary(svc SummaryService, health HealthReader, cacheEnabled, qualityEnabled bool, authr KeyAuthenticator, log *slog.Logger) http.HandlerFunc {
+func handleSummary(svc SummaryService, health HealthReader, cacheEnabled, qualityEnabled bool, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if svc == nil {
 			writeError(w, log, http.StatusServiceUnavailable, "summary_disabled",
@@ -159,7 +159,7 @@ func handleSummary(svc SummaryService, health HealthReader, cacheEnabled, qualit
 			return
 		}
 
-		team, ok := authenticate(w, r, authr, log)
+		scope, ok := teamScope(w, r, log)
 		if !ok {
 			return
 		}
@@ -171,19 +171,6 @@ func handleSummary(svc SummaryService, health HealthReader, cacheEnabled, qualit
 		if !summary.ValidRange(rng) {
 			writeError(w, log, http.StatusBadRequest, "invalid_request_error",
 				"range must be one of 1h, 24h, 7d, 30d")
-			return
-		}
-
-		// Scope is the caller's own team unless it is an admin, which may pass
-		// ?team= to look across teams or at one other team. A non-admin naming
-		// another team is refused, not silently ignored — same rule as the
-		// request-log endpoints.
-		scope := team.ID
-		if team.IsAdmin {
-			scope = r.URL.Query().Get("team")
-		} else if want := r.URL.Query().Get("team"); want != "" && want != team.ID {
-			writeError(w, log, http.StatusBadRequest, "invalid_request_error",
-				"team "+team.ID+" may only read its own summary")
 			return
 		}
 
