@@ -26,7 +26,7 @@ func systemServer(t *testing.T, sys SystemReporter) *httptest.Server {
 	srv := httptest.NewServer(NewRouter(func() bool { return true },
 		registryStore{reg: reg}, &fakeSpendReader{}, configuredProviders(), fakeHealthReader{}, &fakeBreakerController{},
 		nil, fakeReloader, nil, reg, nil, nil, nil, nil, QualityFeedbackConfig{}, false, nil, sys,
-		testMetrics(t), discardLogger()))
+		nil, testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)
 	return srv
 }

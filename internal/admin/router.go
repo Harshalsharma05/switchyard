@@ -31,11 +31,19 @@ type Middleware func(http.Handler) http.Handler
 // Route paths carry an explicit /admin prefix even though the whole listener
 // is already the admin port, leaving room for /metrics and future operator
 // endpoints to live at the root without colliding with this namespace.
-func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers ProviderLister, healthReader HealthReader, breakers BreakerController, chaos ChaosController, reload Reloader, requestLog RequestLogReader, authr KeyAuthenticator, summarySvc SummaryService, cacheTuner CacheTuner, costCalc CostCalculator, routing RoutingInfo, qualityFeedback QualityFeedbackConfig, qualityEnabled bool, audit AuditRecorder, system SystemReporter, metrics *telemetry.Metrics, log *slog.Logger, middleware ...Middleware) http.Handler {
+func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers ProviderLister, healthReader HealthReader, breakers BreakerController, chaos ChaosController, reload Reloader, requestLog RequestLogReader, authr KeyAuthenticator, summarySvc SummaryService, cacheTuner CacheTuner, costCalc CostCalculator, routing RoutingInfo, qualityFeedback QualityFeedbackConfig, qualityEnabled bool, audit AuditRecorder, system SystemReporter, authRouter http.Handler, metrics *telemetry.Metrics, log *slog.Logger, middleware ...Middleware) http.Handler {
 	r := chi.NewRouter()
 
 	for _, mw := range middleware {
 		r.Use(mw)
+	}
+
+	// Dashboard sign-in. Built in cmd/ from internal/identity and handed in as
+	// an opaque handler, the same way Middleware is: this package never imports
+	// identity, so the two authentication systems cannot leak into each other.
+	// Nil when OAuth is unconfigured, and the routes simply do not exist.
+	if authRouter != nil {
+		r.Mount("/auth", authRouter)
 	}
 
 	r.Get("/healthz", healthz)

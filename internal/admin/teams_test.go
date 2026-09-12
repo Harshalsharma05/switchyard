@@ -127,7 +127,7 @@ func newTestAdminServer(t *testing.T, teams TeamStore, spend SpendReader, provid
 
 func newTestAdminServerWithReload(t *testing.T, teams TeamStore, spend SpendReader, providers ProviderLister, reload Reloader) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(NewRouter(func() bool { return true }, teams, spend, providers, fakeHealthReader{}, &fakeBreakerController{}, nil, reload, nil, nil, nil, nil, nil, nil, QualityFeedbackConfig{}, false, nil, nil, testMetrics(t), discardLogger()))
+	srv := httptest.NewServer(NewRouter(func() bool { return true }, teams, spend, providers, fakeHealthReader{}, &fakeBreakerController{}, nil, reload, nil, nil, nil, nil, nil, nil, QualityFeedbackConfig{}, false, nil, nil, nil, testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -581,7 +581,7 @@ func (failingAudit) ListAudit(context.Context, int, string) (logstore.AuditPage,
 func newCreateDeleteServer(t *testing.T, teams TeamStore, audit AuditRecorder) *httptest.Server {
 	t.Helper()
 	providers := fakeProviderLister{configs: []provider.Config{{Name: "groq", Models: []string{"m", "m2"}}}}
-	srv := httptest.NewServer(NewRouter(func() bool { return true }, teams, &fakeSpendReader{}, providers, fakeHealthReader{}, &fakeBreakerController{}, nil, fakeReloader, nil, nil, nil, nil, nil, nil, QualityFeedbackConfig{}, false, audit, nil, testMetrics(t), discardLogger()))
+	srv := httptest.NewServer(NewRouter(func() bool { return true }, teams, &fakeSpendReader{}, providers, fakeHealthReader{}, &fakeBreakerController{}, nil, fakeReloader, nil, nil, nil, nil, nil, nil, QualityFeedbackConfig{}, false, audit, nil, nil, testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)
 	return srv
 }

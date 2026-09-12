@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -26,7 +27,9 @@ import (
 	"github.com/Harshalsharma05/switchyard/internal/cache"
 	"github.com/Harshalsharma05/switchyard/internal/config"
 	"github.com/Harshalsharma05/switchyard/internal/health"
+	"github.com/Harshalsharma05/switchyard/internal/identity"
 	"github.com/Harshalsharma05/switchyard/internal/logstore"
+	"github.com/Harshalsharma05/switchyard/internal/oauth"
 	"github.com/Harshalsharma05/switchyard/internal/provider"
 	"github.com/Harshalsharma05/switchyard/internal/proxy"
 	"github.com/Harshalsharma05/switchyard/internal/quality"
@@ -49,7 +52,14 @@ const (
 	defaultRedisAddr     = "localhost:6379"
 	defaultPublicAddr    = ":8080"
 	defaultAdminAddr     = ":9090"
-	defaultDrainTimeout  = 25 * time.Second
+
+	// Must match the authorised redirect URI registered with Google exactly.
+	defaultOAuthRedirectURL = "http://localhost:9090/auth/google/callback"
+	// Where the browser lands after the callback. Same-origin paths, never
+	// taken from the request.
+	dashboardPath       = "/"
+	loginPath           = "/login"
+	defaultDrainTimeout = 25 * time.Second
 
 	// Health check cadence (Phase 5). These stay process-level env vars rather
 	// than configs/providers.yaml fields: every provider is probed on the same
@@ -560,6 +570,40 @@ func run() error {
 		summary:    summarySvc,
 	}
 
+	// Dashboard sign-in (Multi-user, Step 1.2). Humans authenticate here with
+	// Google; :8080 continues to authenticate team API keys and learns nothing
+	// about users. Unconfigured means the /auth routes are simply absent --
+	// the admin port is still gated by requireAdmin either way.
+	var authRouter http.Handler
+	{
+		clientID := os.Getenv("GOOGLE_CLIENT_ID")
+		clientSecret := os.Getenv("GOOGLE_CLIENT_SECRET")
+		jwtSecret := os.Getenv("JWT_SECRET")
+
+		switch {
+		case clientID == "" || clientSecret == "" || jwtSecret == "":
+			log.Warn("dashboard sign-in is disabled: set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET and JWT_SECRET to enable it")
+		default:
+			redirect := envOr("SWITCHYARD_OAUTH_REDIRECT_URL", defaultOAuthRedirectURL)
+			identityStore := identity.NewStore(dbPool,
+				os.Getenv("SWITCHYARD_SUPERADMIN_EMAIL"),
+				teamstore.DefaultOrgID, teamstore.DefaultOrgName, log)
+
+			if !identityStore.SuperadminConfigured() {
+				log.Warn("SWITCHYARD_SUPERADMIN_EMAIL is unset: no account will be created as superadmin")
+			}
+			authRouter = identity.NewHandlers(
+				oauth.Config{ClientID: clientID, ClientSecret: clientSecret, RedirectURL: redirect},
+				identityStore,
+				[]byte(jwtSecret),
+				dashboardPath, loginPath,
+				strings.HasPrefix(redirect, "https://"),
+				log,
+			).Routes()
+			log.Info("dashboard sign-in enabled", slog.String("redirect_url", redirect))
+		}
+	}
+
 	adminSrv := &http.Server{
 		Addr: envOr("SWITCHYARD_ADMIN_ADDR", defaultAdminAddr),
 		Handler: admin.NewRouter(isReady, store, budgetTracker, store, healthMonitor, breakerRegistry, chaosAdapter{chaos}, newReloader(store, providersPath), reqLogReader, store, summarySvc, cacheTuner, store, complexityRouter,
@@ -567,6 +611,7 @@ func run() error {
 			qualityWorker != nil,
 			auditRec,
 			sysInfo,
+			authRouter,
 			promMetrics, log,
 			proxy.Recoverer(log, promMetrics),
 			proxy.RequestID,

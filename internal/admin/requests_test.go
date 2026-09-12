@@ -108,7 +108,7 @@ func newRequestLogServer(t *testing.T, reader RequestLogReader) *httptest.Server
 	srv := httptest.NewServer(NewRouter(func() bool { return true },
 		testTeamStore(t), &fakeSpendReader{}, fakeProviderLister{}, fakeHealthReader{},
 		&fakeBreakerController{}, nil, fakeReloader, reader, requestLogRegistry(t),
-		nil, nil, nil, nil, QualityFeedbackConfig{}, false, nil, nil, testMetrics(t), discardLogger()))
+		nil, nil, nil, nil, QualityFeedbackConfig{}, false, nil, nil, nil, testMetrics(t), discardLogger()))
 	t.Cleanup(srv.Close)
 	return srv
 }
