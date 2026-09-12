@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -221,14 +222,16 @@ func TestBuildPopulatesAlignedSeries(t *testing.T) {
 }
 
 func TestBuildSeriesFailureDegradesButKeepsScalars(t *testing.T) {
-	// A fake that answers instant queries but fails range queries.
-	var n int
+	// A fake that answers instant queries but fails range queries. n is
+	// atomic because Build now issues the scalar queries concurrently, so
+	// this handler runs on more than one goroutine at once.
+	var n atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "query_range") {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		n++
+		n.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1700000000,"9"]}]}}`))
 	}))

@@ -819,3 +819,26 @@ Not part of the Go panic surface:
 - **Models are offered grouped under the providers that are ticked, and unticking a provider drops the models only it served.** The server only checks that each name exists, so without this a team could allowlist a model none of its permitted providers serve and 403 on every request. Cost: a model served by two providers appears under both.
 - **Delete stays enabled on your own row and explains itself on click.** DESIGN.md forbids disabling a button silently. The existing Revoke button still disables with only a tooltip — left as-is, but it is now inconsistent with Delete.
 - **Client-side checks are a courtesy; the server is authoritative.** Every failure renders the server's own message inline, with no optimistic update.
+
+---
+
+# Multi-User — Multi-Tenancy
+
+## Phase 0 — Prerequisites
+
+### Step 0.3 — Token lifetimes
+
+- **Access token 15 minutes, refresh token 30 days rotated on every use. The compromise window is ≤ 15 minutes**, stated as a number because there is no free answer. A stolen access cookie works until it expires and nothing can shorten that; a stolen refresh token works until the first legitimate rotation trips reuse detection. The plan framed this as "short tokens with refresh" versus "one long-lived token", but the latter was never available: a stateless JWT has nothing server-side to revoke, so it cannot satisfy "logout revokes server-side" at all. The only real choice was how wide the window is.
+- **Rejected: stateful sessions checked against Postgres on every admin request**, which would make the revocation window zero. Genuinely affordable — `:9090` is not the hot path and the 10ms budget is a `:8080` constraint — but it makes the JWT decorative, a signature verified and then ignored, and puts dashboard login on a hard Postgres dependency where a blip signs everyone out. Cost of choosing otherwise: 15 minutes of post-logout validity.
+- **Refresh keeps its original absolute expiry rather than sliding.** A session is bounded at 30 days however active it is. Cost: a daily user re-authenticates monthly with no security event to justify it.
+- **The refresh token is opaque random, not a JWT, stored SHA-256 hashed.** Its only job is a table lookup, so a signature would be dead weight. SHA-256 rather than argon2 for the same reason team API keys use it — 256 bits of entropy has nothing to brute-force, and a slow hash would only add latency.
+- **Reuse detection revokes every session for that user, not just the replayed token.** A refresh token presented twice is either a client race or a theft, and the two are indistinguishable from the server, so the safe reading is theft.
+
+### Scope — Google-only sign-in
+
+- **Email+password sign-in was cut, deleting plan Step 1.3 and leaving Google OAuth as the only credential.** Two credential types keyed to one email address create an account-linking attack surface: a stranger can pre-register an address they do not own, and when the real owner later arrives via Google the two identities collide with no safe automatic resolution. Closing it properly needs verified email delivery, which is its own dependency with its own deliverability work. Removing the credential type removes the problem rather than managing it.
+- **Cost: dashboard login now depends on a third party being reachable, and there is no offline first login.** The 30-day session covers the common case. `:8080` is untouched — the gateway keeps authenticating team keys with no external dependency, which is the availability constraint that actually matters.
+- **Cost: the consent screen is in Testing mode**, so only registered test users can sign in, capped at 100, until it is published.
+- **Rejected: keeping passwords and wiping the password hash whenever a Google identity links to the account.** It closes the pre-hijacking hole without email delivery, but it silently disables a legitimate user's password and leaves signup as an email-enumeration oracle — signup must answer "already registered" to some addresses and not others.
+- **The schema keeps the door open at no cost**: `password_hash` ships nullable and unwritten, under a `CHECK` that at least one credential is present. Adding password sign-in later is implementing a step, not migrating a table. Same precedent as `deleted_at` shipping one step before delete existed.
+- **The superadmin is identified by `SWITCHYARD_SUPERADMIN_EMAIL`, matched at first Google login.** A user row cannot be pre-created because the Google `sub` is unknown until that login, and `sub` — not email — is the identity key, since an address can be reassigned to a different person. Matching on email is safe only here, because the expected value comes from operator config rather than a form field. Rejected "first login wins": if the port is reachable before the operator signs in, a stranger takes superadmin.

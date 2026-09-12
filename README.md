@@ -310,6 +310,10 @@ test/                  black-box integration suite
 
 Every non-obvious choice — and the alternative it was chosen over — is in **[DECISIONS.md](DECISIONS.md)**, one section per phase across both parts: why token bucket over sliding window, why rate limiting fails open while budgets fail closed, why one probe in half-open, why the breaker is keyed per provider+model, why the cache is two tiers with the exact one first, why the classifier is lexical and never calls a model, why the quality worker drops samples rather than blocking, and why a team's allowlist beats provider availability. The [case study](CASE_STUDY.md) picks the one worth defending hardest.
 
+## Failure modes
+
+Every fail-open/fail-closed claim above is asserted with intent, not just tested in passing. **[docs/failure-modes.md](docs/failure-modes.md)** is the evidence: every dependency (Redis, Postgres, Jaeger, Prometheus, the embedding source, every provider, the quality worker) stopped one at a time and in combination against the live stack, with what a user sees, what an operator sees, and what recovers automatically versus what needs intervention. It also states the one honest exception plainly: a sustained Redis outage takes chat completions to 0% success, because budget's fail-closed check runs before every piece of resilience machinery — the rate limiter's fail-open design and the breaker's Redis-free local state are real, but currently unreachable when Redis is fully down. One bug the audit found (`/admin/summary` hanging 27s when Prometheus is down) is fixed there too.
+
 ## Out of scope
 
 Kubernetes, Terraform, cloud deployment, and auth beyond static API keys — all deliberately.

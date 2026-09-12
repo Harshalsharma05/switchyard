@@ -276,3 +276,34 @@ Same rules — out loud, from memory.
 8. `teams.yaml` still exists. What reads it, and when?
 9. Redis and Postgres are both down. Which features still work?
 10. Someone says your gateway is a single point of failure. What's your answer, and what in the repo backs it up?
+
+
+1. A request panics — what happens?
+The outermost Recoverer middleware catches it via defer/recover. It logs at error level with the full stack trace and request ID, increments switchyard_panics_total{route}, and returns a generic 500 — no internals leak into the body. If the panic happens mid-stream (status already sent), it reuses the existing stream-error path instead: an SSE error event, then close. The process keeps serving the next request either way.
+
+2. Why outermost, not inside auth?
+Because a panic in auth itself would escape uncaught if Recoverer sat behind it. Outermost means it wraps every other middleware, auth included — there's no position in the chain a panic can occur without being inside its defer.
+
+3. Quality worker panics in a loop — what stops it spinning?
+safeGo restarts it with backoff and a cap, not immediately. An instant restart on a tight-loop panic would spin at full CPU forever; backoff makes each restart cost something, so a persistently broken worker degrades to a slow trickle of restarts instead of a hot loop.
+
+4. Auth is now a DB lookup — how is it still under 10ms?
+It isn't, on the request path — that's the trick. Authenticate only ever reads an in-memory auth.Registry snapshot behind an atomic.Pointer. Postgres is touched only by a background ticker that rebuilds and swaps the whole snapshot every 30s. Zero I/O per request.
+
+5. Revoke a key — how long does it still work, and why non-zero?
+Instantly on the replica that did the revoke (write-through: Postgres first, then applied to its own snapshot). Up to 30s on every other replica, because they only learn about it on their next scheduled refresh, not a push. Non-zero because the alternative — a DB check on every request, or pub/sub for instant fleet-wide invalidation — trades away either the latency budget or adds a new failure mode; 30s is the accepted, stated cost.
+
+6. Postgres down, valid key not in cache — what happens?
+Rejected, 401. That situation means the key was created or rotated on another replica after this replica's last successful snapshot, and Postgres died before the next refresh could sync it here. The only alternative is falling back to a direct Postgres query on a cache miss — which reintroduces a dependency on the exact thing that's down. Auth never fails open, so "not yet synced" and "doesn't exist" get the same answer.
+
+7. Why does auth fail closed when everything else fails open?
+Asymmetric cost. Rate limiting or health degrading a little costs nothing security-wise. An auth bypass means anyone can use the gateway on someone else's dime — unbounded, irreversible. Same reasoning budget gets: money and access don't get the benefit of the doubt that request latency does.
+
+8. teams.yaml still exists — what reads it, and when?
+Only cmd/migrate, only once — on an empty teams table, at first boot. The instant any team exists in Postgres, it's never opened again. It's a seed, not a config file.
+
+9. Redis and Postgres both down — what still works?
+Team auth for any key already in the snapshot (unknown keys still refused). Panic recovery, the health checker, breaker state, and telemetry keep running locally. Chat completions do not work at all — budget's fail-closed check blocks every non-cached request with a 503 in under a second. Not partial degradation; zero success on the core function, by design.
+
+10. "Your gateway is a single point of failure" — what's your answer?
+Half true, and I'd say so rather than argue it away. Postgres, Jaeger, and Prometheus each degrade one narrow slice — team-store freshness, tracing, one dashboard — while completions keep working; that's not a SPOF. Redis is: because budget is unconditional and fail-closed, and runs before retry/fallback/the breaker, a sustained Redis outage takes completions to 0%. That's a deliberate trade — never lose track of spend — not an oversight, and docs/failure-modes.md is the live-tested proof, including that the breaker's own Redis-independent fallback is real code that's simply never reached in that scenario.

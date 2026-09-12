@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -166,62 +167,89 @@ func (s *Service) build(ctx context.Context, opts Options) Result {
 		teamSel = fmt.Sprintf("team=%q", opts.TeamID)
 	}
 
-	// q runs one query, flipping Degraded on a hard failure and returning nil
-	// for both failure and genuine no-data.
-	q := func(promql string) *float64 {
-		v, ok, err := s.prom.queryScalar(ctx, promql)
-		if err != nil {
-			r.Degraded = true
-			return nil
-		}
-		if !ok {
-			return nil
-		}
-		return &v
+	// These scalar queries and the series query below are independent
+	// Prometheus round trips — nothing here reads another query's result. Run
+	// them concurrently: issued one after another, a down Prometheus makes
+	// each of the ten pay its own HTTPTimeout in turn before failing, turning
+	// a 3s timeout into a ~30s hang on an endpoint whose own contract is to
+	// degrade quickly, not to block (caught live in Tier 1's Step 3.1 outage
+	// audit — 27s observed against a stopped Prometheus).
+	//
+	// degraded is an atomic.Bool, not a field on r, because it is the only
+	// thing more than one goroutine writes to. Every q() call below writes a
+	// distinct field of r through its own dst pointer, and the series
+	// goroutine writes only r.Series — each field has exactly one writer, so
+	// there is nothing else here for the race detector to catch.
+	var wg sync.WaitGroup
+	var degraded atomic.Bool
+
+	// q runs one query in its own goroutine, writing the result through dst.
+	// Mirrors the old synchronous q's semantics exactly: a hard failure flips
+	// degraded and leaves *dst nil; genuine no-data also leaves *dst nil.
+	q := func(dst **float64, promql string) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			v, ok, err := s.prom.queryScalar(ctx, promql)
+			switch {
+			case err != nil:
+				degraded.Store(true)
+			case ok:
+				*dst = &v
+			}
+		}()
 	}
 
 	reqTotal := selector("switchyard_requests_total", teamSel)
 	req5xx := selector("switchyard_requests_total", join(teamSel, `status=~"5.."`))
 	cost := selector("switchyard_cost_microdollars_total", teamSel)
 
-	r.RequestCount = q(fmt.Sprintf("sum(increase(%s[%s]))", reqTotal, win))
-	r.ErrorRate = q(fmt.Sprintf("sum(increase(%s[%s])) / sum(increase(%s[%s]))", req5xx, win, reqTotal, win))
-	r.OverheadP50 = q(overheadQuantile(0.5, win))
-	r.OverheadP95 = q(overheadQuantile(0.95, win))
-	r.OverheadP99 = q(overheadQuantile(0.99, win))
-	r.CostUSD = q(fmt.Sprintf("sum(increase(%s[%s])) / 1e6", cost, win))
+	q(&r.RequestCount, fmt.Sprintf("sum(increase(%s[%s]))", reqTotal, win))
+	q(&r.ErrorRate, fmt.Sprintf("sum(increase(%s[%s])) / sum(increase(%s[%s]))", req5xx, win, reqTotal, win))
+	q(&r.OverheadP50, overheadQuantile(0.5, win))
+	q(&r.OverheadP95, overheadQuantile(0.95, win))
+	q(&r.OverheadP99, overheadQuantile(0.99, win))
+	q(&r.CostUSD, fmt.Sprintf("sum(increase(%s[%s])) / 1e6", cost, win))
 
 	// Cache hit rate counts every lookup as the denominator, including the
 	// cheap misses that never reached the semantic tier — excluding those would
 	// flatter the number by dropping the requests the cache could not help.
 	cacheAll := selector("switchyard_cache_lookups_total", teamSel)
 	cacheHits := selector("switchyard_cache_lookups_total", join(teamSel, `result="hit"`))
-	r.CacheHitRate = q(fmt.Sprintf("sum(increase(%s[%s])) / sum(increase(%s[%s]))", cacheHits, win, cacheAll, win))
+	q(&r.CacheHitRate, fmt.Sprintf("sum(increase(%s[%s])) / sum(increase(%s[%s]))", cacheHits, win, cacheAll, win))
 
 	// Quality: the judge score histogram carries a team label, so a non-admin
 	// sees its own responses' scores. Sum over count is the mean; both come
 	// from the same histogram so they cannot disagree about the denominator.
 	qSum := selector("switchyard_quality_score_sum", teamSel)
 	qCount := selector("switchyard_quality_score_count", teamSel)
-	r.QualityScored = q(fmt.Sprintf("sum(increase(%s[%s]))", qCount, win))
-	r.QualityAvg = q(fmt.Sprintf("sum(increase(%s[%s])) / sum(increase(%s[%s]))", qSum, win, qCount, win))
-	if r.QualityAvg != nil && math.IsNaN(*r.QualityAvg) {
-		r.QualityAvg = nil
-	}
+	q(&r.QualityScored, fmt.Sprintf("sum(increase(%s[%s]))", qCount, win))
+	q(&r.QualityAvg, fmt.Sprintf("sum(increase(%s[%s])) / sum(increase(%s[%s]))", qSum, win, qCount, win))
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		series, err := s.buildSeries(ctx, opts, teamSel)
+		if err != nil {
+			degraded.Store(true)
+			return
+		}
+		r.Series = series
+	}()
+
+	wg.Wait()
+	r.Degraded = degraded.Load()
 
 	// A ratio with no denominator comes back from Prometheus as no-data, which
 	// q already maps to nil — but guard the pathological case anyway.
+	if r.QualityAvg != nil && math.IsNaN(*r.QualityAvg) {
+		r.QualityAvg = nil
+	}
 	if r.ErrorRate != nil && math.IsNaN(*r.ErrorRate) {
 		r.ErrorRate = nil
 	}
 	if r.CacheHitRate != nil && math.IsNaN(*r.CacheHitRate) {
 		r.CacheHitRate = nil
-	}
-
-	if series, err := s.buildSeries(ctx, opts, teamSel); err != nil {
-		r.Degraded = true
-	} else {
-		r.Series = series
 	}
 	return r
 }
