@@ -366,9 +366,11 @@ func TestSuperadminGrantIsAudited(t *testing.T) {
 		t.Fatalf("sign-in: %v", err)
 	}
 
-	var actor, after string
-	err = s.pool.QueryRow(ctx,
-		"SELECT actor_team_id, after::text FROM audit_log WHERE action='user.superadmin.grant'").Scan(&actor, &after)
+	var actor, org, after string
+	var superadmin bool
+	err = s.pool.QueryRow(ctx, `
+		SELECT actor_user_id, coalesce(organization_id, ''), superadmin, after::text
+		FROM audit_log WHERE action='user.superadmin.grant'`).Scan(&actor, &org, &superadmin, &after)
 	if err != nil {
 		t.Fatalf("reading audit entry: %v", err)
 	}
@@ -377,6 +379,15 @@ func TestSuperadminGrantIsAudited(t *testing.T) {
 	}
 	if !contains(after, bootstrapReason) {
 		t.Errorf("audit entry does not record why: %s", after)
+	}
+	// A bootstrap grant changes the platform, not a tenant's resources, so it is
+	// filed against no organisation and stays superadmin-only. A tenant read
+	// filters on organization_id, which a NULL never matches.
+	if org != "" {
+		t.Errorf("organization = %q, want none: a bootstrap grant belongs to no tenant", org)
+	}
+	if !superadmin {
+		t.Error("a superadmin grant must be recorded as a superadmin action")
 	}
 }
 

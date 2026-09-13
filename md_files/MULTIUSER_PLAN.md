@@ -304,6 +304,7 @@ Expected: 404 everywhere. **Not 403** — a 403 confirms the resource exists, wh
 - **Token tampering**: modify the org claim in the JWT and replay. Signature verification must reject it.
 - **Expired and revoked**: does a revoked refresh token still mint access tokens?
 - **Cross-identity**: team key against `:9090`, session cookie against `:8080` — both must fail. Re-verify here even though Phase 1 tested it.
+- **Audit visibility, both halves**: signed in as org A, have the superadmin rotate a key or reset a budget on one of org A's own projects. Org A **must** see that entry — that is what Step 2.5's reversal is for, and a log that hides it is the failure it was changed to prevent. In the same view, org A must **not** see the operator's identity (the actor reads `platform-operator`, with no address), and must **not** see any entry targeting org B, operator-taken or otherwise. Also confirm entries belonging to no tenant — a config reload, the bootstrap grants — appear for nobody but the superadmin.
 
 ### Step 4.4 — Write it up
 
@@ -322,6 +323,8 @@ Automate the highest-value cases as integration tests so a future change can't s
 - [ ] A tampered JWT org claim is rejected
 - [ ] Revoked refresh token cannot mint an access token
 - [ ] Cross-identity rejection re-verified both ways
+- [ ] **Org A sees operator actions on its own resources**, with the actor redacted to `platform-operator` and no actor address
+- [ ] Org A sees no entry targeting org B, and no entry belonging to no tenant (config reload, bootstrap grants)
 - [ ] Highest-value cases automated as integration tests
 - [ ] `docs/tenant-isolation.md` written; residual risks stated
 - [ ] `go test -race ./...` clean

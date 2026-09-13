@@ -67,20 +67,22 @@ func TestCostsScoping(t *testing.T) {
 		if resp := get(t, srv, "/admin/costs?by=team"); resp.StatusCode != http.StatusOK {
 			t.Fatalf("status = %d, want 200", resp.StatusCode)
 		}
-		if reader.gotCostQuery.TeamID != "" {
-			t.Errorf("scope = %q, want empty (all teams)", reader.gotCostQuery.TeamID)
+		if reader.gotCostQuery.TeamIDs != nil {
+			t.Errorf("scope = %v, want nil (all teams)", reader.gotCostQuery.TeamIDs)
 		}
 	})
 
-	t.Run("anyone else is refused and never reaches the database", func(t *testing.T) {
+	t.Run("a non-superadmin is scoped to their own org, not refused", func(t *testing.T) {
 		reader := &fakeRequestLogReader{}
 		srv := newRequestLogServerAs(t, reader, testAuth(false))
 
-		if resp := get(t, srv, "/admin/costs?team=acme"); resp.StatusCode != http.StatusForbidden {
-			t.Fatalf("status = %d, want 403", resp.StatusCode)
+		if resp := get(t, srv, "/admin/costs?team=globex"); resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
 		}
-		if reader.gotCostQuery.Dimension != "" {
-			t.Error("the query ran despite being refused")
+		// globex is a different org; the client-supplied ?team= is ignored and
+		// the caller's own org (acme) is used instead.
+		if want := []string{"acme"}; !slicesEqual(reader.gotCostQuery.TeamIDs, want) {
+			t.Errorf("scope = %v, want %v", reader.gotCostQuery.TeamIDs, want)
 		}
 	})
 
@@ -89,12 +91,12 @@ func TestCostsScoping(t *testing.T) {
 		srv := newRequestLogServer(t, reader)
 
 		get(t, srv, "/admin/costs")
-		if reader.gotCostQuery.TeamID != "" {
-			t.Errorf("admin unscoped = %q, want empty", reader.gotCostQuery.TeamID)
+		if reader.gotCostQuery.TeamIDs != nil {
+			t.Errorf("admin unscoped = %v, want nil", reader.gotCostQuery.TeamIDs)
 		}
 		get(t, srv, "/admin/costs?team=globex")
-		if reader.gotCostQuery.TeamID != "globex" {
-			t.Errorf("admin narrowed = %q, want globex", reader.gotCostQuery.TeamID)
+		if want := []string{"globex"}; !slicesEqual(reader.gotCostQuery.TeamIDs, want) {
+			t.Errorf("admin narrowed = %v, want %v", reader.gotCostQuery.TeamIDs, want)
 		}
 	})
 }

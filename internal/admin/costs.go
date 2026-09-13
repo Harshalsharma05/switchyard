@@ -46,14 +46,14 @@ type costsView struct {
 	Series      []costPointView `json:"series"`
 }
 
-func handleCosts(reqLog RequestLogReader, log *slog.Logger) http.HandlerFunc {
+func handleCosts(reqLog RequestLogReader, teams TeamStore, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if reqLog == nil {
 			writeRequestLogDisabled(w, log)
 			return
 		}
 
-		scope, ok := teamScope(w, r, log)
+		scope, ok := orgScope(w, r, teams, log)
 		if !ok {
 			return
 		}
@@ -86,7 +86,7 @@ func handleCosts(reqLog RequestLogReader, log *slog.Logger) http.HandlerFunc {
 			Since:     time.Now().UTC().Add(-spec.lookback),
 			Bucket:    spec.bucket,
 			Dimension: dim,
-			TeamID:    scope,
+			TeamIDs:   scope,
 		})
 		if err != nil {
 			log.ErrorContext(r.Context(), "querying cost series", slog.Any("error", err))

@@ -19,15 +19,25 @@ import (
 // gateway falls back to the slog-only audit trail it has always had.
 type AuditRecorder interface {
 	RecordAudit(ctx context.Context, e logstore.AuditEntry) error
-	ListAudit(ctx context.Context, limit int, cursor string) (logstore.AuditPage, error)
+	ListAudit(ctx context.Context, q logstore.AuditQuery) (logstore.AuditPage, error)
 }
 
 type auditEntryView struct {
-	ID         string         `json:"id"`
-	Timestamp  string         `json:"timestamp"`
-	Actor      string         `json:"actor"`
-	ActorAddr  string         `json:"actor_addr"`
-	Action     string         `json:"action"`
+	ID        string `json:"id"`
+	Timestamp string `json:"timestamp"`
+
+	// Actor is a user ID now rather than a team ID. The wire name stays "actor"
+	// so the console's audit table needs no change for the switch.
+	Actor     string `json:"actor"`
+	ActorAddr string `json:"actor_addr"`
+	Action    string `json:"action"`
+
+	// Organization and Superadmin matter only to a superadmin reading across
+	// tenants: everyone else sees their own organisation's non-superadmin
+	// entries and nothing else, so both fields would be constant.
+	Organization string `json:"organization_id,omitempty"`
+	Superadmin   bool   `json:"superadmin"`
+
 	TargetTeam string         `json:"target_team,omitempty"`
 	Before     map[string]any `json:"before"`
 	After      map[string]any `json:"after"`
@@ -40,23 +50,37 @@ type auditPageView struct {
 
 func toAuditView(e logstore.AuditEntry) auditEntryView {
 	return auditEntryView{
-		ID:         e.ID,
-		Timestamp:  e.Timestamp.UTC().Format(time.RFC3339Nano),
-		Actor:      e.ActorTeamID,
-		ActorAddr:  e.ActorAddr,
-		Action:     e.Action,
-		TargetTeam: e.TargetTeamID,
-		Before:     e.Before,
-		After:      e.After,
+		ID:           e.ID,
+		Timestamp:    e.Timestamp.UTC().Format(time.RFC3339Nano),
+		Actor:        e.ActorUserID,
+		ActorAddr:    e.ActorAddr,
+		Action:       e.Action,
+		Organization: e.OrganizationID,
+		Superadmin:   e.Superadmin,
+		TargetTeam:   e.TargetTeamID,
+		Before:       e.Before,
+		After:        e.After,
 	}
 }
 
-// listAudit serves GET /admin/audit. Admin-gated by the route group.
+// listAudit serves GET /admin/audit, scoped to the caller's own organisation.
+//
+// Step 2.5 opened this to org admins: an audit log exists so the people whose
+// resources changed can see what happened to them, which is no use if only an
+// operator can read it. The scope comes from the session's org claim, and
+// superadmin actions stay superadmin-only.
 func listAudit(rec AuditRecorder, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if rec == nil {
 			writeError(w, log, http.StatusServiceUnavailable, "audit_log_disabled",
 				"the audit log is not configured; set POSTGRES_PASSWORD to enable it")
+			return
+		}
+
+		c, ok := caller(r)
+		if !ok {
+			writeError(w, log, http.StatusUnauthorized, "no_session",
+				"this endpoint requires a signed-in session")
 			return
 		}
 
@@ -71,7 +95,12 @@ func listAudit(rec AuditRecorder, log *slog.Logger) http.HandlerFunc {
 			limit = n
 		}
 
-		page, err := rec.ListAudit(r.Context(), limit, r.URL.Query().Get("cursor"))
+		page, err := rec.ListAudit(r.Context(), logstore.AuditQuery{
+			OrgID:    c.OrgID,
+			Unscoped: c.IsSuperadmin,
+			Limit:    limit,
+			Cursor:   r.URL.Query().Get("cursor"),
+		})
 		if err != nil {
 			log.ErrorContext(r.Context(), "reading audit log", slog.Any("error", err))
 			writeError(w, log, http.StatusInternalServerError, "internal_error",

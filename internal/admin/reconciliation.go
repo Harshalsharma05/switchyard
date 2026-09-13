@@ -46,6 +46,11 @@ func handleReconciliation(teams TeamStore, spend SpendReader, reqLog RequestLogR
 			return
 		}
 
+		scope, ok := orgScope(w, r, teams, log)
+		if !ok {
+			return
+		}
+
 		now := time.Now().UTC()
 		monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 
@@ -65,7 +70,22 @@ func handleReconciliation(teams TeamStore, spend SpendReader, reqLog RequestLogR
 			Teams:           []reconcileTeamView{},
 		}
 
+		inScope := func(id string) bool {
+			if scope == nil {
+				return true
+			}
+			for _, s := range scope {
+				if s == id {
+					return true
+				}
+			}
+			return false
+		}
+
 		for _, t := range teams.List() {
+			if !inScope(t.ID) {
+				continue
+			}
 			logMicros := logByTeam[t.ID]
 			tv := reconcileTeamView{TeamID: t.ID, LogMicros: logMicros, LogUSD: microsToUSD(logMicros)}
 

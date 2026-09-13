@@ -278,8 +278,14 @@ func (s *Store) applyBootstrap(ctx context.Context, tx pgx.Tx, u User) (User, er
 }
 
 // audit writes one entry inside the caller's transaction, so the entry and the
-// change it describes land together or not at all. actor_team_id carries a user
-// ID here -- see DECISIONS.md, Step 1.5.
+// change it describes land together or not at all.
+//
+// Both entries this writes -- granting superadmin and claiming the imported
+// organisation -- are bootstrap actions on the deployment itself, not changes to
+// a tenant's own resources, so they are filed against no organisation and stay
+// superadmin-only. A tenant seeing entries about how the platform was set up
+// would be a disclosure without a purpose; which organisation each concerns is
+// still in its before/after delta for a superadmin reading them.
 func (s *Store) audit(ctx context.Context, tx pgx.Tx, actor, action string, before, after map[string]any) error {
 	id, err := newID("")
 	if err != nil {
@@ -294,8 +300,9 @@ func (s *Store) audit(ctx context.Context, tx pgx.Tx, actor, action string, befo
 		return fmt.Errorf("marshalling audit after: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO audit_log (id, ts, actor_team_id, actor_addr, action, target_team_id, before, after)
-		VALUES ($1, now(), $2, $3, $4, NULL, $5, $6)`,
+		INSERT INTO audit_log (id, ts, actor_user_id, actor_addr, action,
+		                       organization_id, superadmin, target_team_id, before, after)
+		VALUES ($1, now(), $2, $3, $4, NULL, true, NULL, $5, $6)`,
 		id, actor, "bootstrap", action, b, a); err != nil {
 		return dbErr("writing audit entry", err)
 	}

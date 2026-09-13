@@ -340,7 +340,7 @@ func (s *Store) writeThrough(id string, apply func(*auth.Registry) (auth.Team, e
 
 const selectTeamsSQL = `
 	SELECT id, organization_id, name, priority, rpm, tpm, monthly_budget_micros,
-	       allowed_providers, allowed_models, is_admin,
+	       allowed_providers, allowed_models, is_admin, cache_isolated,
 	       key_hash, key_source, key_masked, key_created_at
 	FROM teams
 	WHERE deleted_at IS NULL
@@ -361,7 +361,7 @@ func (s *Store) loadRegistry(ctx context.Context) (*auth.Registry, error) {
 		if err := rows.Scan(
 			&t.ID, &t.OrganizationID, &t.Name, &priority, &t.RateLimits.RPM, &t.RateLimits.TPM,
 			&t.MonthlyBudgetMicros, &t.AllowedProviders, &t.AllowedModels,
-			&t.IsAdmin, &keyHash, &t.KeySource, &t.KeyMasked, &t.KeyCreatedAt,
+			&t.IsAdmin, &t.CacheIsolated, &keyHash, &t.KeySource, &t.KeyMasked, &t.KeyCreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scanning team: %w", err)
 		}

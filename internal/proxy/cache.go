@@ -76,7 +76,11 @@ func (h *Handler) consultCache(r *http.Request, req chatRequest) (cache.Key, cac
 	ctx, span := telemetry.Tracer().Start(r.Context(), "switchyard.cache.lookup")
 	defer span.End()
 
-	key := cache.NewKey(team.ID, req.toProviderRequest())
+	key := cache.NewKey(cache.Scope{
+		Org:      team.OrganizationID,
+		Team:     team.ID,
+		Isolated: team.CacheIsolated,
+	}, req.toProviderRequest())
 	result := h.cache.Lookup(ctx, key)
 
 	if m := metricsFrom(r.Context()); m != nil {

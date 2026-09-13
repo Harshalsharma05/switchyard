@@ -27,7 +27,7 @@ func TestQualityFeedbackSince(t *testing.T) {
 		}
 	}
 
-	fb, err := w.QualityFeedbackSince(ctx, base.Add(-time.Hour), "", 3, 10)
+	fb, err := w.QualityFeedbackSince(ctx, base.Add(-time.Hour), nil, 3, 10)
 	if err != nil {
 		t.Fatalf("QualityFeedbackSince: %v", err)
 	}

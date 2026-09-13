@@ -93,9 +93,9 @@ func SeedDSN(ctx context.Context, dsn string, teams []auth.Team) (int, error) {
 const insertTeamSQL = `
 	INSERT INTO teams (
 		id, organization_id, name, priority, rpm, tpm, monthly_budget_micros,
-		allowed_providers, allowed_models, is_admin,
+		allowed_providers, allowed_models, is_admin, cache_isolated,
 		key_hash, key_source, key_masked, key_created_at
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`
 
 // execer is what insertTeam needs from its caller: a transaction in Seed, the
 // pool in Store.Create. Both pgx types satisfy it structurally, which is what
@@ -118,7 +118,7 @@ func insertTeam(ctx context.Context, db execer, t auth.Team) error {
 	_, err := db.Exec(ctx, insertTeamSQL,
 		t.ID, t.OrganizationID, t.Name, string(t.Priority),
 		t.RateLimits.RPM, t.RateLimits.TPM, t.MonthlyBudgetMicros,
-		t.AllowedProviders, t.AllowedModels, t.IsAdmin,
+		t.AllowedProviders, t.AllowedModels, t.IsAdmin, t.CacheIsolated,
 		keyHash, t.KeySource, t.KeyMasked, t.KeyCreatedAt,
 	)
 	return err

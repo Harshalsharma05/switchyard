@@ -21,13 +21,13 @@ import (
 // series behind /admin/costs.
 type RequestLogReader interface {
 	Query(ctx context.Context, f logstore.Filter) (logstore.Page, error)
-	Get(ctx context.Context, id, teamID string) (logstore.Record, error)
+	Get(ctx context.Context, id string, teamIDs []string) (logstore.Record, error)
 	SpendByTeamSince(ctx context.Context, since time.Time) (map[string]int64, error)
 	CostSeries(ctx context.Context, q logstore.CostQuery) ([]logstore.CostCell, error)
-	FallbackCostSince(ctx context.Context, since time.Time, teamID string) (logstore.FallbackAttribution, error)
-	CacheSavingsSince(ctx context.Context, since time.Time, teamID string) (logstore.CacheSavings, error)
-	RoutingSavingsSince(ctx context.Context, since time.Time, teamID string) (logstore.RoutingSavings, error)
-	QualityFeedbackSince(ctx context.Context, since time.Time, teamID string, lowScore float64, exampleLimit int) (logstore.QualityFeedback, error)
+	FallbackCostSince(ctx context.Context, since time.Time, teamIDs []string) (logstore.FallbackAttribution, error)
+	CacheSavingsSince(ctx context.Context, since time.Time, teamIDs []string) (logstore.CacheSavings, error)
+	RoutingSavingsSince(ctx context.Context, since time.Time, teamIDs []string) (logstore.RoutingSavings, error)
+	QualityFeedbackSince(ctx context.Context, since time.Time, teamIDs []string, lowScore float64, exampleLimit int) (logstore.QualityFeedback, error)
 }
 
 // CostCalculator prices what a cache hit would have cost had it been a real
@@ -109,14 +109,14 @@ func toRequestView(r logstore.Record) requestView {
 
 // --- handlers -----------------------------------------------------------
 
-func listRequests(reader RequestLogReader, log *slog.Logger) http.HandlerFunc {
+func listRequests(reader RequestLogReader, teams TeamStore, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if reader == nil {
 			writeRequestLogDisabled(w, log)
 			return
 		}
 
-		scope, ok := teamScope(w, r, log)
+		scope, ok := orgScope(w, r, teams, log)
 		if !ok {
 			return
 		}
@@ -143,14 +143,14 @@ func listRequests(reader RequestLogReader, log *slog.Logger) http.HandlerFunc {
 	}
 }
 
-func getRequest(reader RequestLogReader, log *slog.Logger) http.HandlerFunc {
+func getRequest(reader RequestLogReader, teams TeamStore, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if reader == nil {
 			writeRequestLogDisabled(w, log)
 			return
 		}
 
-		scope, ok := teamScope(w, r, log)
+		scope, ok := orgScope(w, r, teams, log)
 		if !ok {
 			return
 		}
@@ -176,14 +176,14 @@ func writeRequestLogDisabled(w http.ResponseWriter, log *slog.Logger) {
 }
 
 // parseFilter builds the query filter from the URL. The team scope is resolved
-// by teamScope from the caller's session, never taken from the query string by
+// by orgScope from the caller's session, never taken from the query string by
 // a caller who has not earned it.
-func parseFilter(r *http.Request, scope string) (logstore.Filter, error) {
+func parseFilter(r *http.Request, scope []string) (logstore.Filter, error) {
 	q := r.URL.Query()
 	f := logstore.Filter{
 		Provider: q.Get("provider"),
 		Model:    q.Get("model"),
-		TeamID:   scope,
+		TeamIDs:  scope,
 	}
 
 	if v := q.Get("status"); v != "" {

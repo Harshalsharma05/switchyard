@@ -19,12 +19,18 @@ type PurgeResult struct {
 // this instance also serves rate limiting and budget enforcement.
 const purgeBatch = 200
 
-// PurgeTeam removes every entry a team owns.
+// PurgeTeam removes every entry a team wrote.
 //
-// Fingerprint index membership is deliberately not cleaned up here: those
-// entries are gone, and Candidates prunes the dangling IDs the next time the
-// bucket is read. Chasing them now would mean scanning every index key to find
-// which buckets a deleted entry appeared in.
+// Since a team usually shares its organisation's cache scope, those entries may
+// have been serving other teams in the same organisation. Removing them anyway
+// is the intended meaning of a purge — "this answer is bad, stop serving it" —
+// and leaving them readable by a sibling team would make the endpoint useless.
+//
+// Fingerprint and scope index membership are deliberately not cleaned up here:
+// those entries are gone, Candidates prunes the dangling IDs the next time the
+// bucket is read, and the scope trim removes them oldest-first. Chasing them
+// now would mean scanning every index key to find which buckets a deleted entry
+// appeared in.
 func (s *Store) PurgeTeam(ctx context.Context, teamID string) (*PurgeResult, error) {
 	if strings.TrimSpace(teamID) == "" {
 		return nil, fmt.Errorf("purging cache: team id is required")
@@ -86,12 +92,16 @@ func (s *Store) PurgeAll(ctx context.Context) (*PurgeResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	scopes, err := s.scanKeys(ctx, keyPrefix+":scope:*", 0)
+	if err != nil {
+		return nil, err
+	}
 
 	entryCount, err := s.deleteKeys(ctx, entries)
 	if err != nil {
 		return nil, err
 	}
-	indexCount, err := s.deleteKeys(ctx, append(indexes, teams...))
+	indexCount, err := s.deleteKeys(ctx, append(append(indexes, teams...), scopes...))
 	if err != nil {
 		return nil, err
 	}

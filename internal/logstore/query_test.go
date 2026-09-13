@@ -90,11 +90,11 @@ func TestQueryFilters(t *testing.T) {
 		filter Filter
 		want   []string
 	}{
-		"by team":          {Filter{TeamID: "acme"}, []string{"a-ok", "a-429"}},
+		"by team":          {Filter{TeamIDs: []string{"acme"}}, []string{"a-ok", "a-429"}},
 		"by provider":      {Filter{Provider: "ollama"}, []string{"g-ok", "g-500"}},
 		"exact status":     {Filter{StatusCode: 429}, []string{"a-429"}},
 		"status class 4xx": {Filter{StatusMin: 400, StatusMax: 499}, []string{"a-429"}},
-		"team and status":  {Filter{TeamID: "globex", StatusCode: 500}, []string{"g-500"}},
+		"team and status":  {Filter{TeamIDs: []string{"globex"}, StatusCode: 500}, []string{"g-500"}},
 		"since 24h":        {Filter{Since: base.Add(-24 * time.Hour)}, []string{"a-ok", "a-429", "g-ok"}},
 	}
 
@@ -149,13 +149,13 @@ func TestGetScopedToTeam(t *testing.T) {
 	rec.TeamID = "acme"
 	seed(t, w, ctx, []Record{rec})
 
-	if _, err := w.Get(ctx, "owned-by-acme", "acme"); err != nil {
+	if _, err := w.Get(ctx, "owned-by-acme", []string{"acme"}); err != nil {
 		t.Errorf("owning team could not read its own row: %v", err)
 	}
-	if _, err := w.Get(ctx, "owned-by-acme", "globex"); err != ErrNotFound {
+	if _, err := w.Get(ctx, "owned-by-acme", []string{"globex"}); err != ErrNotFound {
 		t.Errorf("another team got %v, want ErrNotFound", err)
 	}
-	if _, err := w.Get(ctx, "owned-by-acme", ""); err != nil {
+	if _, err := w.Get(ctx, "owned-by-acme", nil); err != nil {
 		t.Errorf("unscoped admin read failed: %v", err)
 	}
 }
@@ -285,7 +285,7 @@ func TestFallbackCostSince(t *testing.T) {
 		mk("g-extra", "globex", d(999)),
 	})
 
-	acme, err := w.FallbackCostSince(ctx, now.Add(-time.Hour), "acme")
+	acme, err := w.FallbackCostSince(ctx, now.Add(-time.Hour), []string{"acme"})
 	if err != nil {
 		t.Fatalf("FallbackCostSince: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestFallbackCostSince(t *testing.T) {
 		t.Errorf("acme = %+v (net %d), want extra 800 / saved 200 / net 600", acme, acme.NetMicros())
 	}
 
-	all, err := w.FallbackCostSince(ctx, now.Add(-time.Hour), "")
+	all, err := w.FallbackCostSince(ctx, now.Add(-time.Hour), nil)
 	if err != nil {
 		t.Fatalf("FallbackCostSince all: %v", err)
 	}

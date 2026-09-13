@@ -20,44 +20,63 @@ func baseRequest() provider.Request {
 	}
 }
 
+// acmeScope is the baseline: team acme inside organisation personal.
+var acmeScope = Scope{Org: "personal", Team: "acme"}
+
 // The Phase 7 checklist turns entirely on which requests share a fingerprint.
 // Anything that changes the meaning of a response must land in a different
 // bucket, so a wrong answer here is served confidently rather than caught.
+//
+// The scope cases are Multi-user Step 2.3's: an organisation is the sharing
+// boundary, and nothing crosses it.
 func TestFingerprintSeparation(t *testing.T) {
 	tests := map[string]struct {
 		mutate   func(*provider.Request)
-		teamID   string
+		scope    Scope
 		wantSame bool
 	}{
 		"identical": {
-			mutate: func(*provider.Request) {}, teamID: "acme", wantSame: true,
+			mutate: func(*provider.Request) {}, scope: acmeScope, wantSame: true,
 		},
 		"different system prompt": {
 			mutate: func(r *provider.Request) { r.Messages[0].Content = "You are a pirate." },
-			teamID: "acme",
+			scope:  acmeScope,
 		},
 		"different model": {
 			mutate: func(r *provider.Request) { r.Model = "openai/gpt-oss-20b" },
-			teamID: "acme",
+			scope:  acmeScope,
 		},
 		"different temperature": {
 			mutate: func(r *provider.Request) { r.Temperature = f32(0.2) },
-			teamID: "acme",
+			scope:  acmeScope,
 		},
 		"temperature unset": {
 			mutate: func(r *provider.Request) { r.Temperature = nil },
-			teamID: "acme",
+			scope:  acmeScope,
 		},
 		"different max tokens": {
 			mutate: func(r *provider.Request) { r.MaxTokens = 1024 },
-			teamID: "acme",
+			scope:  acmeScope,
 		},
 		"different stop sequence": {
 			mutate: func(r *provider.Request) { r.Stop = []string{"\n\n"} },
-			teamID: "acme",
+			scope:  acmeScope,
 		},
-		"different team": {
-			mutate: func(*provider.Request) {}, teamID: "globex",
+		// A sibling project in the same organisation now shares the cache. This
+		// is the one case Step 2.3 deliberately widened: the same person asking
+		// the same question from two projects should not pay twice.
+		"sibling team in the same org": {
+			mutate: func(*provider.Request) {}, scope: Scope{Org: "personal", Team: "globex"},
+			wantSame: true,
+		},
+		// The boundary that matters. A different organisation must never reach
+		// this entry, however identical the request.
+		"team in a different org": {
+			mutate: func(*provider.Request) {}, scope: Scope{Org: "other-org", Team: "globex"},
+		},
+		// The opt-out: an isolated team gets its own scope even inside its org.
+		"isolated team in the same org": {
+			mutate: func(*provider.Request) {}, scope: Scope{Org: "personal", Team: "acme", Isolated: true},
 		},
 		"different prior turn": {
 			mutate: func(r *provider.Request) {
@@ -66,27 +85,53 @@ func TestFingerprintSeparation(t *testing.T) {
 					{Role: provider.RoleAssistant, Content: "Hi there"},
 				}, r.Messages[1])
 			},
-			teamID: "acme",
+			scope: acmeScope,
 		},
 		// Streaming is a delivery detail, not a change of meaning: Step 7.5
 		// replays the same stored content as chunks.
 		"streaming flag": {
-			mutate: func(r *provider.Request) { r.Stream = true }, teamID: "acme", wantSame: true,
+			mutate: func(r *provider.Request) { r.Stream = true }, scope: acmeScope, wantSame: true,
 		},
 	}
 
-	want := NewKey("acme", baseRequest())
+	want := NewKey(acmeScope, baseRequest())
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			req := baseRequest()
 			tc.mutate(&req)
-			got := NewKey(tc.teamID, req)
+			got := NewKey(tc.scope, req)
 
 			if same := got.Fingerprint == want.Fingerprint; same != tc.wantSame {
 				t.Fatalf("fingerprint same = %v, want %v", same, tc.wantSame)
 			}
 		})
+	}
+}
+
+// A team with no organisation falls back to team scoping. Without this, every
+// org-less team would hash to the same "org:" scope and pool their answers —
+// a cross-tenant leak introduced by the change meant to prevent one.
+func TestOrglessTeamsDoNotShareAScope(t *testing.T) {
+	a := NewKey(Scope{Team: "acme"}, baseRequest())
+	b := NewKey(Scope{Team: "globex"}, baseRequest())
+
+	if a.Fingerprint == b.Fingerprint {
+		t.Fatal("two teams with no organisation must not share a cache scope")
+	}
+	if a.ScopeID != "team:acme" {
+		t.Errorf("scope id = %q, want team:acme", a.ScopeID)
+	}
+}
+
+// An organisation and a team that happen to share an ID must not collide into
+// one scope, which is what the org:/team: prefixes are for.
+func TestScopeIDNamespacesOrgAndTeam(t *testing.T) {
+	shared := NewKey(Scope{Org: "shared-name", Team: "x"}, baseRequest())
+	isolated := NewKey(Scope{Team: "shared-name", Isolated: true}, baseRequest())
+
+	if shared.ScopeID == isolated.ScopeID {
+		t.Fatalf("org and team scope ids collided at %q", shared.ScopeID)
 	}
 }
 
@@ -99,7 +144,7 @@ func TestTemperatureNilIsNotZero(t *testing.T) {
 	unset.Temperature = nil
 	zero.Temperature = f32(0)
 
-	if NewKey("acme", unset).Fingerprint == NewKey("acme", zero).Fingerprint {
+	if NewKey(acmeScope, unset).Fingerprint == NewKey(acmeScope, zero).Fingerprint {
 		t.Fatal("unset temperature must not share a fingerprint with 0.0")
 	}
 }
@@ -108,11 +153,11 @@ func TestQueryExtractionAndNormalization(t *testing.T) {
 	req := baseRequest()
 	req.Messages[1].Content = "  What is   the capital\n of France?  "
 
-	got := NewKey("acme", req)
+	got := NewKey(acmeScope, req)
 	if got.Query != "What is the capital of France?" {
 		t.Fatalf("query = %q", got.Query)
 	}
-	if got.EntryID != NewKey("acme", baseRequest()).EntryID {
+	if got.EntryID != NewKey(acmeScope, baseRequest()).EntryID {
 		t.Fatal("whitespace-only reformatting should reach the same entry")
 	}
 }

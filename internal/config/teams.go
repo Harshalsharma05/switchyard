@@ -39,9 +39,14 @@ type teamEntry struct {
 
 	Priority string `yaml:"priority"`
 
-	// IsAdmin grants cross-team read access on the admin API's request-log
-	// endpoints. Absent means false, so a team is non-admin unless it says so.
+	// IsAdmin is vestigial and grants nothing — see auth.Team.IsAdmin. Kept so
+	// an existing seed file still parses.
 	IsAdmin bool `yaml:"is_admin"`
+
+	// CacheIsolated opts this team out of sharing its organisation's semantic
+	// cache. Absent means false — sharing — which is what a single-organisation
+	// deployment wants.
+	CacheIsolated bool `yaml:"cache_isolated"`
 }
 
 // --- loading ------------------------------------------------------------
@@ -151,6 +156,7 @@ func (e teamEntry) resolve(label string) (auth.Team, error) {
 		MonthlyBudgetMicros: usdToMicros(e.MonthlyBudgetUSD),
 		Priority:            priority,
 		IsAdmin:             e.IsAdmin,
+		CacheIsolated:       e.CacheIsolated,
 		KeySource:           auth.KeySourceConfig,
 	}, nil
 }

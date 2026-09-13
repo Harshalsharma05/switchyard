@@ -46,6 +46,8 @@ type cacheEntry struct {
 	ReadTimeout  string `yaml:"read_timeout"`
 	WriteTimeout string `yaml:"write_timeout"`
 
+	MaxEntriesPerTenant int `yaml:"max_entries_per_tenant"`
+
 	TTL struct {
 		Default string         `yaml:"default"`
 		Max     string         `yaml:"max"`
@@ -109,10 +111,14 @@ func LoadCache(path string) (Cache, error) {
 	if e.Semantic.MaxCandidates < 0 {
 		return Cache{}, fmt.Errorf("%s: semantic.max_candidates must not be negative", path)
 	}
+	if e.MaxEntriesPerTenant < 0 {
+		return Cache{}, fmt.Errorf("%s: max_entries_per_tenant must not be negative", path)
+	}
 	out.Store = cache.StoreConfig{
-		MaxCandidates: e.Semantic.MaxCandidates,
-		ReadTimeout:   readTimeout,
-		WriteTimeout:  writeTimeout,
+		MaxCandidates:   e.Semantic.MaxCandidates,
+		MaxScopeEntries: e.MaxEntriesPerTenant,
+		ReadTimeout:     readTimeout,
+		WriteTimeout:    writeTimeout,
 	}
 
 	// A threshold outside [-1, 1] cannot be reached by a cosine similarity, so

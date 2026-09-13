@@ -69,38 +69,55 @@ func NewRouter(ready func() bool, teams TeamStore, spend SpendReader, providers 
 			r.Use(auth.CSRF)
 		}
 
-		r.Get("/admin/summary", handleSummary(summarySvc, healthReader, cacheTuner != nil, qualityEnabled, log))
-		r.Get("/admin/requests", listRequests(requestLog, log))
-		r.Get("/admin/requests/{id}", getRequest(requestLog, log))
-		r.Get("/admin/costs", handleCosts(requestLog, log))
-		r.Get("/admin/attribution", handleAttribution(requestLog, costCalc, log))
+		r.Get("/admin/summary", handleSummary(summarySvc, teams, healthReader, cacheTuner != nil, qualityEnabled, log))
+		r.Get("/admin/requests", listRequests(requestLog, teams, log))
+		r.Get("/admin/requests/{id}", getRequest(requestLog, teams, log))
+		r.Get("/admin/costs", handleCosts(requestLog, teams, log))
+		r.Get("/admin/attribution", handleAttribution(requestLog, costCalc, teams, log))
 		r.Get("/admin/providers", listProviders(providers, log))
 		r.Get("/admin/providers/health", listProviderHealth(healthReader, breakers, log))
 
-		// Everything that crosses tenants. Superadmin-only until Phase 2
-		// splits org admin from superadmin -- fail closed, not unscoped.
+		// Org-admin surface (Step 2.4). Every signed-in user is an admin of
+		// their own organisation, so these need no extra gate -- each one scopes
+		// itself by the caller's org claim, and a resource outside it is a 404.
+		r.Route("/admin/teams", func(r chi.Router) {
+			r.Get("/", listTeams(teams, spend, log))
+			r.Post("/", createTeam(teams, providers, audit, log))
+			r.Get("/{id}", getTeam(teams, spend, log))
+			r.Patch("/{id}", patchTeam(teams, spend, audit, log))
+			r.Delete("/{id}", deleteTeam(teams, audit, log))
+			r.Post("/{id}/reset-budget", resetBudget(teams, spend, audit, log))
+			r.Post("/{id}/key/rotate", rotateKey(teams, audit, log))
+			r.Delete("/{id}/key", revokeKey(teams, audit, log))
+		})
+
+		r.Get("/admin/reconciliation", handleReconciliation(teams, spend, requestLog, log))
+		r.Get("/admin/quality/feedback", handleQualityFeedback(requestLog, teams, qualityFeedback, log))
+
+		// Org-scoped since Step 2.5: a user sees what changed in their own
+		// organisation. Superadmin actions stay superadmin-only, filtered in the
+		// query rather than at the route, since one endpoint serves both.
+		r.Get("/admin/audit", listAudit(audit, log))
+
+		// Mixed: purging one team is an org-admin action, purging by prefix or
+		// purging everything is superadmin-only. The handler splits them.
+		r.Delete("/admin/cache", purgeCache(cacheTuner, teams, log))
+
+		// What genuinely crosses tenants or changes the whole deployment.
 		r.Group(func(r chi.Router) {
 			r.Use(requireSuperadmin(log))
 
-			r.Route("/admin/teams", func(r chi.Router) {
-				r.Get("/", listTeams(teams, spend, log))
-				r.Post("/", createTeam(teams, providers, audit, log))
-				r.Get("/{id}", getTeam(teams, spend, log))
-				r.Patch("/{id}", patchTeam(teams, spend, audit, log))
-				r.Delete("/{id}", deleteTeam(teams, audit, log))
-				r.Post("/{id}/reset-budget", resetBudget(teams, spend, audit, log))
-				r.Post("/{id}/key/rotate", rotateKey(teams, audit, log))
-				r.Delete("/{id}/key", revokeKey(teams, audit, log))
-			})
-
-			r.Get("/admin/audit", listAudit(audit, log))
+			// Deployment facts, not tenant data: version, config fingerprint,
+			// and which backing services are reachable.
 			r.Get("/admin/system", handleSystem(system, providers, log))
-			r.Get("/admin/reconciliation", handleReconciliation(teams, spend, requestLog, log))
+
 			r.Post("/admin/providers/{name}/breaker/reset", resetBreaker(breakers, providers, log))
 			r.Post("/admin/reload", reloadConfig(reload, audit, log))
+
+			// The sweep reads every tenant's fingerprint buckets and reports one
+			// aggregate over all of them, so even though it returns no prompt
+			// text it is a cross-tenant number.
 			r.Get("/admin/cache/tune", tuneCache(cacheTuner, log))
-			r.Get("/admin/quality/feedback", handleQualityFeedback(requestLog, qualityFeedback, log))
-			r.Delete("/admin/cache", purgeCache(cacheTuner, log))
 
 			r.Route("/admin/chaos", func(r chi.Router) {
 				r.Get("/", getChaos(chaos, log))

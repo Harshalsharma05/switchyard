@@ -13,14 +13,14 @@ import (
 )
 
 // fakeRequestLogReader records the filter it was handed, which is how these
-// tests assert on scoping: what matters is the TeamID the handler resolved,
+// tests assert on scoping: what matters is the TeamIDs the handler resolved,
 // not what a stub database would return for it.
 type fakeRequestLogReader struct {
 	qualityFeedback    logstore.QualityFeedback
 	qualityFeedbackErr error
 	gotFilter          logstore.Filter
 	gotID              string
-	gotTeamID          string
+	gotTeamIDs         []string
 	page               logstore.Page
 	record             logstore.Record
 	getErr             error
@@ -45,8 +45,8 @@ func (f *fakeRequestLogReader) Query(_ context.Context, filter logstore.Filter) 
 	return f.page, nil
 }
 
-func (f *fakeRequestLogReader) Get(_ context.Context, id, teamID string) (logstore.Record, error) {
-	f.gotID, f.gotTeamID = id, teamID
+func (f *fakeRequestLogReader) Get(_ context.Context, id string, teamIDs []string) (logstore.Record, error) {
+	f.gotID, f.gotTeamIDs = id, teamIDs
 	return f.record, f.getErr
 }
 
@@ -59,39 +59,41 @@ func (f *fakeRequestLogReader) CostSeries(_ context.Context, q logstore.CostQuer
 	return f.costCells, f.costErr
 }
 
-func (f *fakeRequestLogReader) CacheSavingsSince(_ context.Context, _ time.Time, teamID string) (logstore.CacheSavings, error) {
-	f.gotTeamID = teamID
+func (f *fakeRequestLogReader) CacheSavingsSince(_ context.Context, _ time.Time, teamIDs []string) (logstore.CacheSavings, error) {
+	f.gotTeamIDs = teamIDs
 	return f.cacheSavings, f.cacheSavingsErr
 }
 
-func (f *fakeRequestLogReader) RoutingSavingsSince(_ context.Context, _ time.Time, teamID string) (logstore.RoutingSavings, error) {
-	f.gotTeamID = teamID
+func (f *fakeRequestLogReader) RoutingSavingsSince(_ context.Context, _ time.Time, teamIDs []string) (logstore.RoutingSavings, error) {
+	f.gotTeamIDs = teamIDs
 	return f.routingSavings, f.routingSavingsErr
 }
 
-func (f *fakeRequestLogReader) FallbackCostSince(_ context.Context, _ time.Time, teamID string) (logstore.FallbackAttribution, error) {
-	f.gotTeamID = teamID
+func (f *fakeRequestLogReader) FallbackCostSince(_ context.Context, _ time.Time, teamIDs []string) (logstore.FallbackAttribution, error) {
+	f.gotTeamIDs = teamIDs
 	return f.fallbackAttr, f.fallbackErr
 }
 
-func (f *fakeRequestLogReader) QualityFeedbackSince(_ context.Context, _ time.Time, teamID string, _ float64, _ int) (logstore.QualityFeedback, error) {
-	f.gotTeamID = teamID
+func (f *fakeRequestLogReader) QualityFeedbackSince(_ context.Context, _ time.Time, teamIDs []string, _ float64, _ int) (logstore.QualityFeedback, error) {
+	f.gotTeamIDs = teamIDs
 	return f.qualityFeedback, f.qualityFeedbackErr
 }
 
 // requestLogRegistry mirrors testTeamStore but marks acme as admin, which is
-// the distinction every scoping test in this file turns on.
+// the distinction every scoping test in this file turns on. Like
+// testTeamStore, acme sits in "personal" (testAuth's non-superadmin org) and
+// globex sits elsewhere, so org-scoping tests have something real to assert.
 func requestLogRegistry(t *testing.T) *auth.Registry {
 	t.Helper()
 	r, err := auth.NewRegistry([]auth.Team{
 		{
-			ID: "acme", Name: "Acme Corp", KeyHash: auth.HashKey("acme-key"),
+			ID: "acme", Name: "Acme Corp", OrganizationID: "personal", KeyHash: auth.HashKey("acme-key"),
 			AllowedProviders: []string{"groq"}, AllowedModels: []string{"m"},
 			RateLimits: auth.RateLimits{RPM: 60, TPM: 100_000}, MonthlyBudgetMicros: 50_000_000,
 			Priority: auth.PriorityRealtime, IsAdmin: true,
 		},
 		{
-			ID: "globex", Name: "Globex Inc", KeyHash: auth.HashKey("globex-key"),
+			ID: "globex", Name: "Globex Inc", OrganizationID: "other-org", KeyHash: auth.HashKey("globex-key"),
 			AllowedProviders: []string{"groq"}, AllowedModels: []string{"m"},
 			RateLimits: auth.RateLimits{RPM: 10, TPM: 20_000}, MonthlyBudgetMicros: 5_000_000,
 			Priority: auth.PriorityBatch,
@@ -134,20 +136,28 @@ func getWithKey(t *testing.T, srv *httptest.Server, path, key string) *http.Resp
 	return resp
 }
 
-// The fail-closed rule from Step 1.5: these views have no organisation filter
-// yet, so anyone who is not a superadmin is refused rather than served
-// unscoped. Phase 2, Step 2.2 must deliberately replace this.
-func TestRequestLogRefusesNonSuperadmin(t *testing.T) {
+// Step 2.2: a non-superadmin is no longer flatly refused. They are scoped to
+// every team in their own organisation -- here, exactly "acme" -- never to
+// globex, which sits in a different org, and never to every team the way a
+// superadmin is.
+func TestRequestLogScopesNonSuperadminToOwnOrg(t *testing.T) {
 	reader := &fakeRequestLogReader{}
 	srv := newRequestLogServerAs(t, reader, testAuth(false))
 
-	for _, path := range []string{"/admin/requests", "/admin/requests?team=acme", "/admin/requests/any-id"} {
-		if resp := get(t, srv, path); resp.StatusCode != http.StatusForbidden {
-			t.Errorf("GET %s: status = %d, want 403", path, resp.StatusCode)
-		}
+	if resp := get(t, srv, "/admin/requests"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-	if reader.gotFilter.TeamID != "" || reader.gotTeamID != "" {
-		t.Error("a refused request still reached the database")
+	if want := []string{"acme"}; !slicesEqual(reader.gotFilter.TeamIDs, want) {
+		t.Errorf("filter team ids = %v, want %v", reader.gotFilter.TeamIDs, want)
+	}
+
+	// A client-supplied ?team= is not an escape hatch: the org's own team list
+	// is what decides scope, not the query string.
+	if resp := get(t, srv, "/admin/requests?team=globex"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if want := []string{"acme"}; !slicesEqual(reader.gotFilter.TeamIDs, want) {
+		t.Errorf("filter team ids = %v, want %v (ignoring the client-supplied ?team=)", reader.gotFilter.TeamIDs, want)
 	}
 }
 
@@ -160,19 +170,19 @@ func TestListRequestsSuperadminSeesAcrossTeams(t *testing.T) {
 	if resp := get(t, srv, "/admin/requests"); resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-	if reader.gotFilter.TeamID != "" {
-		t.Errorf("admin filter team = %q, want empty (all teams)", reader.gotFilter.TeamID)
+	if reader.gotFilter.TeamIDs != nil {
+		t.Errorf("admin filter team ids = %v, want nil (all teams)", reader.gotFilter.TeamIDs)
 	}
 
 	if resp := get(t, srv, "/admin/requests?team=globex"); resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-	if reader.gotFilter.TeamID != "globex" {
-		t.Errorf("admin filter team = %q, want %q", reader.gotFilter.TeamID, "globex")
+	if want := []string{"globex"}; !slicesEqual(reader.gotFilter.TeamIDs, want) {
+		t.Errorf("admin filter team ids = %v, want %v", reader.gotFilter.TeamIDs, want)
 	}
 }
 
-// A superadmin reads any row; the scope passed to the store is empty.
+// A superadmin reads any row; the scope passed to the store is nil (no filter).
 func TestGetRequestSuperadminScope(t *testing.T) {
 	reader := &fakeRequestLogReader{getErr: logstore.ErrNotFound}
 	srv := newRequestLogServer(t, reader)
@@ -182,9 +192,36 @@ func TestGetRequestSuperadminScope(t *testing.T) {
 	}
 	reader.getErr = nil
 	get(t, srv, "/admin/requests/any-id")
-	if reader.gotTeamID != "" {
-		t.Errorf("superadmin lookup scope = %q, want empty (any team)", reader.gotTeamID)
+	if reader.gotTeamIDs != nil {
+		t.Errorf("superadmin lookup scope = %v, want nil (any team)", reader.gotTeamIDs)
 	}
+}
+
+// A non-superadmin reading another org's row by id gets 404, the same answer
+// as a genuinely missing row -- never 403, which would confirm the row exists.
+func TestGetRequestOutsideOrgIsNotFound(t *testing.T) {
+	reader := &fakeRequestLogReader{getErr: logstore.ErrNotFound}
+	srv := newRequestLogServerAs(t, reader, testAuth(false))
+
+	resp := get(t, srv, "/admin/requests/globex-row")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+	if want := []string{"acme"}; !slicesEqual(reader.gotTeamIDs, want) {
+		t.Errorf("lookup scope = %v, want %v", reader.gotTeamIDs, want)
+	}
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // No session at all -- the state a request arrives in when the cookie is

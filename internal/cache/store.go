@@ -34,10 +34,11 @@ type Entry struct {
 // the caller turns them into a miss, because a cache outage must not fail a
 // request.
 type Store struct {
-	rdb           *redis.Client
-	maxCandidates int
-	readTimeout   time.Duration
-	writeTimeout  time.Duration
+	rdb             *redis.Client
+	maxCandidates   int
+	maxScopeEntries int
+	readTimeout     time.Duration
+	writeTimeout    time.Duration
 }
 
 // StoreConfig tunes the Redis layer. Defaults are applied for zero values.
@@ -47,6 +48,15 @@ type StoreConfig struct {
 	// index, so this cap is what keeps the scan predictable.
 	MaxCandidates int
 
+	// MaxScopeEntries caps how many entries one tenant may hold in total, so a
+	// single heavy tenant cannot consume the whole cache. Unlike MaxCandidates,
+	// which bounds a scan, this bounds memory: Redis runs with noeviction here
+	// precisely because every key in this deployment carries a TTL — budget
+	// counters included — so an LRU policy could evict a team's recorded spend
+	// and silently reset it to zero. Bounding the cache in application code is
+	// what lets money stay unevictable.
+	MaxScopeEntries int
+
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
 }
@@ -55,6 +65,9 @@ func NewStore(rdb *redis.Client, cfg StoreConfig) *Store {
 	if cfg.MaxCandidates <= 0 {
 		cfg.MaxCandidates = 100
 	}
+	if cfg.MaxScopeEntries <= 0 {
+		cfg.MaxScopeEntries = 1000
+	}
 	if cfg.ReadTimeout <= 0 {
 		cfg.ReadTimeout = 50 * time.Millisecond
 	}
@@ -62,10 +75,11 @@ func NewStore(rdb *redis.Client, cfg StoreConfig) *Store {
 		cfg.WriteTimeout = 500 * time.Millisecond
 	}
 	return &Store{
-		rdb:           rdb,
-		maxCandidates: cfg.MaxCandidates,
-		readTimeout:   cfg.ReadTimeout,
-		writeTimeout:  cfg.WriteTimeout,
+		rdb:             rdb,
+		maxCandidates:   cfg.MaxCandidates,
+		maxScopeEntries: cfg.MaxScopeEntries,
+		readTimeout:     cfg.ReadTimeout,
+		writeTimeout:    cfg.WriteTimeout,
 	}
 }
 
@@ -194,7 +208,7 @@ func (s *Store) Put(ctx context.Context, k Key, e Entry, ttl time.Duration) erro
 	pipe.ZRemRangeByRank(ctx, k.IndexKey(), 0, int64(-s.maxCandidates-1))
 	pipe.Expire(ctx, k.IndexKey(), ttl)
 
-	// The team index exists only so Step 7.4 can purge by team: the team ID is
+	// The team index exists only so Step 7.4 can purge by team: the scope is
 	// hashed into the fingerprint, so there is nothing else to match on. It is
 	// written on the store path, which already runs after the client has its
 	// response, so it costs the request nothing.
@@ -203,10 +217,61 @@ func (s *Store) Put(ctx context.Context, k Key, e Entry, ttl time.Duration) erro
 		pipe.Expire(ctx, k.TeamKey(), ttl)
 	}
 
+	// The scope index is what the per-tenant cap counts against. It has no TTL
+	// of its own: it spans every fingerprint bucket in the scope, so expiring it
+	// with one entry's TTL would lose the others' membership and let the cap
+	// undercount.
+	//
+	// It therefore counts members, not live entries — an entry that has expired
+	// on its own TTL leaves its member behind. That makes the cap conservative
+	// rather than wrong, and the trim below removes oldest-first, which is the
+	// order those dangling members sit in.
+	if k.ScopeID != "" {
+		pipe.ZAdd(ctx, k.ScopeKey(), redis.Z{Score: float64(now.UnixNano()), Member: k.EntryID})
+	}
+
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("writing cache entry: %w", err)
 	}
+
+	if k.ScopeID != "" {
+		s.trimScope(ctx, k)
+	}
 	return nil
+}
+
+// trimScope enforces MaxScopeEntries, deleting the oldest entries once a scope
+// is over its cap.
+//
+// It deletes the entry hashes rather than only trimming the index: trimming
+// alone would leave the entries occupying memory until their TTL, which is
+// exactly what this cap exists to prevent.
+//
+// The cap is soft. Two concurrent writers can both read the same overflow and
+// both delete it (DEL is idempotent) or interleave so the set sits a little
+// either side of the cap. Making it exact would need a Lua script, and a cache
+// whose size is off by a handful of entries is not worth the atomicity — this
+// bounds memory, it does not enforce a quota anyone is billed for.
+//
+// Failures here are logged by the caller's degrade path rather than failing the
+// write: the entry is already stored and usable, and an untrimmed scope is a
+// memory concern, not a correctness one.
+func (s *Store) trimScope(ctx context.Context, k Key) {
+	count, err := s.rdb.ZCard(ctx, k.ScopeKey()).Result()
+	if err != nil || count <= int64(s.maxScopeEntries) {
+		return
+	}
+
+	overflow := count - int64(s.maxScopeEntries)
+	victims, err := s.rdb.ZRange(ctx, k.ScopeKey(), 0, overflow-1).Result()
+	if err != nil || len(victims) == 0 {
+		return
+	}
+
+	if _, err := s.deleteEntries(ctx, victims); err != nil {
+		return
+	}
+	s.rdb.ZRem(ctx, k.ScopeKey(), toAny(victims)...)
 }
 
 // RecordHit increments an entry's hit counter without extending its TTL —

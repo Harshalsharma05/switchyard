@@ -105,10 +105,28 @@ func TestReconciliationDegradesOnRedisError(t *testing.T) {
 }
 
 func TestReconciliationAccessControl(t *testing.T) {
-	t.Run("a non-superadmin session is forbidden", func(t *testing.T) {
-		srv := newReconServerAs(t, &fakeSpendReader{}, &fakeRequestLogReader{}, testAuth(false))
-		if resp := get(t, srv, "/admin/reconciliation"); resp.StatusCode != http.StatusForbidden {
-			t.Fatalf("status = %d, want 403", resp.StatusCode)
+	// Step 2.4: reconciliation is tenant spend data, so it is an org-admin
+	// view rather than a superadmin one. A non-superadmin sees their own
+	// organisation's teams and no others -- acme is in "personal", globex is not.
+	t.Run("a non-superadmin sees only their own org's teams", func(t *testing.T) {
+		spend := &fakeSpendReader{spent: map[string]int64{"acme": 1_000_000, "globex": 500_000}}
+		reqLog := &fakeRequestLogReader{spendByTeam: map[string]int64{"acme": 1_000_000, "globex": 500_000}}
+		srv := newReconServerAs(t, spend, reqLog, testAuth(false))
+
+		got := getRecon(t, srv, "")
+		if len(got.Teams) != 1 || got.Teams[0].TeamID != "acme" {
+			t.Fatalf("teams = %+v, want only acme", got.Teams)
+		}
+	})
+
+	t.Run("a superadmin sees every org's teams", func(t *testing.T) {
+		spend := &fakeSpendReader{spent: map[string]int64{"acme": 1_000_000, "globex": 500_000}}
+		reqLog := &fakeRequestLogReader{spendByTeam: map[string]int64{"acme": 1_000_000, "globex": 500_000}}
+		srv := newReconServerAs(t, spend, reqLog, testAuth(true))
+
+		got := getRecon(t, srv, "")
+		if len(got.Teams) != 2 {
+			t.Fatalf("teams = %+v, want both acme and globex", got.Teams)
 		}
 	})
 	t.Run("no session is unauthorized", func(t *testing.T) {

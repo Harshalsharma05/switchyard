@@ -107,10 +107,23 @@ func parseThresholds(raw string) ([]float32, error) {
 // Exactly one of team, prefix, or all must be given. Requiring an explicit
 // scope means an operator cannot wipe the whole cache by forgetting a query
 // parameter — the destructive case has to be asked for by name.
-func purgeCache(tuner CacheTuner, log *slog.Logger) http.HandlerFunc {
+//
+// Step 2.4 splits the three by who may ask. Purging one team is an org-admin
+// action, allowed for a team in the caller's own organisation. Purging by entry
+// prefix or purging everything reaches every tenant at once and stays
+// superadmin-only — which is why the check lives here rather than on the route:
+// one endpoint holds both kinds of request.
+func purgeCache(tuner CacheTuner, teams TeamStore, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if tuner == nil {
 			writeError(w, log, http.StatusNotFound, "cache_disabled", "the semantic cache is not enabled on this gateway")
+			return
+		}
+
+		c, ok := caller(r)
+		if !ok {
+			writeError(w, log, http.StatusUnauthorized, "no_session",
+				"this endpoint requires a signed-in session")
 			return
 		}
 
@@ -127,6 +140,23 @@ func purgeCache(tuner CacheTuner, log *slog.Logger) http.HandlerFunc {
 			writeError(w, log, http.StatusBadRequest, "invalid_request",
 				"specify exactly one of team, prefix, or all=true")
 			return
+		}
+
+		if (prefix != "" || all) && !c.IsSuperadmin {
+			writeError(w, log, http.StatusForbidden, "superadmin_required",
+				"purging by prefix or purging everything reaches every organization and is superadmin-only")
+			return
+		}
+
+		// A team outside the caller's organisation is a 404, the same answer as
+		// a team that does not exist — consistent with /admin/teams/{id}, and for
+		// the same reason: a 403 would confirm the ID is real.
+		if team != "" && !c.IsSuperadmin {
+			t, err := teams.Get(team)
+			if err != nil || t.OrganizationID != c.OrgID {
+				writeError(w, log, http.StatusNotFound, "team_not_found", "no such team "+team)
+				return
+			}
 		}
 
 		var (

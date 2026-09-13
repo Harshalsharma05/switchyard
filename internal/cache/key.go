@@ -15,6 +15,37 @@ import (
 // internal/budget and internal/health already follow.
 const keyPrefix = "switchyard:cache"
 
+// Scope is the tenant boundary a cache entry belongs to: two requests in the
+// same scope may be served each other's answers, and nothing ever crosses a
+// scope.
+//
+// Org and Team are both carried because they answer different questions. The
+// scope ID — hashed into the fingerprint — decides who shares with whom. Team
+// is recorded separately regardless, so purge-by-team still works on an entry
+// that was written into a shared organisation cache.
+type Scope struct {
+	Org  string
+	Team string
+
+	// Isolated opts one team out of sharing its organisation's cache, giving it
+	// a scope of its own. Set from the team's own configuration.
+	Isolated bool
+}
+
+// ID is the fingerprint's tenant component.
+//
+// The org:/team: prefix means an organisation and a team that happen to share
+// an ID cannot collide into one scope. An empty Org falls back to team
+// scoping rather than pooling every org-less team into one shared "org:"
+// bucket — the fail-safe direction, since the alternative would be a
+// cross-tenant leak introduced by the very change meant to scope the cache.
+func (s Scope) ID() string {
+	if s.Isolated || s.Org == "" {
+		return "team:" + s.Team
+	}
+	return "org:" + s.Org
+}
+
 // Key is the two-part identity of a cacheable request: a fingerprint covering
 // everything that changes the meaning of a response, and the query text that
 // gets embedded and compared.
@@ -28,23 +59,25 @@ type Key struct {
 	Query       string
 	EntryID     string
 
-	// TeamID is carried in the clear alongside the fingerprint that hashes it,
-	// because Step 7.4's purge-by-team cannot scan for a hashed value.
-	TeamID string
+	// TeamID and ScopeID are carried in the clear alongside the fingerprint
+	// that hashes the scope, because purge-by-team and the per-tenant entry cap
+	// cannot scan for a hashed value.
+	TeamID  string
+	ScopeID string
 }
 
-// NewKey derives the cache identity for one request on behalf of one team.
+// NewKey derives the cache identity for one request within one scope.
 //
-// Deliberately in the fingerprint: team, requested model, temperature, max
-// tokens, stop sequences, and every message before the final one — a follow-up
-// turn means something different depending on what preceded it.
+// Deliberately in the fingerprint: the scope, requested model, temperature,
+// max tokens, stop sequences, and every message before the final one — a
+// follow-up turn means something different depending on what preceded it.
 //
 // Deliberately out: Stream. A streaming and non-streaming request produce the
 // same content and differ only in framing, which Step 7.5 handles at delivery.
-func NewKey(teamID string, req provider.Request) Key {
+func NewKey(scope Scope, req provider.Request) Key {
 	h := sha256.New()
 
-	writeField(h, "team", teamID)
+	writeField(h, "scope", scope.ID())
 	writeField(h, "model", req.Model)
 	writeField(h, "maxtok", itoa(req.MaxTokens))
 
@@ -84,7 +117,8 @@ func NewKey(teamID string, req provider.Request) Key {
 		Fingerprint: fingerprint,
 		Query:       query,
 		EntryID:     hex.EncodeToString(e.Sum(nil)),
-		TeamID:      teamID,
+		TeamID:      scope.Team,
+		ScopeID:     scope.ID(),
 	}
 }
 
@@ -99,6 +133,11 @@ func (k Key) IndexKey() string { return keyPrefix + ":index:" + k.Fingerprint }
 func (k Key) TeamKey() string { return teamKey(k.TeamID) }
 
 func teamKey(teamID string) string { return keyPrefix + ":team:" + teamID }
+
+// ScopeKey is the Redis key listing every entry in one scope, which is what the
+// per-tenant entry cap counts and trims against. Separate from TeamKey because
+// a scope is usually an organisation spanning several teams.
+func (k Key) ScopeKey() string { return keyPrefix + ":scope:" + k.ScopeID }
 
 // writeField length-prefixes each field so that no combination of values can
 // be rearranged into the same digest — "ab"+"c" must not hash as "a"+"bc".

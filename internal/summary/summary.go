@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -80,12 +81,13 @@ type OverheadPoint struct {
 	P99 *float64
 }
 
-// Options selects the window and the team scope. TeamID == "" means all teams
-// (an admin caller); any other value scopes the team-labelled metrics to that
-// team.
+// Options selects the window and the team scope. TeamIDs == nil means every
+// team (a superadmin caller with no ?team= filter); a non-nil slice scopes the
+// team-labelled metrics to exactly those teams, and an empty non-nil slice
+// (an org with no teams yet) matches none of them.
 type Options struct {
-	Range  string
-	TeamID string
+	Range   string
+	TeamIDs []string
 }
 
 var validRanges = map[string]bool{"1h": true, "24h": true, "7d": true, "30d": true}
@@ -137,7 +139,15 @@ func (s *Service) Reachable(ctx context.Context) (up bool, configured bool) {
 
 // Build returns the summary for opts, from cache when a recent one exists.
 func (s *Service) Build(ctx context.Context, opts Options) Result {
-	key := opts.Range + "\x00" + opts.TeamID
+	// "*" cannot collide with a real team ID (Slug only ever produces
+	// lowercase letters, digits, and hyphens), so it is a safe way to tell
+	// nil (unfiltered) apart from an empty, non-nil slice (a team-less org) —
+	// both would otherwise join to the same empty string.
+	scopeKey := "*"
+	if opts.TeamIDs != nil {
+		scopeKey = strings.Join(opts.TeamIDs, "\x00")
+	}
+	key := opts.Range + "\x00" + scopeKey
 
 	s.mu.Lock()
 	if c, ok := s.cache[key]; ok && time.Since(c.at) < s.ttl {
@@ -162,10 +172,7 @@ func (s *Service) build(ctx context.Context, opts Options) Result {
 	}
 
 	win := opts.Range
-	teamSel := ""
-	if opts.TeamID != "" {
-		teamSel = fmt.Sprintf("team=%q", opts.TeamID)
-	}
+	teamSel := teamSelector(opts.TeamIDs)
 
 	// These scalar queries and the series query below are independent
 	// Prometheus round trips — nothing here reads another query's result. Run
@@ -326,6 +333,25 @@ func (s *Service) buildSeries(ctx context.Context, opts Options, teamSel string)
 
 // f64ptr boxes a float so an OverheadPoint field can be nil for "no data".
 func f64ptr(v float64) *float64 { return &v }
+
+// teamSelector renders Options.TeamIDs as a PromQL label-matcher fragment.
+// nil (a superadmin with no ?team= filter) means no filter at all. A non-nil
+// slice restricts to exactly those teams: one team is a plain equality match,
+// several use PromQL's anchored regex alternation, and zero — an org with no
+// teams yet — uses a value no real team id can ever equal, since Slug only
+// emits lowercase letters, digits, and hyphens.
+func teamSelector(ids []string) string {
+	switch {
+	case ids == nil:
+		return ""
+	case len(ids) == 0:
+		return `team="NO_MATCHING_TEAM"`
+	case len(ids) == 1:
+		return fmt.Sprintf("team=%q", ids[0])
+	default:
+		return fmt.Sprintf("team=~%q", strings.Join(ids, "|"))
+	}
+}
 
 // selector renders metric{labels} — or bare metric when there are no labels.
 func selector(metric, labels string) string {

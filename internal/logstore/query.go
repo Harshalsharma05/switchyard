@@ -19,10 +19,13 @@ const (
 
 // Filter narrows a request-log query. A zero value matches everything.
 //
-// TeamID is set by the handler from the caller's identity, never straight from
-// a query parameter — that is what makes team scoping tamper-proof.
+// TeamIDs is set by the handler from the caller's identity, never straight
+// from a query parameter — that is what makes team scoping tamper-proof. Nil
+// means "every team" (a superadmin with no ?team= filter); a non-nil slice,
+// even an empty one, means "exactly these" — an org with zero teams sees zero
+// rows, not every row.
 type Filter struct {
-	TeamID     string
+	TeamIDs    []string
 	Provider   string
 	Model      string
 	StatusCode int
@@ -105,8 +108,8 @@ func (w *Writer) Query(ctx context.Context, f Filter) (Page, error) {
 		where = append(where, fmt.Sprintf(clause, len(args)))
 	}
 
-	if f.TeamID != "" {
-		add("team_id = $%d", f.TeamID)
+	if f.TeamIDs != nil {
+		add("team_id = ANY($%d)", f.TeamIDs)
 	}
 	if f.Provider != "" {
 		add("provider = $%d", f.Provider)
@@ -248,12 +251,13 @@ func (d CostDimension) columns() (live, rolled string, ok bool) {
 }
 
 // CostQuery aggregates request-log cost into time buckets split by one
-// dimension. TeamID == "" spans every team (an admin caller).
+// dimension. TeamIDs == nil spans every team (a superadmin caller); a non-nil
+// slice, even empty, restricts to exactly those teams.
 type CostQuery struct {
 	Since     time.Time
 	Bucket    CostBucket
 	Dimension CostDimension
-	TeamID    string
+	TeamIDs   []string
 }
 
 // CostCell is one (bucket, dimension-value) total in micro-dollars.
@@ -280,9 +284,9 @@ func (w *Writer) CostSeries(ctx context.Context, q CostQuery) ([]CostCell, error
 
 	args := []any{q.Since.UTC()}
 	teamClause := ""
-	if q.TeamID != "" {
-		args = append(args, q.TeamID)
-		teamClause = " AND team_id = $2"
+	if q.TeamIDs != nil {
+		args = append(args, q.TeamIDs)
+		teamClause = " AND team_id = ANY($2)"
 	}
 
 	live := fmt.Sprintf(`
@@ -336,12 +340,12 @@ func (a FallbackAttribution) NetMicros() int64 { return a.ExtraMicros - a.SavedM
 // now, split by sign. It reads only the live detail rows — every supported
 // range sits within the retention window, so the daily rollup (which stores
 // only a net sum per group and cannot be resplit by sign) is not consulted.
-func (w *Writer) FallbackCostSince(ctx context.Context, since time.Time, teamID string) (FallbackAttribution, error) {
+func (w *Writer) FallbackCostSince(ctx context.Context, since time.Time, teamIDs []string) (FallbackAttribution, error) {
 	args := []any{since.UTC()}
 	where := "ts >= $1 AND fallback_cost_delta_micros IS NOT NULL"
-	if teamID != "" {
-		args = append(args, teamID)
-		where += " AND team_id = $2"
+	if teamIDs != nil {
+		args = append(args, teamIDs)
+		where += " AND team_id = ANY($2)"
 	}
 
 	sql := `
@@ -375,12 +379,12 @@ type RoutingSavings struct {
 // Rows where routing_savings_micros IS NULL are excluded rather than counted
 // as zero — those are requests whose caller named a model, and routing cannot
 // take credit for traffic it never saw.
-func (w *Writer) RoutingSavingsSince(ctx context.Context, since time.Time, teamID string) (RoutingSavings, error) {
+func (w *Writer) RoutingSavingsSince(ctx context.Context, since time.Time, teamIDs []string) (RoutingSavings, error) {
 	args := []any{since.UTC()}
 	where := "ts >= $1 AND routing_savings_micros IS NOT NULL"
-	if teamID != "" {
-		args = append(args, teamID)
-		where += " AND team_id = $2"
+	if teamIDs != nil {
+		args = append(args, teamIDs)
+		where += " AND team_id = ANY($2)"
 	}
 
 	sql := `
@@ -400,14 +404,16 @@ func (w *Writer) RoutingSavingsSince(ctx context.Context, since time.Time, teamI
 // ErrNotFound is returned by Get when no row has that id.
 var ErrNotFound = fmt.Errorf("request not found")
 
-// Get returns one row by id. teamID, when non-empty, scopes the lookup so a
-// non-admin caller cannot read another team's row by guessing its id.
-func (w *Writer) Get(ctx context.Context, id, teamID string) (Record, error) {
+// Get returns one row by id. teamIDs, when non-nil, scopes the lookup so a
+// caller outside the row's organisation cannot read it by guessing its id —
+// it gets ErrNotFound, the same as a genuinely missing row, not a 403 that
+// would confirm the row exists.
+func (w *Writer) Get(ctx context.Context, id string, teamIDs []string) (Record, error) {
 	sql := "SELECT" + selectColumns + " FROM requests WHERE id = $1"
 	args := []any{id}
-	if teamID != "" {
-		sql += " AND team_id = $2"
-		args = append(args, teamID)
+	if teamIDs != nil {
+		sql += " AND team_id = ANY($2)"
+		args = append(args, teamIDs)
 	}
 
 	rows, err := w.pool.Query(ctx, sql, args...)
@@ -483,12 +489,12 @@ type CacheSavingsGroup struct {
 // Only rows where cache_hit is non-null are counted: a null means the cache was
 // never consulted, which is neither a hit nor a miss and must not enter the
 // denominator.
-func (w *Writer) CacheSavingsSince(ctx context.Context, since time.Time, teamID string) (CacheSavings, error) {
+func (w *Writer) CacheSavingsSince(ctx context.Context, since time.Time, teamIDs []string) (CacheSavings, error) {
 	args := []any{since.UTC()}
 	where := "ts >= $1 AND cache_hit IS NOT NULL"
-	if teamID != "" {
-		args = append(args, teamID)
-		where += " AND team_id = $2"
+	if teamIDs != nil {
+		args = append(args, teamIDs)
+		where += " AND team_id = ANY($2)"
 	}
 
 	sql := `
@@ -578,12 +584,12 @@ type QualityFeedback struct {
 // pulls a bounded list of the low-scoring downgraded requests. Live detail
 // rows only, like the other attribution queries — every supported range sits
 // inside the retention window, and the rollup carries no quality at all.
-func (w *Writer) QualityFeedbackSince(ctx context.Context, since time.Time, teamID string, lowScore float64, exampleLimit int) (QualityFeedback, error) {
+func (w *Writer) QualityFeedbackSince(ctx context.Context, since time.Time, teamIDs []string, lowScore float64, exampleLimit int) (QualityFeedback, error) {
 	args := []any{since.UTC(), lowScore}
 	where := "ts >= $1 AND quality_score IS NOT NULL"
-	if teamID != "" {
-		args = append(args, teamID)
-		where += " AND team_id = $3"
+	if teamIDs != nil {
+		args = append(args, teamIDs)
+		where += " AND team_id = ANY($3)"
 	}
 
 	statSQL := `

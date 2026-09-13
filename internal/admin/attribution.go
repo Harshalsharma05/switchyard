@@ -64,14 +64,14 @@ type attributionView struct {
 	Routing     *routingAttrView `json:"routing"`
 }
 
-func handleAttribution(reqLog RequestLogReader, calc CostCalculator, log *slog.Logger) http.HandlerFunc {
+func handleAttribution(reqLog RequestLogReader, calc CostCalculator, teams TeamStore, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if reqLog == nil {
 			writeRequestLogDisabled(w, log)
 			return
 		}
 
-		scope, ok := teamScope(w, r, log)
+		scope, ok := orgScope(w, r, teams, log)
 		if !ok {
 			return
 		}
@@ -138,7 +138,7 @@ func handleAttribution(reqLog RequestLogReader, calc CostCalculator, log *slog.L
 // cacheAttribution prices the cache's savings, or returns nil when no pricing
 // table is wired — a null panel keeps Usage & Cost in its empty state rather
 // than showing a confident zero.
-func cacheAttribution(r *http.Request, reqLog RequestLogReader, calc CostCalculator, lookback time.Duration, scope string, log *slog.Logger) (*cacheAttrView, error) {
+func cacheAttribution(r *http.Request, reqLog RequestLogReader, calc CostCalculator, lookback time.Duration, scope []string, log *slog.Logger) (*cacheAttrView, error) {
 	if calc == nil {
 		return nil, nil
 	}

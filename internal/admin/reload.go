@@ -63,15 +63,15 @@ func reloadConfig(reload Reloader, audit AuditRecorder, log *slog.Logger) http.H
 			return
 		}
 
-		if aerr := recordAudit(r.Context(), audit, logstore.AuditEntry{
-			ActorTeamID: actorID(r),
-			ActorAddr:   r.RemoteAddr,
-			Action:      "config.reload",
+		// No target team: a reload is gateway-wide, so the entry is filed under
+		// the actor's own organisation and is superadmin-only like the route.
+		if aerr := recordAudit(r.Context(), audit, stampActor(r, "", logstore.AuditEntry{
+			Action: "config.reload",
 			After: map[string]any{
 				"providers": summary.Providers,
 				"teams":     summary.Teams,
 			},
-		}); aerr != nil {
+		})); aerr != nil {
 			log.ErrorContext(r.Context(), "writing config-reload audit entry", slog.Any("error", aerr))
 		}
 

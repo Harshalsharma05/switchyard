@@ -98,7 +98,7 @@ func TestBuildScopesTeamLabelledMetrics(t *testing.T) {
 	f := &fakeProm{value: "42"}
 	svc := newService(t, f)
 
-	svc.Build(context.Background(), Options{Range: "1h", TeamID: "globex"})
+	svc.Build(context.Background(), Options{Range: "1h", TeamIDs: []string{"globex"}})
 
 	var reqQ, overheadQ string
 	for _, q := range f.asked() {
@@ -120,7 +120,7 @@ func TestBuildScopesTeamLabelledMetrics(t *testing.T) {
 func TestBuildAdminIsUnscoped(t *testing.T) {
 	f := &fakeProm{value: "1"}
 	svc := newService(t, f)
-	svc.Build(context.Background(), Options{Range: "24h", TeamID: ""})
+	svc.Build(context.Background(), Options{Range: "24h", TeamIDs: nil})
 	for _, q := range f.asked() {
 		if strings.Contains(q, "team=") {
 			t.Errorf("unscoped build issued a team-filtered query: %s", q)
@@ -166,14 +166,14 @@ func TestBuildCachesWithinTTL(t *testing.T) {
 	t.Cleanup(srv.Close)
 	svc := NewService(Config{PrometheusURL: srv.URL, CacheTTL: time.Minute, HTTPTimeout: time.Second})
 
-	svc.Build(context.Background(), Options{Range: "1h", TeamID: "acme"})
+	svc.Build(context.Background(), Options{Range: "1h", TeamIDs: []string{"acme"}})
 	n := len(f.asked())
-	svc.Build(context.Background(), Options{Range: "1h", TeamID: "acme"})
+	svc.Build(context.Background(), Options{Range: "1h", TeamIDs: []string{"acme"}})
 	if len(f.asked()) != n {
 		t.Errorf("second Build hit Prometheus again: %d queries then %d", n, len(f.asked()))
 	}
 	// A different scope is a different cache key and does query.
-	svc.Build(context.Background(), Options{Range: "1h", TeamID: "globex"})
+	svc.Build(context.Background(), Options{Range: "1h", TeamIDs: []string{"globex"}})
 	if len(f.asked()) == n {
 		t.Error("a different team scope should not be served from acme's cache entry")
 	}
@@ -195,7 +195,7 @@ func TestValidRange(t *testing.T) {
 func TestBuildPopulatesAlignedSeries(t *testing.T) {
 	f := &fakeProm{value: "3"}
 	svc := newService(t, f)
-	got := svc.Build(context.Background(), Options{Range: "1h", TeamID: "acme"})
+	got := svc.Build(context.Background(), Options{Range: "1h", TeamIDs: []string{"acme"}})
 
 	if got.Degraded {
 		t.Fatal("series queries succeeded; Degraded should be false")

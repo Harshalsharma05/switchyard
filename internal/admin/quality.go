@@ -54,10 +54,15 @@ type qualityFeedbackView struct {
 	ByReason          []qualityReasonView  `json:"by_reason"`
 }
 
-func handleQualityFeedback(reqLog RequestLogReader, cfg QualityFeedbackConfig, log *slog.Logger) http.HandlerFunc {
+func handleQualityFeedback(reqLog RequestLogReader, teams TeamStore, cfg QualityFeedbackConfig, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if reqLog == nil {
 			writeRequestLogDisabled(w, log)
+			return
+		}
+
+		scope, ok := orgScope(w, r, teams, log)
+		if !ok {
 			return
 		}
 
@@ -87,7 +92,7 @@ func handleQualityFeedback(reqLog RequestLogReader, cfg QualityFeedbackConfig, l
 		}
 
 		fb, err := reqLog.QualityFeedbackSince(r.Context(),
-			time.Now().UTC().Add(-spec.lookback), "", low, cfg.ExampleLimit)
+			time.Now().UTC().Add(-spec.lookback), scope, low, cfg.ExampleLimit)
 		if err != nil {
 			log.ErrorContext(r.Context(), "reading quality feedback", slog.Any("error", err))
 			writeError(w, log, http.StatusInternalServerError, "internal_error",

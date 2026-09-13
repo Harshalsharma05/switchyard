@@ -17,6 +17,22 @@ cache:
   read_timeout: 50ms
   write_timeout: 500ms
 
+  # Entries one tenant may hold before its oldest are deleted (Multi-user,
+  # Step 2.3). A tenant is an organisation, or a single team where that team set
+  # cache_isolated.
+  #
+  # This is what bounds cache memory, and it lives in the application rather
+  # than in Redis on purpose. Every key this gateway writes carries a TTL —
+  # budget counters included — so a maxmemory-policy of allkeys-lru or
+  # volatile-lru could evict a team's recorded monthly spend and silently reset
+  # it to zero. Redis therefore stays on noeviction, where a full instance
+  # fails cache writes (which already degrade to a miss) instead of quietly
+  # losing money. Capping here is what keeps the cache from filling it.
+  #
+  # At 768 dimensions an embedding is ~3KB, so 1000 entries is roughly 3MB of
+  # vectors per tenant plus the stored responses.
+  max_entries_per_tenant: 1000
+
   # Step 7.4's lifetime policy. Not all responses age equally, so a flat TTL
   # either staled time-sensitive answers or throws away durable ones.
   #

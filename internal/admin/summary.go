@@ -151,7 +151,7 @@ func toSummaryView(res summary.Result, health HealthReader, cacheEnabled, qualit
 
 // --- handler ----------------------------------------------------------
 
-func handleSummary(svc SummaryService, health HealthReader, cacheEnabled, qualityEnabled bool, log *slog.Logger) http.HandlerFunc {
+func handleSummary(svc SummaryService, teams TeamStore, health HealthReader, cacheEnabled, qualityEnabled bool, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if svc == nil {
 			writeError(w, log, http.StatusServiceUnavailable, "summary_disabled",
@@ -159,7 +159,7 @@ func handleSummary(svc SummaryService, health HealthReader, cacheEnabled, qualit
 			return
 		}
 
-		scope, ok := teamScope(w, r, log)
+		scope, ok := orgScope(w, r, teams, log)
 		if !ok {
 			return
 		}
@@ -174,7 +174,7 @@ func handleSummary(svc SummaryService, health HealthReader, cacheEnabled, qualit
 			return
 		}
 
-		res := svc.Build(r.Context(), summary.Options{Range: rng, TeamID: scope})
+		res := svc.Build(r.Context(), summary.Options{Range: rng, TeamIDs: scope})
 		writeJSON(w, log, http.StatusOK, toSummaryView(res, health, cacheEnabled, qualityEnabled))
 	}
 }

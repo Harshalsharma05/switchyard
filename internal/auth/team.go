@@ -65,9 +65,30 @@ type Team struct {
 
 	Priority Priority
 
-	// IsAdmin lets this team read other teams' rows on the admin API's
-	// request-log endpoints. Enforced server-side in the handler.
+	// IsAdmin is vestigial and grants nothing.
+	//
+	// It used to let a team key read other teams' rows on the admin API. Step
+	// 1.5 made the admin port session-only, so no team key authenticates there
+	// at all, and Step 2.4 replaced what it expressed with two things that live
+	// on the user: every signed-in user is an admin of their own organisation,
+	// and users.is_superadmin is the cross-organisation flag.
+	//
+	// Still stored, still returned by the admin API, and still settable on
+	// create, because the console reads and writes it. Removing the column and
+	// the UI control belongs with Phase 3's Settings rework, where the frontend
+	// is being touched anyway.
 	IsAdmin bool
+
+	// CacheIsolated opts this team out of sharing its organisation's semantic
+	// cache, giving it a cache scope of its own.
+	//
+	// Sharing within an organisation is the default because one person's several
+	// projects asking the same question should not pay for the same answer
+	// twice. A team handling data it does not want pooled with its siblings sets
+	// this and trades that hit rate for a private cache. It never widens
+	// anything: the organisation is already the outer boundary, and no setting
+	// lets a cache entry cross it.
+	CacheIsolated bool
 
 	// Key lifecycle metadata (Part 2, Step 6.4). None of it is the key or the
 	// hash: KeySource says where the current key came from, KeyMasked is a

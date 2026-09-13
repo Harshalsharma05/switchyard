@@ -42,26 +42,35 @@ func TestSummaryScoping(t *testing.T) {
 	cases := map[string]struct {
 		superadmin bool
 		query      string
-		wantTeam   string
-		wantCode   int
+		wantTeams  []string
 	}{
-		"superadmin defaults to all teams": {true, "", "", 200},
-		"superadmin may filter to one":     {true, "?team=globex", "globex", 200},
-		"anyone else is refused":           {false, "", "", 403},
-		"anyone else naming a team too":    {false, "?team=acme", "", 403},
+		"superadmin defaults to all teams":            {true, "", nil},
+		"superadmin may filter to one":                {true, "?team=globex", []string{"globex"}},
+		"a non-superadmin is scoped to their own org": {false, "", []string{"acme"}},
+		"a non-superadmin's ?team= is ignored":        {false, "?team=globex", []string{"acme"}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			f := &fakeSummary{}
 			srv := summaryServerAs(t, f, fakeHealthReader{}, testAuth(tc.superadmin))
 			resp := get(t, srv, "/admin/summary"+tc.query)
-			if resp.StatusCode != tc.wantCode {
-				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.wantCode)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200", resp.StatusCode)
 			}
-			if tc.wantCode == 200 && f.got.TeamID != tc.wantTeam {
-				t.Errorf("Options.TeamID = %q, want %q", f.got.TeamID, tc.wantTeam)
+			if !slicesEqual(f.got.TeamIDs, tc.wantTeams) {
+				t.Errorf("Options.TeamIDs = %v, want %v", f.got.TeamIDs, tc.wantTeams)
 			}
 		})
+	}
+}
+
+// A session is still required: Step 1.5's cross-identity boundary, re-checked
+// here because this handler is the one that changed shape this phase.
+func TestSummaryRequiresASession(t *testing.T) {
+	f := &fakeSummary{}
+	srv := summaryServerAs(t, f, fakeHealthReader{}, Auth{})
+	if resp := get(t, srv, "/admin/summary"); resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", resp.StatusCode)
 	}
 }
 

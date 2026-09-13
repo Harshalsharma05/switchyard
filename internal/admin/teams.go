@@ -11,8 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-
 	"github.com/Harshalsharma05/switchyard/internal/auth"
 	"github.com/Harshalsharma05/switchyard/internal/logstore"
 )
@@ -165,12 +163,22 @@ func readSpent(ctx context.Context, spend SpendReader, log *slog.Logger, teamID 
 
 // --- handlers ------------------------------------------------------------
 
-// listTeams serves GET /admin/teams.
+// listTeams serves GET /admin/teams, showing the caller's own organisation's
+// teams — or every team, for a superadmin.
 func listTeams(store TeamStore, spend SpendReader, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		teams := store.List()
-		views := make([]teamView, 0, len(teams))
-		for _, t := range teams {
+		c, ok := caller(r)
+		if !ok {
+			writeError(w, log, http.StatusUnauthorized, "no_session",
+				"this endpoint requires a signed-in session")
+			return
+		}
+
+		views := []teamView{}
+		for _, t := range store.List() {
+			if !c.IsSuperadmin && t.OrganizationID != c.OrgID {
+				continue
+			}
 			views = append(views, newTeamView(t, readSpent(r.Context(), spend, log, t.ID)))
 		}
 		writeJSON(w, log, http.StatusOK, views)
@@ -180,15 +188,12 @@ func listTeams(store TeamStore, spend SpendReader, log *slog.Logger) http.Handle
 // getTeam serves GET /admin/teams/{id}.
 func getTeam(store TeamStore, spend SpendReader, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id := chi.URLParam(r, "id")
-
-		team, err := store.Get(id)
-		if err != nil {
-			writeTeamLookupError(w, log, id, err)
+		team, ok := teamInScope(w, r, store, log)
+		if !ok {
 			return
 		}
 
-		writeJSON(w, log, http.StatusOK, newTeamView(team, readSpent(r.Context(), spend, log, id)))
+		writeJSON(w, log, http.StatusOK, newTeamView(team, readSpent(r.Context(), spend, log, team.ID)))
 	}
 }
 
@@ -219,13 +224,11 @@ func auditUnavailable(w http.ResponseWriter, log *slog.Logger) {
 // attempt, which is the accepted cost of that ordering (see DECISIONS.md).
 func patchTeam(store TeamStore, spend SpendReader, audit AuditRecorder, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id := chi.URLParam(r, "id")
-
-		before, err := store.Get(id)
-		if err != nil {
-			writeTeamLookupError(w, log, id, err)
+		before, ok := teamInScope(w, r, store, log)
+		if !ok {
 			return
 		}
+		id := before.ID
 
 		var body teamPatchRequest
 		dec := json.NewDecoder(r.Body)
@@ -253,14 +256,12 @@ func patchTeam(store TeamStore, spend SpendReader, audit AuditRecorder, log *slo
 			requested["monthly_budget_usd"] = *body.MonthlyBudgetUSD
 		}
 
-		if err := recordAudit(r.Context(), audit, logstore.AuditEntry{
-			ActorTeamID:  actorID(r),
-			ActorAddr:    r.RemoteAddr,
+		if err := recordAudit(r.Context(), audit, stampActor(r, before.OrganizationID, logstore.AuditEntry{
 			Action:       "team.patch",
 			TargetTeamID: id,
 			Before:       limitsDelta(before),
 			After:        requested,
-		}); err != nil {
+		})); err != nil {
 			log.ErrorContext(r.Context(), "writing team-patch audit entry", slog.Any("error", err))
 			auditUnavailable(w, log)
 			return
@@ -299,13 +300,11 @@ func patchTeam(store TeamStore, spend SpendReader, audit AuditRecorder, log *slo
 // resetBudget serves POST /admin/teams/{id}/reset-budget.
 func resetBudget(store TeamStore, spend SpendReader, audit AuditRecorder, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id := chi.URLParam(r, "id")
-
-		team, err := store.Get(id)
-		if err != nil {
-			writeTeamLookupError(w, log, id, err)
+		team, ok := teamInScope(w, r, store, log)
+		if !ok {
 			return
 		}
+		id := team.ID
 
 		before := readSpent(r.Context(), spend, log, id)
 		beforeUSD := 0.0
@@ -313,14 +312,12 @@ func resetBudget(store TeamStore, spend SpendReader, audit AuditRecorder, log *s
 			beforeUSD = microsToUSD(*before)
 		}
 
-		if err := recordAudit(r.Context(), audit, logstore.AuditEntry{
-			ActorTeamID:  actorID(r),
-			ActorAddr:    r.RemoteAddr,
+		if err := recordAudit(r.Context(), audit, stampActor(r, team.OrganizationID, logstore.AuditEntry{
 			Action:       "team.budget_reset",
 			TargetTeamID: id,
 			Before:       map[string]any{"spent_usd": beforeUSD},
 			After:        map[string]any{"spent_usd": 0.0},
-		}); err != nil {
+		})); err != nil {
 			log.ErrorContext(r.Context(), "writing budget-reset audit entry", slog.Any("error", err))
 			auditUnavailable(w, log)
 			return
@@ -364,13 +361,11 @@ const rotationWarning = "Copy this key now — it is shown once and never again.
 // restart.
 func rotateKey(store TeamStore, audit AuditRecorder, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id := chi.URLParam(r, "id")
-
-		before, err := store.Get(id)
-		if err != nil {
-			writeTeamLookupError(w, log, id, err)
+		before, ok := teamInScope(w, r, store, log)
+		if !ok {
 			return
 		}
+		id := before.ID
 
 		raw, err := auth.GenerateKey(id)
 		if err != nil {
@@ -383,14 +378,12 @@ func rotateKey(store TeamStore, audit AuditRecorder, log *slog.Logger) http.Hand
 
 		// The audit records only that the key source changed — never the key,
 		// the hash, or even the mask.
-		if err := recordAudit(r.Context(), audit, logstore.AuditEntry{
-			ActorTeamID:  actorID(r),
-			ActorAddr:    r.RemoteAddr,
+		if err := recordAudit(r.Context(), audit, stampActor(r, before.OrganizationID, logstore.AuditEntry{
 			Action:       "key.rotate",
 			TargetTeamID: id,
 			Before:       map[string]any{"key_source": keyViewOf(before).Source},
 			After:        map[string]any{"key_source": auth.KeySourceRotated},
-		}); err != nil {
+		})); err != nil {
 			log.ErrorContext(r.Context(), "writing key-rotate audit entry", slog.Any("error", err))
 			auditUnavailable(w, log)
 			return
@@ -426,22 +419,18 @@ func rotateKey(store TeamStore, audit AuditRecorder, log *slog.Logger) http.Hand
 // key.
 func revokeKey(store TeamStore, audit AuditRecorder, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id := chi.URLParam(r, "id")
-
-		before, err := store.Get(id)
-		if err != nil {
-			writeTeamLookupError(w, log, id, err)
+		before, ok := teamInScope(w, r, store, log)
+		if !ok {
 			return
 		}
+		id := before.ID
 
-		if err := recordAudit(r.Context(), audit, logstore.AuditEntry{
-			ActorTeamID:  actorID(r),
-			ActorAddr:    r.RemoteAddr,
+		if err := recordAudit(r.Context(), audit, stampActor(r, before.OrganizationID, logstore.AuditEntry{
 			Action:       "key.revoke",
 			TargetTeamID: id,
 			Before:       map[string]any{"key_source": keyViewOf(before).Source},
 			After:        map[string]any{"key_source": auth.KeySourceRevoked},
-		}); err != nil {
+		})); err != nil {
 			log.ErrorContext(r.Context(), "writing key-revoke audit entry", slog.Any("error", err))
 			auditUnavailable(w, log)
 			return
@@ -550,6 +539,31 @@ func validateAllowlists(providers ProviderLister, allowedProviders, allowedModel
 	return nil
 }
 
+// createOrgFor decides which organisation a new team belongs to, from the
+// caller's session rather than from the request body. See createTeam.
+func createOrgFor(w http.ResponseWriter, r *http.Request, requested string, log *slog.Logger) (string, bool) {
+	c, ok := caller(r)
+	if !ok {
+		writeError(w, log, http.StatusUnauthorized, "no_session",
+			"this endpoint requires a signed-in session")
+		return "", false
+	}
+
+	if c.IsSuperadmin {
+		if requested != "" {
+			return requested, true
+		}
+		return c.OrgID, true
+	}
+
+	if requested != "" && requested != c.OrgID {
+		writeError(w, log, http.StatusBadRequest, "invalid_request_error",
+			"a team can only be created in your own organization; omit organization_id")
+		return "", false
+	}
+	return c.OrgID, true
+}
+
 func writeTeamExists(w http.ResponseWriter, log *slog.Logger, id string) {
 	writeError(w, log, http.StatusConflict, "team_exists",
 		"a team with id "+id+" exists or once existed; team IDs come from the name and are never reused, so choose a different name")
@@ -576,9 +590,21 @@ func createTeam(store TeamStore, providers ProviderLister, audit AuditRecorder, 
 				"name must contain at least one ASCII letter or digit")
 			return
 		}
+
+		// The organisation comes from the session, not the body. A normal user
+		// creates teams in their own organisation and nowhere else; naming
+		// another one is refused rather than quietly redirected, so a caller is
+		// never told "created" about something it did not ask for. Only a
+		// superadmin may place a team in an organisation it names, which the
+		// foreign key still validates.
+		orgID, ok := createOrgFor(w, r, body.OrganizationID, log)
+		if !ok {
+			return
+		}
+
 		team := auth.Team{
 			ID:                  id,
-			OrganizationID:      body.OrganizationID,
+			OrganizationID:      orgID,
 			Name:                strings.TrimSpace(body.Name),
 			AllowedProviders:    body.AllowedProviders,
 			AllowedModels:       body.AllowedModels,
@@ -618,14 +644,12 @@ func createTeam(store TeamStore, providers ProviderLister, audit AuditRecorder, 
 		team.KeySource = auth.KeySourceCreated
 		team.KeyCreatedAt = &now
 
-		if err := recordAudit(r.Context(), audit, logstore.AuditEntry{
-			ActorTeamID:  actorID(r),
-			ActorAddr:    r.RemoteAddr,
+		if err := recordAudit(r.Context(), audit, stampActor(r, team.OrganizationID, logstore.AuditEntry{
 			Action:       "team.create",
 			TargetTeamID: id,
 			Before:       map[string]any{},
 			After:        teamSettings(team),
-		}); err != nil {
+		})); err != nil {
 			log.ErrorContext(r.Context(), "writing team-create audit entry", slog.Any("error", err))
 			auditUnavailable(w, log)
 			return
@@ -638,7 +662,7 @@ func createTeam(store TeamStore, providers ProviderLister, audit AuditRecorder, 
 				writeTeamExists(w, log, id)
 			case errors.Is(err, auth.ErrUnknownOrganization):
 				writeError(w, log, http.StatusBadRequest, "invalid_request_error",
-					"no such organization "+body.OrganizationID)
+					"no such organization "+orgID)
 			default:
 				log.ErrorContext(r.Context(), "creating team", slog.String("team", id), slog.Any("error", err))
 				writeError(w, log, http.StatusInternalServerError, "internal_error", "the team could not be created")
@@ -666,22 +690,18 @@ func createTeam(store TeamStore, providers ProviderLister, audit AuditRecorder, 
 // keep pointing at a real team, and the ID is never reused.
 func deleteTeam(store TeamStore, audit AuditRecorder, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id := chi.URLParam(r, "id")
-
-		before, err := store.Get(id)
-		if err != nil {
-			writeTeamLookupError(w, log, id, err)
+		before, ok := teamInScope(w, r, store, log)
+		if !ok {
 			return
 		}
+		id := before.ID
 
-		if err := recordAudit(r.Context(), audit, logstore.AuditEntry{
-			ActorTeamID:  actorID(r),
-			ActorAddr:    r.RemoteAddr,
+		if err := recordAudit(r.Context(), audit, stampActor(r, before.OrganizationID, logstore.AuditEntry{
 			Action:       "team.delete",
 			TargetTeamID: id,
 			Before:       teamSettings(before),
 			After:        map[string]any{"deleted": true},
-		}); err != nil {
+		})); err != nil {
 			log.ErrorContext(r.Context(), "writing team-delete audit entry", slog.Any("error", err))
 			auditUnavailable(w, log)
 			return

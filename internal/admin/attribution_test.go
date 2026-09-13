@@ -51,16 +51,19 @@ func TestAttributionScopingAndParams(t *testing.T) {
 		if resp := get(t, srv, "/admin/attribution"); resp.StatusCode != http.StatusOK {
 			t.Fatalf("status = %d, want 200", resp.StatusCode)
 		}
-		if reader.gotTeamID != "" {
-			t.Errorf("scope = %q, want empty (all teams)", reader.gotTeamID)
+		if reader.gotTeamIDs != nil {
+			t.Errorf("scope = %v, want nil (all teams)", reader.gotTeamIDs)
 		}
 	})
 
-	t.Run("anyone else is refused until org scoping ships", func(t *testing.T) {
+	t.Run("a non-superadmin is scoped to their own org, not refused", func(t *testing.T) {
 		reader := &fakeRequestLogReader{}
 		srv := newRequestLogServerAs(t, reader, testAuth(false))
-		if resp := get(t, srv, "/admin/attribution?team=acme"); resp.StatusCode != http.StatusForbidden {
-			t.Fatalf("status = %d, want 403", resp.StatusCode)
+		if resp := get(t, srv, "/admin/attribution?team=globex"); resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		if want := []string{"acme"}; !slicesEqual(reader.gotTeamIDs, want) {
+			t.Errorf("scope = %v, want %v (ignoring the client-supplied ?team=)", reader.gotTeamIDs, want)
 		}
 	})
 

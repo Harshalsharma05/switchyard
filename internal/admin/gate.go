@@ -11,6 +11,12 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"sort"
+
+	"github.com/go-chi/chi/v5"
+
+	"github.com/Harshalsharma05/switchyard/internal/auth"
+	"github.com/Harshalsharma05/switchyard/internal/logstore"
 )
 
 // Caller is the authenticated user behind an admin request.
@@ -35,22 +41,50 @@ func caller(r *http.Request) (Caller, bool) {
 	return c, ok
 }
 
-// actorID is the audit "who". It is the user ID now rather than a team ID --
-// forced, not chosen: after Step 1.5 there is no team on an admin request.
-// The plan puts this in Phase 2, Step 2.5; there is nothing else it could be.
+// actorID is the audit and log "who". It is the user ID now rather than a team
+// ID -- forced, not chosen: after Step 1.5 there is no team on an admin request.
 func actorID(r *http.Request) string {
-	if c, ok := caller(r); ok {
+	if c, ok := caller(r); ok && c.UserID != "" {
 		return c.UserID
 	}
 	return "unknown"
 }
 
-// requireSuperadmin gates everything that crosses tenants: team management,
-// chaos, reload, audit, the system panel.
+// stampActor fills in an audit entry's identity fields from the session: who
+// acted, which tenant the change belongs to, and whether it was a superadmin
+// action.
 //
-// Every signed-in user is an admin of their own organisation, but nothing here
-// is organisation-scoped yet, so the fail-closed reading is the only safe one
-// until Phase 2 splits org admin from superadmin.
+// targetOrg is the organisation of the resource being changed, and it is what
+// the entry is filed under — never the actor's own organisation. That is the
+// whole mechanism behind tenant-visible operator actions: a superadmin rotating
+// another organisation's key files the entry against that organisation, so the
+// organisation can see it happened.
+//
+// An empty targetOrg is left empty, stored as NULL, which belongs to no tenant
+// and is therefore superadmin-only. Actions with nothing to target — a config
+// reload — are exactly the ones no single tenant should see.
+//
+// Every mutating handler records through here, so no call site decides these
+// three fields for itself.
+func stampActor(r *http.Request, targetOrg string, e logstore.AuditEntry) logstore.AuditEntry {
+	c, _ := caller(r)
+
+	e.ActorUserID = actorID(r)
+	e.ActorAddr = r.RemoteAddr
+	e.Superadmin = c.IsSuperadmin
+	e.OrganizationID = targetOrg
+	return e
+}
+
+// requireSuperadmin gates what genuinely crosses tenants or changes the whole
+// deployment: config reload, chaos injection, breaker resets, the system panel,
+// the cross-tenant cache sweep, and the audit log until Step 2.5 scopes it.
+//
+// Step 2.4's split is the other half of this. Everything that is "admin of my
+// own organisation" — managing teams, their keys and budgets, reconciliation,
+// quality feedback — left this gate and is scoped by the caller's org claim
+// instead. The question asked of every endpoint was which of the two it is, and
+// the answer was "org admin" far more often than not.
 func requireSuperadmin(log *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -70,24 +104,71 @@ func requireSuperadmin(log *slog.Logger) func(http.Handler) http.Handler {
 	}
 }
 
-// teamScope resolves the ?team= filter the cross-team read endpoints accept.
+// orgScope resolves which team IDs a caller may see on the cross-team read
+// endpoints.
 //
-// A superadmin reads any team or all of them, which is exactly what an admin
-// key did before. Everyone else is refused rather than served unscoped: these
-// queries have no organisation filter yet, so the alternative would hand a new
-// user every other organisation's rows. Phase 2, Step 2.2 replaces this with a
-// real org filter.
-func teamScope(w http.ResponseWriter, r *http.Request, log *slog.Logger) (string, bool) {
+// A superadmin reads every team, or narrows with the same ?team= filter an
+// admin key used before this existed — nil comes back, which every caller
+// below this point reads as "no filter." Everyone else is scoped to every
+// team in their own organisation: queries.List() is an in-memory snapshot
+// (internal/teamstore does no I/O for a read), so filtering it in Go costs
+// nothing worth measuring and needs no new index. The returned slice is
+// always non-nil for a non-superadmin, even when their org has no teams yet
+// — an empty, non-nil slice means "match nothing," which is the correct
+// answer for a brand-new org, not "match everything."
+func orgScope(w http.ResponseWriter, r *http.Request, teams TeamStore, log *slog.Logger) ([]string, bool) {
 	c, ok := caller(r)
 	if !ok {
 		writeError(w, log, http.StatusUnauthorized, "no_session",
 			"this endpoint requires a signed-in session")
-		return "", false
+		return nil, false
 	}
-	if !c.IsSuperadmin {
-		writeError(w, log, http.StatusForbidden, "org_scope_pending",
-			"organisation-scoped views are not available yet; this endpoint is superadmin-only")
-		return "", false
+
+	if c.IsSuperadmin {
+		if team := r.URL.Query().Get("team"); team != "" {
+			return []string{team}, true
+		}
+		return nil, true
 	}
-	return r.URL.Query().Get("team"), true
+
+	ids := []string{}
+	for _, t := range teams.List() {
+		if t.OrganizationID == c.OrgID {
+			ids = append(ids, t.ID)
+		}
+	}
+	sort.Strings(ids)
+	return ids, true
+}
+
+// teamInScope resolves a {id} path parameter to a team the caller is allowed to
+// act on, which is every team in their own organisation — or any team at all
+// for a superadmin.
+//
+// A team belonging to another organisation is reported as 404, identical to a
+// team that does not exist. Not 403: a 403 would confirm the ID is real, which
+// tells the caller something about another tenant even when the request is
+// refused. Every handler taking an {id} resolves it through here, so the rule
+// lives in one place rather than being re-derived eight times.
+func teamInScope(w http.ResponseWriter, r *http.Request, store TeamStore, log *slog.Logger) (auth.Team, bool) {
+	id := chi.URLParam(r, "id")
+
+	c, ok := caller(r)
+	if !ok {
+		writeError(w, log, http.StatusUnauthorized, "no_session",
+			"this endpoint requires a signed-in session")
+		return auth.Team{}, false
+	}
+
+	team, err := store.Get(id)
+	if err != nil {
+		writeTeamLookupError(w, log, id, err)
+		return auth.Team{}, false
+	}
+
+	if !c.IsSuperadmin && team.OrganizationID != c.OrgID {
+		writeError(w, log, http.StatusNotFound, "team_not_found", "no such team "+id)
+		return auth.Team{}, false
+	}
+	return team, true
 }

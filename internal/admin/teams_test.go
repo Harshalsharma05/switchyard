@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/Harshalsharma05/switchyard/internal/auth"
+	"github.com/Harshalsharma05/switchyard/internal/cache"
 	"github.com/Harshalsharma05/switchyard/internal/logstore"
 	"github.com/Harshalsharma05/switchyard/internal/provider"
 	"github.com/Harshalsharma05/switchyard/internal/telemetry"
@@ -63,17 +64,21 @@ func (s registryStore) Delete(_ context.Context, id string) (auth.Team, error) {
 // directly, the same way the gateway's authenticator would.
 func (s registryStore) Authenticate(k string) (*auth.Team, error) { return s.reg.Authenticate(k) }
 
+// acme sits in "personal", the organisation testAuth's non-superadmin caller
+// belongs to; globex sits in a different organisation entirely. That split is
+// what lets a scoping test assert "sees acme, not globex" instead of just
+// "sees everything or nothing."
 func testTeamStore(t *testing.T) registryStore {
 	t.Helper()
 	r, err := auth.NewRegistry([]auth.Team{
 		{
-			ID: "acme", Name: "Acme Corp", KeyHash: auth.HashKey("acme-key"),
+			ID: "acme", Name: "Acme Corp", OrganizationID: "personal", KeyHash: auth.HashKey("acme-key"),
 			AllowedProviders: []string{"groq"}, AllowedModels: []string{"m"},
 			RateLimits: auth.RateLimits{RPM: 60, TPM: 100_000}, MonthlyBudgetMicros: 50_000_000,
 			Priority: auth.PriorityRealtime, IsAdmin: true,
 		},
 		{
-			ID: "globex", Name: "Globex Inc", KeyHash: auth.HashKey("globex-key"),
+			ID: "globex", Name: "Globex Inc", OrganizationID: "other-org", KeyHash: auth.HashKey("globex-key"),
 			AllowedProviders: []string{"groq"}, AllowedModels: []string{"m"},
 			RateLimits: auth.RateLimits{RPM: 10, TPM: 20_000}, MonthlyBudgetMicros: 5_000_000,
 			Priority: auth.PriorityBatch,
@@ -556,7 +561,7 @@ func (failingAudit) RecordAudit(context.Context, logstore.AuditEntry) error {
 	return errors.New("audit log unavailable")
 }
 
-func (failingAudit) ListAudit(context.Context, int, string) (logstore.AuditPage, error) {
+func (failingAudit) ListAudit(context.Context, logstore.AuditQuery) (logstore.AuditPage, error) {
 	return logstore.AuditPage{}, errors.New("audit log unavailable")
 }
 
@@ -715,5 +720,203 @@ func TestDeleteTeamAuditFailureDeletesNothing(t *testing.T) {
 	}
 	if _, err := store.Authenticate("globex-key"); err != nil {
 		t.Errorf("team was deleted despite a failed audit write: %v", err)
+	}
+}
+
+// --- Step 2.4: org admin vs superadmin ------------------------------------
+
+// orgScopedServer wires the team and cache surface under a chosen identity, so
+// the same routes can be exercised as an org admin and as a superadmin.
+func orgScopedServer(t *testing.T, teams TeamStore, tuner CacheTuner, auth Auth) *httptest.Server {
+	t.Helper()
+	providers := fakeProviderLister{configs: []provider.Config{{Name: "groq", Models: []string{"m", "m2"}}}}
+	srv := httptest.NewServer(NewRouter(func() bool { return true }, teams, &fakeSpendReader{}, providers,
+		fakeHealthReader{}, &fakeBreakerController{}, nil, fakeReloader, nil, nil, tuner, nil,
+		QualityFeedbackConfig{}, false, nil, nil, auth, testMetrics(t), discardLogger()))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func doRequest(t *testing.T, srv *httptest.Server, method, path, body string) *http.Response {
+	t.Helper()
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
+	req, err := http.NewRequest(method, srv.URL+path, reader)
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+// An org admin's team list is their own organisation's, and a superadmin's is
+// everyone's. acme is in "personal" (testAuth's org), globex is not.
+func TestListTeamsScopedToCallersOrg(t *testing.T) {
+	cases := map[string]struct {
+		superadmin bool
+		want       []string
+	}{
+		"an org admin sees only their own org": {false, []string{"acme"}},
+		"a superadmin sees every org":          {true, []string{"acme", "globex"}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv := orgScopedServer(t, testTeamStore(t), nil, testAuth(tc.superadmin))
+
+			resp := doRequest(t, srv, http.MethodGet, "/admin/teams", "")
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200", resp.StatusCode)
+			}
+			var views []teamView
+			if err := json.NewDecoder(resp.Body).Decode(&views); err != nil {
+				t.Fatalf("decoding: %v", err)
+			}
+
+			got := make([]string, 0, len(views))
+			for _, v := range views {
+				got = append(got, v.ID)
+			}
+			if !slicesEqual(got, tc.want) {
+				t.Errorf("teams = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// Every {id} endpoint, one at a time, against a team in another organisation.
+// 404 in all cases — never 403, which would confirm globex exists.
+func TestTeamEndpointsHide404ForAnotherOrg(t *testing.T) {
+	cases := map[string]struct {
+		method, path, body string
+	}{
+		"read":         {http.MethodGet, "/admin/teams/globex", ""},
+		"patch":        {http.MethodPatch, "/admin/teams/globex", `{"rpm":1}`},
+		"delete":       {http.MethodDelete, "/admin/teams/globex", ""},
+		"reset budget": {http.MethodPost, "/admin/teams/globex/reset-budget", ""},
+		"rotate key":   {http.MethodPost, "/admin/teams/globex/key/rotate", ""},
+		"revoke key":   {http.MethodDelete, "/admin/teams/globex/key", ""},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			store := testTeamStore(t)
+			srv := orgScopedServer(t, store, nil, testAuth(false))
+
+			resp := doRequest(t, srv, tc.method, tc.path, tc.body)
+			if resp.StatusCode != http.StatusNotFound {
+				t.Fatalf("status = %d, want 404", resp.StatusCode)
+			}
+
+			// And nothing happened to it: the other org's team is untouched and
+			// its key still authenticates.
+			got, err := store.Get("globex")
+			if err != nil {
+				t.Fatalf("globex was mutated away: %v", err)
+			}
+			if got.RateLimits.RPM != 10 {
+				t.Errorf("globex rpm = %d, want 10 (unmodified)", got.RateLimits.RPM)
+			}
+			if _, err := store.Authenticate("globex-key"); err != nil {
+				t.Errorf("globex's key stopped authenticating: %v", err)
+			}
+		})
+	}
+}
+
+// The organisation a new team lands in comes from the session, never the body.
+func TestCreateTeamUsesCallersOrg(t *testing.T) {
+	t.Run("another org in the body is refused", func(t *testing.T) {
+		store := testTeamStore(t)
+		srv := orgScopedServer(t, store, nil, testAuth(false))
+
+		resp := doRequest(t, srv, http.MethodPost, "/admin/teams",
+			createBody(t, map[string]any{"organization_id": "other-org"}))
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+		if _, err := store.Get("initech-labs"); err == nil {
+			t.Error("the team was created despite naming another organization")
+		}
+	})
+
+	t.Run("omitting it lands in the caller's own org", func(t *testing.T) {
+		store := testTeamStore(t)
+		srv := orgScopedServer(t, store, nil, testAuth(false))
+
+		resp := doRequest(t, srv, http.MethodPost, "/admin/teams", createBody(t, nil))
+		if resp.StatusCode != http.StatusCreated {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d, want 201: %s", resp.StatusCode, body)
+		}
+		created, err := store.Get("initech-labs")
+		if err != nil {
+			t.Fatalf("created team missing: %v", err)
+		}
+		if created.OrganizationID != "personal" {
+			t.Errorf("organization = %q, want personal", created.OrganizationID)
+		}
+	})
+}
+
+// fakeCacheTuner records which purge was asked for, so the authorization split
+// can be asserted without a live Redis.
+type fakeCacheTuner struct{ purged string }
+
+func (f *fakeCacheTuner) Sweep(context.Context, []float32, int) (*cache.SweepReport, error) {
+	return &cache.SweepReport{}, nil
+}
+
+func (f *fakeCacheTuner) PurgeTeam(_ context.Context, teamID string) (*cache.PurgeResult, error) {
+	f.purged = "team:" + teamID
+	return &cache.PurgeResult{Scope: "team", Target: teamID}, nil
+}
+
+func (f *fakeCacheTuner) PurgePrefix(_ context.Context, prefix string) (*cache.PurgeResult, error) {
+	f.purged = "prefix:" + prefix
+	return &cache.PurgeResult{Scope: "prefix", Target: prefix}, nil
+}
+
+func (f *fakeCacheTuner) PurgeAll(context.Context) (*cache.PurgeResult, error) {
+	f.purged = "all"
+	return &cache.PurgeResult{Scope: "all"}, nil
+}
+
+// Purging one team is an org-admin action; purging by prefix or purging
+// everything reaches every tenant and stays superadmin-only.
+func TestPurgeCacheAuthorization(t *testing.T) {
+	cases := map[string]struct {
+		superadmin bool
+		query      string
+		wantStatus int
+		wantPurge  string
+	}{
+		"own team as org admin":        {false, "?team=acme", http.StatusOK, "team:acme"},
+		"another org's team is hidden": {false, "?team=globex", http.StatusNotFound, ""},
+		"purge all needs superadmin":   {false, "?all=true", http.StatusForbidden, ""},
+		"prefix needs superadmin":      {false, "?prefix=abc", http.StatusForbidden, ""},
+		"superadmin may purge all":     {true, "?all=true", http.StatusOK, "all"},
+		"superadmin may cross orgs":    {true, "?team=globex", http.StatusOK, "team:globex"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			tuner := &fakeCacheTuner{}
+			srv := orgScopedServer(t, testTeamStore(t), tuner, testAuth(tc.superadmin))
+
+			resp := doRequest(t, srv, http.MethodDelete, "/admin/cache"+tc.query, "")
+			if resp.StatusCode != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.wantStatus)
+			}
+			if tuner.purged != tc.wantPurge {
+				t.Errorf("purged %q, want %q", tuner.purged, tc.wantPurge)
+			}
+		})
 	}
 }

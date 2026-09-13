@@ -98,7 +98,11 @@ func configTeams() []auth.Team {
 			RateLimits:          auth.RateLimits{RPM: 10, TPM: 20000},
 			MonthlyBudgetMicros: 5_000_000,
 			Priority:            auth.PriorityBatch,
-			KeySource:           auth.KeySourceConfig,
+			// Deliberately the mirror of acme's is_admin: the two booleans are
+			// adjacent columns of the same type, so a transposed INSERT or scan
+			// would type-check cleanly and only this asymmetry catches it.
+			CacheIsolated: true,
+			KeySource:     auth.KeySourceConfig,
 		},
 	}
 }
@@ -134,11 +138,12 @@ func TestSeedImportsEveryTeam(t *testing.T) {
 			var keyHash *string
 			if err := conn.QueryRow(ctx, `
 				SELECT organization_id, name, priority, rpm, tpm, monthly_budget_micros,
-				       allowed_providers, allowed_models, is_admin, key_hash, key_source
+				       allowed_providers, allowed_models, is_admin, cache_isolated,
+				       key_hash, key_source
 				FROM teams WHERE id = $1 AND deleted_at IS NULL`, w.ID).Scan(
 				&org, &got.Name, &priority, &got.RateLimits.RPM, &got.RateLimits.TPM,
 				&got.MonthlyBudgetMicros, &got.AllowedProviders, &got.AllowedModels,
-				&got.IsAdmin, &keyHash, &got.KeySource,
+				&got.IsAdmin, &got.CacheIsolated, &keyHash, &got.KeySource,
 			); err != nil {
 				t.Fatalf("reading team back: %v", err)
 			}
@@ -157,6 +162,9 @@ func TestSeedImportsEveryTeam(t *testing.T) {
 			}
 			if got.IsAdmin != w.IsAdmin {
 				t.Errorf("is_admin = %v, want %v", got.IsAdmin, w.IsAdmin)
+			}
+			if got.CacheIsolated != w.CacheIsolated {
+				t.Errorf("cache_isolated = %v, want %v", got.CacheIsolated, w.CacheIsolated)
 			}
 			if keyHash == nil || *keyHash != w.KeyHash {
 				t.Errorf("key_hash = %v, want %q", keyHash, w.KeyHash)
