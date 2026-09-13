@@ -27,6 +27,7 @@ type summaryView struct {
 	GeneratedAt string                `json:"generated_at"`
 	Degraded    bool                  `json:"degraded"`
 	Requests    summaryRequestsView   `json:"requests"`
+	Tokens      summaryTokensView     `json:"tokens"`
 	OverheadMS  summaryOverheadView   `json:"overhead_ms"`
 	Cost        summaryCostView       `json:"cost"`
 	Cache       summaryCacheView      `json:"cache"`
@@ -65,6 +66,10 @@ type summaryOverheadPoint struct {
 type summaryRequestsView struct {
 	Total     *float64 `json:"total"`
 	ErrorRate *float64 `json:"error_rate"`
+}
+
+type summaryTokensView struct {
+	Total *float64 `json:"total"`
 }
 
 type summaryOverheadView struct {
@@ -110,6 +115,7 @@ func toSummaryView(res summary.Result, health HealthReader, cacheEnabled, qualit
 		GeneratedAt: res.GeneratedAt.Format(time.RFC3339Nano),
 		Degraded:    res.Degraded,
 		Requests:    summaryRequestsView{Total: res.RequestCount, ErrorRate: res.ErrorRate},
+		Tokens:      summaryTokensView{Total: res.TokensTotal},
 		OverheadMS:  summaryOverheadView{P50: res.OverheadP50, P95: res.OverheadP95, P99: res.OverheadP99},
 		Cost:        summaryCostView{TotalUSD: res.CostUSD},
 		Cache:       summaryCacheView{Enabled: cacheEnabled, HitRate: res.CacheHitRate},

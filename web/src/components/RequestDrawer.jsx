@@ -30,7 +30,7 @@ function RequestDetail({ r }) {
         <dl className="rd-list">
           <Row label="ID"><span className="num rd-break">{r.id}</span></Row>
           <Row label="Time"><span className="num">{formatDateTime(r.timestamp)}</span></Row>
-          <Row label="Team"><span className="num">{r.team_id}</span></Row>
+          <Row label="Project"><span className="num">{r.team_id}</span></Row>
           <Row label="Status"><StatusCode code={r.status_code} /></Row>
         </dl>
       </section>

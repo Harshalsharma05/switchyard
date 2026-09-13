@@ -1,7 +1,9 @@
 // Routing. Signed-out sends every app route to the auth page, remembering
 // where the user was headed; signed-in mounts the shell. Superadmin-only routes
 // are gated here as well as hidden in the rail — someone who types the URL is
-// redirected, never shown a broken screen.
+// redirected, never shown a broken screen. Settings is not one of them since
+// Step 3.4: every signed-in user is an admin of their own organisation, same
+// as the endpoints it calls.
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { NEXT_PATH_KEY, useSession } from './hooks/useSession.js'
 import AppShell from './components/AppShell.jsx'
@@ -64,7 +66,7 @@ export default function App() {
         <Route path="live-ops" element={<RequireSuperadmin><LiveOps /></RequireSuperadmin>} />
         <Route path="logs" element={<RequestLogs />} />
         <Route path="usage" element={<UsageCost />} />
-        <Route path="settings" element={<RequireSuperadmin><Settings /></RequireSuperadmin>} />
+        <Route path="settings" element={<Settings />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

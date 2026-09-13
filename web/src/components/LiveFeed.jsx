@@ -8,7 +8,7 @@ import { StatusCode } from './primitives.jsx'
 import { EmptyState } from './states.jsx'
 import { formatClock, formatMs, formatUSD, middleTruncate } from '../utils/format.js'
 
-export default function LiveFeed({ rows, showTeam }) {
+export default function LiveFeed({ rows, showProject }) {
   // Non-null while hovering: the snapshot taken when the pointer arrived.
   const [frozen, setFrozen] = useState(null)
   const shown = frozen ?? rows ?? []
@@ -28,7 +28,7 @@ export default function LiveFeed({ rows, showTeam }) {
           <tr>
             <th>Time</th>
             <th>Request</th>
-            {showTeam && <th>Team</th>}
+            {showProject && <th>Project</th>}
             <th>Provider</th>
             <th>Model</th>
             <th>Status</th>
@@ -42,7 +42,7 @@ export default function LiveFeed({ rows, showTeam }) {
             <tr key={r.id}>
               <td className="num">{formatClock(r.timestamp)}</td>
               <td className="num" title={r.id}>{middleTruncate(r.id)}</td>
-              {showTeam && <td>{r.team_id}</td>}
+              {showProject && <td>{r.team_id}</td>}
               <td>{r.provider || '—'}</td>
               <td className="num" title={r.served_model}>{r.served_model || '—'}</td>
               <td>

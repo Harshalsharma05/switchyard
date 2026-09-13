@@ -31,6 +31,7 @@ type Result struct {
 	RequestCount *float64
 	ErrorRate    *float64
 	CacheHitRate *float64
+	TokensTotal  *float64
 
 	// QualityAvg is the mean async judge score in the window, QualityScored
 	// the number of responses scored. Both nil until the worker has scored
@@ -213,6 +214,12 @@ func (s *Service) build(ctx context.Context, opts Options) Result {
 
 	q(&r.RequestCount, fmt.Sprintf("sum(increase(%s[%s]))", reqTotal, win))
 	q(&r.ErrorRate, fmt.Sprintf("sum(increase(%s[%s])) / sum(increase(%s[%s]))", req5xx, win, reqTotal, win))
+
+	// switchyard_tokens_total also carries provider, model, and direction
+	// labels; summing collapses those, leaving only the team scope.
+	tokensTotal := selector("switchyard_tokens_total", teamSel)
+	q(&r.TokensTotal, fmt.Sprintf("sum(increase(%s[%s]))", tokensTotal, win))
+
 	q(&r.OverheadP50, overheadQuantile(0.5, win))
 	q(&r.OverheadP95, overheadQuantile(0.95, win))
 	q(&r.OverheadP99, overheadQuantile(0.99, win))

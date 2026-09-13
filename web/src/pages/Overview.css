@@ -7,14 +7,6 @@
   border-radius: var(--radius-control);
 }
 
-/* KPI row: five equal cards across the full width. */
-.kpi-row {
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: var(--space-3);
-  margin-bottom: var(--space-6);
-}
-
 /* Two-up: 8 / 4 split, main chart column plus side panels. */
 .split {
   display: grid;
@@ -89,6 +81,5 @@
 }
 
 @media (max-width: 1100px) {
-  .kpi-row { grid-template-columns: repeat(2, 1fr); }
   .split { grid-template-columns: 1fr; }
 }

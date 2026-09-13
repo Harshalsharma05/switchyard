@@ -1,6 +1,6 @@
-// One team's month-to-date spend against its budget (Step 6.1). A KPI card with
-// a thin progress bar beneath, coloured by threshold: accent under 80%, warn at
-// 80%, error at 100%.
+// One project's month-to-date spend against its budget (Step 6.1). A KPI card
+// with a thin progress bar beneath, coloured by threshold: accent under 80%,
+// warn at 80%, error at 100%.
 import './SpendCard.css'
 
 function tone(pct) {

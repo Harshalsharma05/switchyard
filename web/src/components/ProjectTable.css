@@ -1,26 +1,26 @@
-/* Team management table (Step 6.4). Uses the shared .table primitive; only its
-   own inline-edit, key-action, and show-once bits live here. */
-.tt-wrap { overflow-x: auto; }
+/* Project management table (Step 6.4). Uses the shared .table primitive; only
+   its own inline-edit, key-action, and show-once bits live here. */
+.pt-wrap { overflow-x: auto; }
 
-.tt-name { color: var(--text-primary); }
-.tt-id {
+.pt-name { color: var(--text-primary); }
+.pt-id {
   margin-left: var(--space-2);
   font-size: 11px;
   color: var(--text-muted);
 }
-.tt-muted { color: var(--text-muted); }
-.tt-admin { font-size: 12px; color: var(--status-info); }
+.pt-muted { color: var(--text-muted); }
+.pt-admin { font-size: 12px; color: var(--status-info); }
 
-.tt-row-editing td { background: var(--bg-raised); }
+.pt-row-editing td { background: var(--bg-raised); }
 
 /* --- key column --- */
-.tt-key { min-width: 220px; }
-.tt-key-label { color: var(--text-secondary); }
-.tt-key-actions { margin-left: var(--space-2); white-space: nowrap; }
+.pt-key { min-width: 220px; }
+.pt-key-label { color: var(--text-secondary); }
+.pt-key-actions { margin-left: var(--space-2); white-space: nowrap; }
 
 /* Inline confirmation — never a modal (DESIGN.md). Shared by key rotate/revoke
    and budget reset. */
-.tt-confirm {
+.pt-confirm {
   display: inline-flex;
   align-items: center;
   flex-wrap: wrap;
@@ -30,11 +30,11 @@
 }
 
 /* --- show-once key panel --- */
-.tt-showonce-row td {
+.pt-showonce-row td {
   padding: 0;
   background: var(--bg-inset);
 }
-.tt-showonce {
+.pt-showonce {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
@@ -42,9 +42,9 @@
   padding: var(--space-3);
   border-left: 2px solid var(--accent);
 }
-.tt-showonce-head { font-size: 12px; font-weight: 500; color: var(--text-primary); }
-.tt-showonce-keyrow { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
-.tt-showonce-key {
+.pt-showonce-head { font-size: 12px; font-weight: 500; color: var(--text-primary); }
+.pt-showonce-keyrow { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
+.pt-showonce-key {
   padding: var(--space-1) var(--space-2);
   font-size: 13px;
   color: var(--text-primary);
@@ -53,42 +53,42 @@
   border-radius: var(--radius-control);
   overflow-wrap: anywhere;
 }
-.tt-showonce-warn { margin: 0; font-size: 11px; color: var(--status-warn); }
+.pt-showonce-warn { margin: 0; font-size: 11px; color: var(--status-warn); }
 
-/* --- create team (Tier 1, Step 2.6) --- */
-.tt-create-bar { margin-top: var(--space-3); }
-.tt-create-bar .tt-btn,
-.tt-create-foot .tt-btn { margin-left: 0; }
+/* --- create project (Tier 1, Step 2.6) --- */
+.pt-create-bar { margin-top: var(--space-3); }
+.pt-create-bar .pt-btn,
+.pt-create-foot .pt-btn { margin-left: 0; }
 
-.tt-created { margin-top: var(--space-3); }
-.tt-created-note { margin: 0; font-size: 12px; color: var(--text-secondary); }
+.pt-created { margin-top: var(--space-3); }
+.pt-created-note { margin: 0; font-size: 12px; color: var(--text-secondary); }
 
 /* A nested panel: raised surface, hairline border, card radius (DESIGN.md). */
-.tt-create {
+.pt-create {
   margin-top: var(--space-4);
   padding: var(--space-4);
   background: var(--bg-raised);
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
 }
-.tt-create-head {
+.pt-create-head {
   margin: 0 0 var(--space-3);
   font-size: 13px;
   font-weight: 500;
   color: var(--text-primary);
 }
-.tt-create-grid {
+.pt-create-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   gap: var(--space-3);
 }
 
-.tt-field { display: flex; flex-direction: column; gap: var(--space-1); }
-.tt-label { padding: 0; font-size: 12px; color: var(--text-secondary); }
-.tt-hint { font-size: 11px; color: var(--text-muted); }
+.pt-field { display: flex; flex-direction: column; gap: var(--space-1); }
+.pt-label { padding: 0; font-size: 12px; color: var(--text-secondary); }
+.pt-hint { font-size: 11px; color: var(--text-muted); }
 
 /* Form controls: inset well, hairline border, 32px (DESIGN.md "Inputs"). */
-.tt-control {
+.pt-control {
   height: 32px;
   padding: 0 var(--space-2);
   font-size: 13px;
@@ -97,19 +97,19 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-control);
 }
-.tt-control:focus-visible {
+.pt-control:focus-visible {
   border-color: var(--accent);
   outline: 2px solid var(--status-info-bg);
 }
-.tt-control:disabled { color: var(--text-muted); }
+.pt-control:disabled { color: var(--text-muted); }
 
-.tt-allow {
+.pt-allow {
   display: grid;
   grid-template-columns: 1fr 2fr;
   gap: var(--space-4);
   margin-top: var(--space-4);
 }
-.tt-allow-group {
+.pt-allow-group {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
@@ -118,34 +118,34 @@
   border: 0;
   min-width: 0;
 }
-.tt-models { display: flex; flex-direction: column; gap: var(--space-1); }
-.tt-models-provider { margin-top: var(--space-1); font-size: 11px; color: var(--text-muted); }
+.pt-models { display: flex; flex-direction: column; gap: var(--space-1); }
+.pt-models-provider { margin-top: var(--space-1); font-size: 11px; color: var(--text-muted); }
 
-.tt-check {
+.pt-check {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
   font-size: 13px;
   color: var(--text-primary);
 }
-.tt-check input { accent-color: var(--accent); }
-.tt-check input:focus-visible { outline: 2px solid var(--status-info-bg); }
-.tt-create-admin { margin-top: var(--space-4); }
+.pt-check input { accent-color: var(--accent); }
+.pt-check input:focus-visible { outline: 2px solid var(--status-info-bg); }
+.pt-create-admin { margin-top: var(--space-4); }
 
-.tt-create-foot {
+.pt-create-foot {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: var(--space-3);
   margin-top: var(--space-4);
 }
-.tt-create-error { font-size: 12px; color: var(--status-error); }
+.pt-create-error { font-size: 12px; color: var(--status-error); }
 
 @media (max-width: 1100px) {
-  .tt-allow { grid-template-columns: 1fr; }
+  .pt-allow { grid-template-columns: 1fr; }
 }
 
-.tt-input {
+.pt-input {
   width: 96px;
   height: 28px;
   padding: 0 var(--space-2);
@@ -156,11 +156,11 @@
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-control);
 }
-.tt-input:focus-visible { border-color: var(--accent); outline: none; }
+.pt-input:focus-visible { border-color: var(--accent); outline: none; }
 
-.tt-actions { white-space: nowrap; text-align: right; }
+.pt-actions { white-space: nowrap; text-align: right; }
 
-.tt-btn {
+.pt-btn {
   height: 28px;
   padding: 0 var(--space-2);
   margin-left: var(--space-2);
@@ -171,15 +171,15 @@
   border-radius: var(--radius-control);
   cursor: pointer;
 }
-.tt-btn:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-raised); }
-.tt-btn:disabled { color: var(--text-muted); cursor: not-allowed; }
+.pt-btn:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-raised); }
+.pt-btn:disabled { color: var(--text-muted); cursor: not-allowed; }
 
-.tt-btn-sm { height: 24px; font-size: 11px; }
-.tt-btn-primary { color: var(--accent); border-color: var(--accent); }
+.pt-btn-sm { height: 24px; font-size: 11px; }
+.pt-btn-primary { color: var(--accent); border-color: var(--accent); }
 /* Destructive: red border and text, never a red fill (DESIGN.md). */
-.tt-btn-danger { color: var(--status-error); border-color: var(--status-error); }
+.pt-btn-danger { color: var(--status-error); border-color: var(--status-error); }
 
-.tt-error-row td {
+.pt-error-row td {
   padding-top: var(--space-1);
   font-size: 12px;
   color: var(--status-error);

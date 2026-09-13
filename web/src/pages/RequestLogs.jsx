@@ -8,13 +8,16 @@ import { Card, StatusCode } from '../components/primitives.jsx'
 import LogFilters from '../components/LogFilters.jsx'
 import RequestDrawer from '../components/RequestDrawer.jsx'
 import { EmptyState, ErrorState, Loading } from '../components/states.jsx'
-import { useSession } from '../hooks/useSession.js'
+import { useProjectScope } from '../hooks/useProjectScope.js'
 import { formatCostShort, formatDateTime, formatMs, middleTruncate } from '../utils/format.js'
 import './RequestLogs.css'
 
-// URL params that narrow the result set. `range` is handled separately — it is
-// always present and maps to a `since` timestamp rather than a raw parameter.
-const NARROWING = ['team', 'status', 'provider', 'model', 'cache', 'fallback']
+// URL params that narrow the result set, each owned by this page. Which
+// project to look at is a separate, shared concern owned by the top bar's
+// selector (Step 3.3), not a local filter — see projectId below. `range` is
+// handled separately too — it is always present and maps to a `since`
+// timestamp rather than a raw parameter.
+const NARROWING = ['status', 'provider', 'model', 'cache', 'fallback']
 const RANGE_MS = { '1h': 3_600e3, '24h': 86_400e3, '7d': 604_800e3 }
 
 function ModelCell({ requested, served }) {
@@ -30,18 +33,17 @@ function ModelCell({ requested, served }) {
 }
 
 export default function RequestLogs() {
-  const { isSuperadmin } = useSession()
+  const { projectId } = useProjectScope()
   const [searchParams, setSearchParams] = useSearchParams()
 
   const filters = useMemo(() => {
     const f = {}
     for (const k of NARROWING) {
-      if (k === 'team' && !isSuperadmin) continue // a non-admin cannot filter by team
       const v = searchParams.get(k)
       if (v) f[k] = v
     }
     return f
-  }, [searchParams, isSuperadmin])
+  }, [searchParams])
   const range = searchParams.get('range') || '24h'
 
   // One cursor per page visited; '' is the first page. Keyset pagination, never
@@ -53,19 +55,32 @@ export default function RequestLogs() {
   const [selected, setSelected] = useState(null)
   const closeDrawer = useCallback(() => setSelected(null), [])
 
+  // The project scope changes from the top bar, outside this component's own
+  // filter machinery, so it needs its own reset — same effect `set()` below
+  // has for a page-local filter change. Adjusted during render rather than in
+  // an effect (React's own pattern for "reset state when a prop changes") so
+  // the setState here doesn't trigger a cascading extra render.
+  const [scopedTo, setScopedTo] = useState(projectId)
+  if (scopedTo !== projectId) {
+    setScopedTo(projectId)
+    setCursors([''])
+    setSelected(null)
+  }
+
   useEffect(() => {
     const ac = new AbortController()
     // `since` is a pinned lower bound derived from the range; computed here in
     // the effect because Date.now() is impure and must not run during render.
     const since = new Date(Date.now() - (RANGE_MS[range] ?? RANGE_MS['24h'])).toISOString()
-    fetchRequests({ cursor, filters: { since, ...filters }, signal: ac.signal })
+    const scoped = { since, ...filters, ...(projectId ? { team: projectId } : {}) }
+    fetchRequests({ cursor, filters: scoped, signal: ac.signal })
       .then((data) => setState({ loading: false, error: null, data }))
       .catch((err) => {
         if (err.name === 'AbortError') return
         setState({ loading: false, error: err, data: null })
       })
     return () => ac.abort()
-  }, [cursor, nonce, filters, range])
+  }, [cursor, nonce, filters, range, projectId])
 
   const rows = state.data?.requests ?? []
   const hasNext = Boolean(state.data?.next_cursor)
@@ -128,7 +143,7 @@ export default function RequestLogs() {
               <tr>
                 <th>Time</th>
                 <th>Request</th>
-                {isSuperadmin && <th>Team</th>}
+                {!projectId && <th>Project</th>}
                 <th>Provider</th>
                 <th>Model</th>
                 <th>Routing</th>
@@ -156,7 +171,7 @@ export default function RequestLogs() {
                 >
                   <td className="num">{formatDateTime(r.timestamp)}</td>
                   <td className="num" title={r.id}>{middleTruncate(r.id)}</td>
-                  {isSuperadmin && <td>{r.team_id}</td>}
+                  {!projectId && <td>{r.team_id}</td>}
                   <td>{r.provider || '—'}</td>
                   <td><ModelCell requested={r.requested_model} served={r.served_model} /></td>
                   <td>
@@ -214,7 +229,6 @@ export default function RequestLogs() {
       <h1 className="page-title">Request logs</h1>
       <Card>
         <LogFilters
-          isAdmin={isSuperadmin}
           filters={filters}
           range={range}
           set={set}

@@ -1,9 +1,9 @@
 // The Request Logs filter bar (Step 5.2). Every filter is server-side; this
 // component only chooses values and hands them up. Provider/model options come
-// from the provider catalogue, team options from /admin/teams (admin only).
+// from the provider catalogue. Which project to look at is the top bar's
+// shared selector (Step 3.3), not a filter of this component's own.
 import { useEffect, useState } from 'react'
 import { fetchProviders } from '../api/providers.js'
-import { fetchTeams } from '../api/teams.js'
 
 const STATUSES = [
   ['2xx', '2xx success'],
@@ -31,10 +31,9 @@ function Field({ label, value, onChange, children }) {
   )
 }
 
-export default function LogFilters({ isAdmin, filters, range, set, clearAll, activeCount }) {
+export default function LogFilters({ filters, range, set, clearAll, activeCount }) {
   const [providers, setProviders] = useState([])
   const [models, setModels] = useState([])
-  const [teams, setTeams] = useState([])
 
   useEffect(() => {
     const ac = new AbortController()
@@ -47,24 +46,8 @@ export default function LogFilters({ isAdmin, filters, range, set, clearAll, act
     return () => ac.abort()
   }, [])
 
-  useEffect(() => {
-    if (!isAdmin) return
-    const ac = new AbortController()
-    fetchTeams(ac.signal)
-      .then((list) => setTeams(list.map((t) => ({ id: t.id, name: t.name }))))
-      .catch(() => {})
-    return () => ac.abort()
-  }, [isAdmin])
-
   return (
     <div className="logf">
-      {isAdmin && (
-        <Field label="Team" value={filters.team ?? ''} onChange={(v) => set('team', v)}>
-          <option value="">All teams</option>
-          {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-        </Field>
-      )}
-
       <Field label="Status" value={filters.status ?? ''} onChange={(v) => set('status', v)}>
         <option value="">Any status</option>
         {STATUSES.map(([v, label]) => <option key={v} value={v}>{label}</option>)}

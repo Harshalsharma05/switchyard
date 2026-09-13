@@ -46,22 +46,22 @@ function ReloadControl({ onReloaded }) {
   return (
     <div className="sys-reload">
       {phase === 'confirm' ? (
-        <span className="tt-confirm">
+        <span className="pt-confirm">
           Reload config from disk?
-          <button type="button" className="tt-btn tt-btn-sm tt-btn-primary" onClick={run}>Reload</button>
-          <button type="button" className="tt-btn tt-btn-sm" onClick={() => setPhase('idle')}>Cancel</button>
+          <button type="button" className="pt-btn pt-btn-sm pt-btn-primary" onClick={run}>Reload</button>
+          <button type="button" className="pt-btn pt-btn-sm" onClick={() => setPhase('idle')}>Cancel</button>
         </span>
       ) : (
-        <button type="button" className="tt-btn" onClick={() => setPhase('confirm')} disabled={phase === 'pending'}>
+        <button type="button" className="pt-btn" onClick={() => setPhase('confirm')} disabled={phase === 'pending'}>
           {phase === 'pending' ? 'Reloading…' : 'Reload config'}
         </button>
       )}
       {result && !error && (
-        <span className="sys-reload-ok num">reloaded · {result.providers} providers · {result.teams} teams</span>
+        <span className="sys-reload-ok num">reloaded · {result.providers} providers · {result.teams} projects</span>
       )}
       {error && <span className="sys-reload-err">{error}</span>}
       <p className="sys-note">
-        Reload re-reads <code className="num">configs/providers.yaml</code> only. Teams live
+        Reload re-reads <code className="num">configs/providers.yaml</code> only. Projects live
         in Postgres, so a key rotation or limit edit is never reverted by a reload — the
         audit log records every reload.
       </p>

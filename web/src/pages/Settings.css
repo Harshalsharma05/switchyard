@@ -1,6 +1,6 @@
-/* Settings — teams, audit log, and system info. Section rhythm plus the audit
-   table, the system definition list, and the reload control. Team-table styling
-   lives in TeamTable.css. */
+/* Settings — projects, audit log, and system info. Section rhythm plus the
+   audit table, the system definition list, and the reload control.
+   Project-table styling lives in ProjectTable.css. */
 
 .settings {
   display: flex;

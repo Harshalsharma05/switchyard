@@ -1,17 +1,18 @@
-// Team management (Settings §1–2). A table over the admin team API: inline edit
-// for rate limits and budget, per-team budget reset, per-team key rotate /
-// revoke, team delete, and a create form (Tier 1, Step 2.6). No optimistic UI —
-// every action shows a pending state and then the server's actual response
-// (DESIGN.md). Every confirmation is inline, never a modal. The Key column shows
-// a masked display form for a key this gateway minted and the source otherwise —
-// never the key, never the hash.
+// Project management (Settings §1–2). A table over the admin team API: inline
+// edit for rate limits and budget, per-project budget reset, per-project key
+// rotate / revoke, project delete, and a create form (Tier 1, Step 2.6). No
+// optimistic UI — every action shows a pending state and then the server's
+// actual response (DESIGN.md). Every confirmation is inline, never a modal.
+// The Key column shows a masked display form for a key this gateway minted
+// and the source otherwise — never the key, never the hash.
 import { useEffect, useState } from 'react'
 import {
-  createTeam, deleteTeam, patchTeam, resetTeamBudget, revokeTeamKey, rotateTeamKey,
-} from '../api/teams.js'
+  createProject, deleteProject, patchProject, resetProjectBudget, revokeProjectKey, rotateProjectKey,
+} from '../api/projects.js'
 import { fetchProviders } from '../api/providers.js'
+import { useSession } from '../hooks/useSession.js'
 import { formatUSD } from '../utils/format.js'
-import './TeamTable.css'
+import './ProjectTable.css'
 
 const COLS = 10
 
@@ -40,7 +41,7 @@ function keyLabel(key) {
 
 // The show-once panel: the plaintext key, a copy button, the server's warning,
 // and an explicit "not shown again" line. Dismiss collapses it back to masked.
-// Shared by key rotation and team creation — one panel, one contract.
+// Shared by key rotation and project creation — one panel, one contract.
 function ShowOncePanel({ result, onDismiss }) {
   const [copied, setCopied] = useState(false)
   const copy = async () => {
@@ -53,23 +54,23 @@ function ShowOncePanel({ result, onDismiss }) {
     }
   }
   return (
-    <div className="tt-showonce">
-      <div className="tt-showonce-head">New API key — copy it now</div>
-      <div className="tt-showonce-keyrow">
-        <code className="tt-showonce-key num">{result.api_key}</code>
-        <button type="button" className="tt-btn tt-btn-primary" onClick={copy}>
+    <div className="pt-showonce">
+      <div className="pt-showonce-head">New API key — copy it now</div>
+      <div className="pt-showonce-keyrow">
+        <code className="pt-showonce-key num">{result.api_key}</code>
+        <button type="button" className="pt-btn pt-btn-primary" onClick={copy}>
           {copied ? 'Copied' : 'Copy'}
         </button>
       </div>
-      <p className="tt-showonce-warn">
+      <p className="pt-showonce-warn">
         This key will not be shown again. {result.warning}
       </p>
-      <button type="button" className="tt-btn" onClick={onDismiss}>Dismiss</button>
+      <button type="button" className="pt-btn" onClick={onDismiss}>Dismiss</button>
     </div>
   )
 }
 
-function TeamRow({ team, callerTeamId, onChanged }) {
+function ProjectRow({ project, callerProjectId, onChanged }) {
   const [editing, setEditing] = useState(false)
   const [form, setForm] = useState({ rpm: '', tpm: '', budget: '' })
   const [busy, setBusy] = useState(null) // 'save' | 'reset' | 'key' | 'delete'
@@ -79,11 +80,11 @@ function TeamRow({ team, callerTeamId, onChanged }) {
   const [deletePhase, setDeletePhase] = useState(null) // null | 'confirm' | 'self'
   const [rotated, setRotated] = useState(null) // { api_key, key, warning }
 
-  const rl = team.rate_limits
-  const isSelf = team.id === callerTeamId
+  const rl = project.rate_limits
+  const isSelf = project.id === callerProjectId
 
   const startEdit = () => {
-    setForm({ rpm: String(rl.rpm), tpm: String(rl.tpm), budget: String(team.monthly_budget_usd) })
+    setForm({ rpm: String(rl.rpm), tpm: String(rl.tpm), budget: String(project.monthly_budget_usd) })
     setError(null)
     setEditing(true)
   }
@@ -100,13 +101,13 @@ function TeamRow({ team, callerTeamId, onChanged }) {
     const patch = {}
     if (rpm !== rl.rpm) patch.rpm = rpm
     if (tpm !== rl.tpm) patch.tpm = tpm
-    if (budget !== team.monthly_budget_usd) patch.monthly_budget_usd = budget
+    if (budget !== project.monthly_budget_usd) patch.monthly_budget_usd = budget
     if (Object.keys(patch).length === 0) { setEditing(false); return }
 
     setBusy('save')
     setError(null)
     try {
-      await patchTeam(team.id, patch)
+      await patchProject(project.id, patch)
       setEditing(false)
       onChanged()
     } catch (e) {
@@ -121,7 +122,7 @@ function TeamRow({ team, callerTeamId, onChanged }) {
     setBusy('reset')
     setError(null)
     try {
-      await resetTeamBudget(team.id)
+      await resetProjectBudget(project.id)
       onChanged()
     } catch (e) {
       setError(e.message || 'the reset was not applied')
@@ -135,7 +136,7 @@ function TeamRow({ team, callerTeamId, onChanged }) {
     setBusy('key')
     setError(null)
     try {
-      const result = await rotateTeamKey(team.id)
+      const result = await rotateProjectKey(project.id)
       setRotated(result)
       onChanged()
     } catch (e) {
@@ -150,7 +151,7 @@ function TeamRow({ team, callerTeamId, onChanged }) {
     setBusy('key')
     setError(null)
     try {
-      await revokeTeamKey(team.id)
+      await revokeProjectKey(project.id)
       onChanged()
     } catch (e) {
       setError(e.message || 'the key was not revoked')
@@ -171,17 +172,17 @@ function TeamRow({ team, callerTeamId, onChanged }) {
     setBusy('delete')
     setError(null)
     try {
-      await deleteTeam(team.id)
+      await deleteProject(project.id)
       onChanged() // the refreshed list no longer contains this row
     } catch (e) {
-      setError(e.message || 'the team was not deleted')
+      setError(e.message || 'the project was not deleted')
       setBusy(null)
     }
   }
 
   const field = (name) => (
     <input
-      className="tt-input num"
+      className="pt-input num"
       type="number"
       min="0"
       value={form[name]}
@@ -190,55 +191,55 @@ function TeamRow({ team, callerTeamId, onChanged }) {
     />
   )
 
-  const models = team.allowed_models ?? []
+  const models = project.allowed_models ?? []
 
   let actions
   if (editing) {
     actions = (
       <>
-        <button type="button" className="tt-btn tt-btn-primary" onClick={save} disabled={busy === 'save'}>
+        <button type="button" className="pt-btn pt-btn-primary" onClick={save} disabled={busy === 'save'}>
           {busy === 'save' ? 'Saving…' : 'Save'}
         </button>
-        <button type="button" className="tt-btn" onClick={cancel} disabled={busy === 'save'}>
+        <button type="button" className="pt-btn" onClick={cancel} disabled={busy === 'save'}>
           Cancel
         </button>
       </>
     )
   } else if (resetPhase === 'confirm') {
     actions = (
-      <span className="tt-confirm">
-        Reset {team.name}'s spend to $0.00?
-        <button type="button" className="tt-btn tt-btn-sm tt-btn-danger" onClick={reset}>Reset</button>
-        <button type="button" className="tt-btn tt-btn-sm" onClick={() => setResetPhase(null)}>Cancel</button>
+      <span className="pt-confirm">
+        Reset {project.name}'s spend to $0.00?
+        <button type="button" className="pt-btn pt-btn-sm pt-btn-danger" onClick={reset}>Reset</button>
+        <button type="button" className="pt-btn pt-btn-sm" onClick={() => setResetPhase(null)}>Cancel</button>
       </span>
     )
   } else if (deletePhase === 'confirm') {
     actions = (
-      <span className="tt-confirm">
-        Delete {team.name}? Its key stops working immediately, and the name cannot be reused.
-        <button type="button" className="tt-btn tt-btn-sm tt-btn-danger" onClick={remove}>Delete</button>
-        <button type="button" className="tt-btn tt-btn-sm" onClick={() => setDeletePhase(null)}>Cancel</button>
+      <span className="pt-confirm">
+        Delete {project.name}? Its key stops working immediately, and the name cannot be reused.
+        <button type="button" className="pt-btn pt-btn-sm pt-btn-danger" onClick={remove}>Delete</button>
+        <button type="button" className="pt-btn pt-btn-sm" onClick={() => setDeletePhase(null)}>Cancel</button>
       </span>
     )
   } else if (deletePhase === 'self') {
     actions = (
-      <span className="tt-confirm">
-        You cannot delete the team you are signed in as. Sign in with another admin key to delete it.
-        <button type="button" className="tt-btn tt-btn-sm" onClick={() => setDeletePhase(null)}>OK</button>
+      <span className="pt-confirm">
+        You cannot delete the project you are signed in as. Sign in with another admin key to delete it.
+        <button type="button" className="pt-btn pt-btn-sm" onClick={() => setDeletePhase(null)}>OK</button>
       </span>
     )
   } else if (busy === 'delete') {
-    actions = <span className="tt-muted">Deleting…</span>
+    actions = <span className="pt-muted">Deleting…</span>
   } else {
     actions = (
       <>
-        <button type="button" className="tt-btn" onClick={startEdit} disabled={busy != null}>
+        <button type="button" className="pt-btn" onClick={startEdit} disabled={busy != null}>
           Edit
         </button>
-        <button type="button" className="tt-btn" onClick={() => setResetPhase('confirm')} disabled={busy != null}>
+        <button type="button" className="pt-btn" onClick={() => setResetPhase('confirm')} disabled={busy != null}>
           {busy === 'reset' ? 'Resetting…' : 'Reset budget'}
         </button>
-        <button type="button" className="tt-btn" onClick={askDelete} disabled={busy != null}>
+        <button type="button" className="pt-btn" onClick={askDelete} disabled={busy != null}>
           Delete
         </button>
       </>
@@ -247,23 +248,23 @@ function TeamRow({ team, callerTeamId, onChanged }) {
 
   return (
     <>
-      <tr className={editing ? 'tt-row-editing' : ''}>
+      <tr className={editing ? 'pt-row-editing' : ''}>
         <td>
-          <span className="tt-name">{team.name}</span>
-          <span className="tt-id num">{team.id}</span>
+          <span className="pt-name">{project.name}</span>
+          <span className="pt-id num">{project.id}</span>
         </td>
-        <td className="tt-key">
-          <span className="num tt-key-label" title={`key source: ${team.key?.source ?? 'config'}`}>
-            {keyLabel(team.key)}
+        <td className="pt-key">
+          <span className="num pt-key-label" title={`key source: ${project.key?.source ?? 'config'}`}>
+            {keyLabel(project.key)}
           </span>
           {keyPhase === null && busy !== 'key' && (
-            <span className="tt-key-actions">
-              <button type="button" className="tt-btn tt-btn-sm" onClick={() => setKeyPhase('rotate')} disabled={busy != null}>
+            <span className="pt-key-actions">
+              <button type="button" className="pt-btn pt-btn-sm" onClick={() => setKeyPhase('rotate')} disabled={busy != null}>
                 Rotate
               </button>
               <button
                 type="button"
-                className="tt-btn tt-btn-sm"
+                className="pt-btn pt-btn-sm"
                 onClick={() => setKeyPhase('revoke')}
                 disabled={busy != null || isSelf}
                 title={isSelf ? 'You cannot revoke the key you are signed in with' : undefined}
@@ -272,46 +273,46 @@ function TeamRow({ team, callerTeamId, onChanged }) {
               </button>
             </span>
           )}
-          {busy === 'key' && <span className="tt-muted">Working…</span>}
+          {busy === 'key' && <span className="pt-muted">Working…</span>}
           {keyPhase === 'rotate' && (
-            <span className="tt-confirm">
+            <span className="pt-confirm">
               Rotate this key? The current key stops working immediately.
-              <button type="button" className="tt-btn tt-btn-sm tt-btn-primary" onClick={rotate}>Rotate</button>
-              <button type="button" className="tt-btn tt-btn-sm" onClick={() => setKeyPhase(null)}>Cancel</button>
+              <button type="button" className="pt-btn pt-btn-sm pt-btn-primary" onClick={rotate}>Rotate</button>
+              <button type="button" className="pt-btn pt-btn-sm" onClick={() => setKeyPhase(null)}>Cancel</button>
             </span>
           )}
           {keyPhase === 'revoke' && (
-            <span className="tt-confirm">
-              Revoke this key? {team.name} will have no working key until you rotate one.
-              <button type="button" className="tt-btn tt-btn-sm tt-btn-danger" onClick={revoke}>Revoke</button>
-              <button type="button" className="tt-btn tt-btn-sm" onClick={() => setKeyPhase(null)}>Cancel</button>
+            <span className="pt-confirm">
+              Revoke this key? {project.name} will have no working key until you rotate one.
+              <button type="button" className="pt-btn pt-btn-sm pt-btn-danger" onClick={revoke}>Revoke</button>
+              <button type="button" className="pt-btn pt-btn-sm" onClick={() => setKeyPhase(null)}>Cancel</button>
             </span>
           )}
         </td>
-        <td>{team.priority}</td>
+        <td>{project.priority}</td>
         <td className="num ta-r">{editing ? field('rpm') : rl.rpm.toLocaleString()}</td>
         <td className="num ta-r">{editing ? field('tpm') : rl.tpm.toLocaleString()}</td>
-        <td className="num ta-r">{editing ? field('budget') : formatUSD(team.monthly_budget_usd)}</td>
-        <td className="num ta-r">{team.spent_usd == null ? '—' : formatUSD(team.spent_usd)}</td>
+        <td className="num ta-r">{editing ? field('budget') : formatUSD(project.monthly_budget_usd)}</td>
+        <td className="num ta-r">{project.spent_usd == null ? '—' : formatUSD(project.spent_usd)}</td>
         <td className="num" title={models.join(', ')}>
           {models.length} model{models.length === 1 ? '' : 's'}
         </td>
         <td>
-          {team.is_admin
-            ? <span className="tt-admin">Admin</span>
-            : <span className="tt-muted">·</span>}
+          {project.is_admin
+            ? <span className="pt-admin">Admin</span>
+            : <span className="pt-muted">·</span>}
         </td>
-        <td className="tt-actions">{actions}</td>
+        <td className="pt-actions">{actions}</td>
       </tr>
       {rotated && (
-        <tr className="tt-showonce-row">
+        <tr className="pt-showonce-row">
           <td colSpan={COLS}>
             <ShowOncePanel result={rotated} onDismiss={() => setRotated(null)} />
           </td>
         </tr>
       )}
       {error && (
-        <tr className="tt-error-row">
+        <tr className="pt-error-row">
           <td colSpan={COLS} role="alert">{error}</td>
         </tr>
       )}
@@ -319,13 +320,20 @@ function TeamRow({ team, callerTeamId, onChanged }) {
   )
 }
 
-// The create form. The organisation select is built from the organisations the
-// existing teams belong to — there is one today, and the field exists so the
-// concept is visible, not so a new one can be invented here. Models are offered
-// grouped under the providers that are ticked, so a model can only be allowed
-// alongside a provider that serves it.
-function CreateTeamForm({ teams, onCreated, onCancel }) {
-  const orgs = [...new Set(teams.map((t) => t.organization_id).filter(Boolean))].sort()
+// The create form. Models are offered grouped under the providers that are
+// ticked, so a model can only be allowed alongside a provider that serves it.
+//
+// The organisation field is superadmin-only (Multi-user, Step 3.4): the
+// server always creates a non-superadmin's project in their own organisation
+// regardless of what this form sends, so showing a picker with nothing real
+// to pick would be misleading rather than just unnecessary — an org with no
+// projects yet would render an empty select. A superadmin genuinely chooses
+// among the real organisations its own projects belong to.
+function CreateProjectForm({ projects, onCreated, onCancel }) {
+  const { isSuperadmin } = useSession()
+  const orgs = isSuperadmin
+    ? [...new Set(projects.map((p) => p.organization_id).filter(Boolean))].sort()
+    : []
 
   const [form, setForm] = useState({
     name: '', org: orgs[0] ?? '', priority: 'realtime', rpm: '', tpm: '', budget: '', isAdmin: false,
@@ -391,14 +399,14 @@ function CreateTeamForm({ teams, onCreated, onCancel }) {
       allowed_models: models,
       is_admin: form.isAdmin,
     }
-    if (form.org) body.organization_id = form.org
+    if (isSuperadmin && form.org) body.organization_id = form.org
 
     setBusy(true)
     setError(null)
     try {
-      onCreated(await createTeam(body))
+      onCreated(await createProject(body))
     } catch (err) {
-      setError(err.message || 'the team was not created')
+      setError(err.message || 'the project was not created')
       setBusy(false)
     }
   }
@@ -406,62 +414,64 @@ function CreateTeamForm({ teams, onCreated, onCancel }) {
   const offered = catalogue ? catalogue.filter((p) => providers.includes(p.name)) : []
 
   return (
-    <form className="tt-create" onSubmit={submit}>
-      <h3 className="tt-create-head">New team</h3>
+    <form className="pt-create" onSubmit={submit}>
+      <h3 className="pt-create-head">New project</h3>
 
-      <div className="tt-create-grid">
-        <label className="tt-field">
-          <span className="tt-label">Name</span>
-          <input className="tt-control" value={form.name} onChange={set('name')} placeholder="Initech Labs" disabled={busy} />
-          <span className="tt-hint">The team ID is derived from this and cannot be changed or reused.</span>
+      <div className="pt-create-grid">
+        <label className="pt-field">
+          <span className="pt-label">Name</span>
+          <input className="pt-control" value={form.name} onChange={set('name')} placeholder="Initech Labs" disabled={busy} />
+          <span className="pt-hint">The project ID is derived from this and cannot be changed or reused.</span>
         </label>
-        <label className="tt-field">
-          <span className="tt-label">Organisation</span>
-          <select className="tt-control num" value={form.org} onChange={set('org')} disabled={busy}>
-            {orgs.map((o) => <option key={o} value={o}>{o}</option>)}
-          </select>
-        </label>
-        <label className="tt-field">
-          <span className="tt-label">Priority</span>
-          <select className="tt-control" value={form.priority} onChange={set('priority')} disabled={busy}>
+        {isSuperadmin && (
+          <label className="pt-field">
+            <span className="pt-label">Organisation</span>
+            <select className="pt-control num" value={form.org} onChange={set('org')} disabled={busy}>
+              {orgs.map((o) => <option key={o} value={o}>{o}</option>)}
+            </select>
+          </label>
+        )}
+        <label className="pt-field">
+          <span className="pt-label">Priority</span>
+          <select className="pt-control" value={form.priority} onChange={set('priority')} disabled={busy}>
             {PRIORITIES.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
           </select>
         </label>
-        <label className="tt-field">
-          <span className="tt-label">Requests per minute</span>
-          <input className="tt-control num" type="number" min="1" step="1" value={form.rpm} onChange={set('rpm')} placeholder="60" disabled={busy} />
+        <label className="pt-field">
+          <span className="pt-label">Requests per minute</span>
+          <input className="pt-control num" type="number" min="1" step="1" value={form.rpm} onChange={set('rpm')} placeholder="60" disabled={busy} />
         </label>
-        <label className="tt-field">
-          <span className="tt-label">Tokens per minute</span>
-          <input className="tt-control num" type="number" min="1" step="1" value={form.tpm} onChange={set('tpm')} placeholder="100000" disabled={busy} />
+        <label className="pt-field">
+          <span className="pt-label">Tokens per minute</span>
+          <input className="pt-control num" type="number" min="1" step="1" value={form.tpm} onChange={set('tpm')} placeholder="100000" disabled={busy} />
         </label>
-        <label className="tt-field">
-          <span className="tt-label">Monthly budget (USD)</span>
-          <input className="tt-control num" type="number" min="0.01" step="0.01" value={form.budget} onChange={set('budget')} placeholder="50.00" disabled={busy} />
+        <label className="pt-field">
+          <span className="pt-label">Monthly budget (USD)</span>
+          <input className="pt-control num" type="number" min="0.01" step="0.01" value={form.budget} onChange={set('budget')} placeholder="50.00" disabled={busy} />
         </label>
       </div>
 
-      <div className="tt-allow">
-        <fieldset className="tt-allow-group">
-          <legend className="tt-label">Allowed providers</legend>
-          {catalogueError && <span className="tt-create-error">{catalogueError}</span>}
-          {!catalogue && !catalogueError && <span className="tt-hint">Loading providers…</span>}
+      <div className="pt-allow">
+        <fieldset className="pt-allow-group">
+          <legend className="pt-label">Allowed providers</legend>
+          {catalogueError && <span className="pt-create-error">{catalogueError}</span>}
+          {!catalogue && !catalogueError && <span className="pt-hint">Loading providers…</span>}
           {catalogue?.map((p) => (
-            <label key={p.name} className="tt-check">
+            <label key={p.name} className="pt-check">
               <input type="checkbox" checked={providers.includes(p.name)} onChange={() => toggleProvider(p.name)} disabled={busy} />
               <span className="num">{p.name}</span>
             </label>
           ))}
         </fieldset>
 
-        <fieldset className="tt-allow-group">
-          <legend className="tt-label">Allowed models</legend>
-          {offered.length === 0 && <span className="tt-hint">Tick a provider to choose from its models.</span>}
+        <fieldset className="pt-allow-group">
+          <legend className="pt-label">Allowed models</legend>
+          {offered.length === 0 && <span className="pt-hint">Tick a provider to choose from its models.</span>}
           {offered.map((p) => (
-            <div key={p.name} className="tt-models">
-              <span className="tt-models-provider num">{p.name}</span>
+            <div key={p.name} className="pt-models">
+              <span className="pt-models-provider num">{p.name}</span>
               {p.models.map((m) => (
-                <label key={`${p.name}/${m}`} className="tt-check">
+                <label key={`${p.name}/${m}`} className="pt-check">
                   <input type="checkbox" checked={models.includes(m)} onChange={() => toggleModel(m)} disabled={busy} />
                   <span className="num">{m}</span>
                 </label>
@@ -471,23 +481,23 @@ function CreateTeamForm({ teams, onCreated, onCancel }) {
         </fieldset>
       </div>
 
-      <label className="tt-check tt-create-admin">
+      <label className="pt-check pt-create-admin">
         <input type="checkbox" checked={form.isAdmin} onChange={set('isAdmin')} disabled={busy} />
-        <span>Admin — can manage teams and read every team's request logs</span>
+        <span>Admin — can manage projects and read every project's request logs</span>
       </label>
 
-      <div className="tt-create-foot">
-        <button type="submit" className="tt-btn tt-btn-primary" disabled={busy}>
-          {busy ? 'Creating…' : 'Create team'}
+      <div className="pt-create-foot">
+        <button type="submit" className="pt-btn pt-btn-primary" disabled={busy}>
+          {busy ? 'Creating…' : 'Create project'}
         </button>
-        <button type="button" className="tt-btn" onClick={onCancel} disabled={busy}>Cancel</button>
-        {error && <span className="tt-create-error" role="alert">{error}</span>}
+        <button type="button" className="pt-btn" onClick={onCancel} disabled={busy}>Cancel</button>
+        {error && <span className="pt-create-error" role="alert">{error}</span>}
       </div>
     </form>
   )
 }
 
-export default function TeamTable({ teams, callerTeamId, onChanged }) {
+export default function ProjectTable({ projects, callerProjectId, onChanged }) {
   const [creating, setCreating] = useState(false)
   const [created, setCreated] = useState(null) // { team, api_key, key, warning }
 
@@ -498,11 +508,11 @@ export default function TeamTable({ teams, callerTeamId, onChanged }) {
   }
 
   return (
-    <div className="tt-wrap">
-      <table className="table tt-table">
+    <div className="pt-wrap">
+      <table className="table pt-table">
         <thead>
           <tr>
-            <th>Team</th>
+            <th>Project</th>
             <th>Key</th>
             <th>Priority</th>
             <th className="ta-r">RPM</th>
@@ -515,28 +525,29 @@ export default function TeamTable({ teams, callerTeamId, onChanged }) {
           </tr>
         </thead>
         <tbody>
-          {teams.map((t) => (
-            <TeamRow key={t.id} team={t} callerTeamId={callerTeamId} onChanged={onChanged} />
+          {projects.map((p) => (
+            <ProjectRow key={p.id} project={p} callerProjectId={callerProjectId} onChanged={onChanged} />
           ))}
         </tbody>
       </table>
 
       {created && (
-        <div className="tt-created">
-          <p className="tt-created-note">
-            Created <span className="tt-name">{created.team.name}</span>{' '}
-            <span className="tt-id num">{created.team.id}</span>
+        <div className="pt-created">
+          <p className="pt-created-note">
+            {/* the create/rotate response's project object is still the wire field "team" */}
+            Created <span className="pt-name">{created.team.name}</span>{' '}
+            <span className="pt-id num">{created.team.id}</span>
           </p>
           <ShowOncePanel result={created} onDismiss={() => setCreated(null)} />
         </div>
       )}
 
       {creating ? (
-        <CreateTeamForm teams={teams} onCreated={onCreated} onCancel={() => setCreating(false)} />
+        <CreateProjectForm projects={projects} onCreated={onCreated} onCancel={() => setCreating(false)} />
       ) : (
-        <div className="tt-create-bar">
-          <button type="button" className="tt-btn" onClick={() => { setCreated(null); setCreating(true) }}>
-            New team
+        <div className="pt-create-bar">
+          <button type="button" className="pt-btn" onClick={() => { setCreated(null); setCreating(true) }}>
+            New project
           </button>
         </div>
       )}

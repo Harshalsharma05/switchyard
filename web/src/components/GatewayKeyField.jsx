@@ -24,10 +24,10 @@ export default function GatewayKeyField({ what }) {
 
   return (
     <div className="gateway-key">
-      <label htmlFor="gateway-key">Team API key</label>
+      <label htmlFor="gateway-key">Project API key</label>
       <p className="gateway-key-why">
-        {what} sends real requests to the gateway, which authenticates teams rather
-        than people. Your sign-in does not grant it — paste a team key to continue.
+        {what} sends real requests to the gateway, which authenticates projects rather
+        than people. Your sign-in does not grant it — paste a project's key to continue.
       </p>
       <div className="gateway-key-row">
         <input

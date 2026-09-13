@@ -78,7 +78,7 @@ export default function AuditLog() {
               <th>Time</th>
               <th>Actor</th>
               <th>Action</th>
-              <th>Team</th>
+              <th>Project</th>
               <th>Change</th>
             </tr>
           </thead>
@@ -98,8 +98,8 @@ export default function AuditLog() {
       <div className="audit-pager">
         <span className="audit-pager-info num">Page {cursors.length} · {rows.length} row{rows.length === 1 ? '' : 's'}</span>
         <div className="audit-pager-btns">
-          <button type="button" className="tt-btn" onClick={prev} disabled={!hasPrev}>Previous</button>
-          <button type="button" className="tt-btn" onClick={next} disabled={!hasNext}>Next</button>
+          <button type="button" className="pt-btn" onClick={prev} disabled={!hasPrev}>Previous</button>
+          <button type="button" className="pt-btn" onClick={next} disabled={!hasNext}>Next</button>
         </div>
       </div>
     </>

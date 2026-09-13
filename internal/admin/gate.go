@@ -116,6 +116,14 @@ func requireSuperadmin(log *slog.Logger) func(http.Handler) http.Handler {
 // always non-nil for a non-superadmin, even when their org has no teams yet
 // — an empty, non-nil slice means "match nothing," which is the correct
 // answer for a brand-new org, not "match everything."
+//
+// Multi-user Step 3.3's project switcher needs a non-superadmin to narrow to
+// one team too, so ?team= is honoured for any caller — but only when the
+// requested team is one of their own. A foreign or unknown id falls back to
+// the full org scope rather than an error: this is a display filter, not a
+// resource lookup, so there is nothing to 404 and no reason to hint at
+// whether the id exists (same instinct as teamInScope's 404-not-403 below,
+// applied to a filter instead of a path parameter).
 func orgScope(w http.ResponseWriter, r *http.Request, teams TeamStore, log *slog.Logger) ([]string, bool) {
 	c, ok := caller(r)
 	if !ok {
@@ -124,10 +132,18 @@ func orgScope(w http.ResponseWriter, r *http.Request, teams TeamStore, log *slog
 		return nil, false
 	}
 
-	if c.IsSuperadmin {
-		if team := r.URL.Query().Get("team"); team != "" {
-			return []string{team}, true
+	if requested := r.URL.Query().Get("team"); requested != "" {
+		if c.IsSuperadmin {
+			return []string{requested}, true
 		}
+		for _, t := range teams.List() {
+			if t.ID == requested && t.OrganizationID == c.OrgID {
+				return []string{requested}, true
+			}
+		}
+		// Not one of the caller's own teams — fall through to the unfiltered
+		// org scope below.
+	} else if c.IsSuperadmin {
 		return nil, true
 	}
 

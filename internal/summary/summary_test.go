@@ -100,7 +100,7 @@ func TestBuildScopesTeamLabelledMetrics(t *testing.T) {
 
 	svc.Build(context.Background(), Options{Range: "1h", TeamIDs: []string{"globex"}})
 
-	var reqQ, overheadQ string
+	var reqQ, overheadQ, tokensQ string
 	for _, q := range f.asked() {
 		if strings.Contains(q, "switchyard_requests_total") && !strings.Contains(q, "5..") {
 			reqQ = q
@@ -108,12 +108,18 @@ func TestBuildScopesTeamLabelledMetrics(t *testing.T) {
 		if strings.Contains(q, "gateway_overhead") {
 			overheadQ = q
 		}
+		if strings.Contains(q, "switchyard_tokens_total") {
+			tokensQ = q
+		}
 	}
 	if !strings.Contains(reqQ, `switchyard_requests_total{team="globex"}`) {
 		t.Errorf("request query not scoped to team: %s", reqQ)
 	}
 	if strings.Contains(overheadQ, "team=") {
 		t.Errorf("overhead query must not be team-scoped: %s", overheadQ)
+	}
+	if !strings.Contains(tokensQ, `switchyard_tokens_total{team="globex"}`) {
+		t.Errorf("tokens query not scoped to team: %s", tokensQ)
 	}
 }
 

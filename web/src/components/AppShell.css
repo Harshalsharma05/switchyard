@@ -81,6 +81,19 @@
 }
 .topbar-signout:hover { color: var(--text-primary); background: var(--bg-raised); }
 
+/* --- project scope selector (Step 3.3) --- */
+.projectsel {
+  height: 28px;
+  padding: 0 var(--space-2);
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  cursor: pointer;
+}
+.projectsel:hover { color: var(--text-primary); background: var(--bg-raised); }
+
 .content {
   width: 100%;
   max-width: 1440px;

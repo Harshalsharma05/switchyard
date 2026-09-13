@@ -1,21 +1,29 @@
-// Usage & Cost: month-to-date team spend against budget (Step 6.1), the
-// Redis-vs-request-log reconciliation check (Step 6.1), the cost trend split by
-// provider / model / team (Step 6.2), and the cache / routing / fallback
-// attribution panels (Step 6.3). Team management moved to Settings in Step 6.4.
+// Usage & Cost: the org-wide roll-up (Multi-user, Step 3.2) — total spend,
+// requests, tokens, cache hit rate, and error rate aggregated across every
+// project in the signed-in organisation — followed by month-to-date project
+// spend against budget (Step 6.1), the Redis-vs-request-log reconciliation
+// check (Step 6.1), the cost trend split by provider / model / project (Step
+// 6.2), and the cache / routing / fallback attribution panels (Step 6.3).
+// Project management moved to Settings in Step 6.4.
 import { useCallback, useState } from 'react'
-import { fetchMe } from '../api/session.js'
-import { fetchTeams } from '../api/teams.js'
+import { fetchProjects } from '../api/projects.js'
 import { fetchAttribution, fetchCosts, fetchReconciliation } from '../api/usage.js'
 import { fetchQualityFeedback } from '../api/quality.js'
-import { Card } from '../components/primitives.jsx'
+import { fetchSummary } from '../api/summary.js'
+import { Card, KpiCard } from '../components/primitives.jsx'
 import { CostTrendChart } from '../components/charts.jsx'
 import SpendCard from '../components/SpendCard.jsx'
 import { EmptyState, ErrorState, Loading } from '../components/states.jsx'
 import { useSession } from '../hooks/useSession.js'
+import { useProjectScope } from '../hooks/useProjectScope.js'
 import { usePolling } from '../hooks/usePolling.js'
-import { formatUSD, isZeroUSD } from '../utils/format.js'
+import { formatCount, formatPercent, formatUSD, isZeroUSD } from '../utils/format.js'
 import '../components/charts.css'
 import './UsageCost.css'
+
+// null and undefined both mean "no data" and must reach KpiCard as null so it
+// renders an em dash, never a formatted zero (mirrors Overview's own `kpi`).
+const kpi = (v, fmt) => (v == null ? null : fmt(v))
 
 // A small inline check — a verification mark on the reconciliation line, not a
 // status pill. 12px, healthy colour (Step 3, DESIGN.md: no emoji as status).
@@ -31,7 +39,7 @@ function CheckMark() {
 
 const RANGES = ['24h', '7d', '30d']
 
-function Seg({ options, value, onChange, label }) {
+function Seg({ options, value, onChange, label, renderLabel = (o) => o }) {
   return (
     <div className="seg" role="group" aria-label={label}>
       {options.map((o) => (
@@ -42,7 +50,7 @@ function Seg({ options, value, onChange, label }) {
           aria-pressed={o === value}
           onClick={() => onChange(o)}
         >
-          {o}
+          {renderLabel(o)}
         </button>
       ))}
     </div>
@@ -67,7 +75,7 @@ function ReconStrip({ state }) {
   const off = r.teams.filter((t) => t.within_tolerance === false)
   return (
     <div className="recon recon-warn" role="status">
-      {r.degraded && <div>Some teams’ Redis spend could not be read.</div>}
+      {r.degraded && <div>Some projects’ Redis spend could not be read.</div>}
       {off.length > 0 && (
         <>
           <div>Redis and the request log disagree beyond tolerance for {r.period}:</div>
@@ -263,21 +271,36 @@ function QualityFeedbackCard({ range }) {
 
 export default function UsageCost() {
   const { isSuperadmin } = useSession()
+  const { projectId } = useProjectScope()
   const [range, setRange] = useState('7d')
   const [by, setBy] = useState('provider')
 
-  const loadSpend = useCallback(
-    (signal) => (isSuperadmin ? fetchTeams(signal) : fetchMe(signal)),
-    [isSuperadmin],
-  )
+  // Cost trend's "by project" split stops meaning anything once the top bar
+  // has already narrowed to one — drop back to a dimension that still varies.
+  // Adjusted during render (React's pattern for "reset state when a prop
+  // changes"), not in an effect, so the setState below doesn't cascade.
+  const [byScopedTo, setByScopedTo] = useState(projectId)
+  if (byScopedTo !== projectId) {
+    setByScopedTo(projectId)
+    if (projectId && by === 'team') setBy('provider')
+  }
+
+  // /admin/teams already scopes to the caller's own organisation for any
+  // signed-in user (Phase 2) — a superadmin with no ?team= filter sees every
+  // org instead, same as it always has. Neither case needs fetchMe's
+  // single-project fallback any more.
+  const loadSpend = useCallback((signal) => fetchProjects(signal), [])
   const spend = usePolling(loadSpend, { interval: 10000 })
 
-  const loadRecon = useCallback((signal) => fetchReconciliation(signal), [])
+  const loadSummary = useCallback((signal) => fetchSummary(range, projectId, signal), [range, projectId])
+  const summary = usePolling(loadSummary, { interval: 15000 })
+
+  const loadRecon = useCallback((signal) => fetchReconciliation({ team: projectId, signal }), [projectId])
   const recon = usePolling(loadRecon, { interval: 30000, enabled: isSuperadmin })
 
   const loadCosts = useCallback(
-    (signal) => fetchCosts({ range, by, signal }),
-    [range, by],
+    (signal) => fetchCosts({ range, by, team: projectId, signal }),
+    [range, by, projectId],
   )
   const costs = usePolling(loadCosts, {
     interval: 15000,
@@ -285,29 +308,89 @@ export default function UsageCost() {
   })
 
   const loadAttribution = useCallback(
-    (signal) => fetchAttribution({ range, signal }),
-    [range],
+    (signal) => fetchAttribution({ range, team: projectId, signal }),
+    [range, projectId],
   )
   const attribution = usePolling(loadAttribution, {
     interval: 30000,
     ignoreError: (e) => e.type === 'request_log_disabled',
   })
 
-  const teams = isSuperadmin ? (spend.data ?? []) : spend.data ? [spend.data] : []
-  const byOptions = isSuperadmin ? ['provider', 'model', 'team'] : ['provider', 'model']
+  // Selecting one project in the top bar collapses every comparison view on
+  // this screen down to it (Step 3.3) — the spend-card grid becomes one card,
+  // and there is nothing left to split the cost trend "by project" either.
+  const allProjects = spend.data ?? []
+  const projects = projectId ? allProjects.filter((p) => p.id === projectId) : allProjects
+  // 'team' stays the wire value sent as `by` — the /admin/costs grouping key is
+  // unchanged — but the segment reads "project" to match the renamed UI concept.
+  const byOptions = projectId ? ['provider', 'model'] : ['provider', 'model', 'team']
+  const byLabel = (o) => (o === 'team' ? 'project' : o)
+
+  // Total spend is the sum of each project's own month-to-date figure, not a
+  // second query — same source as the per-project cards below, so the two can
+  // never disagree. A project with an unread Redis counter (spent_usd null)
+  // is excluded from the sum rather than treated as zero.
+  const knownSpend = projects.filter((p) => p.spent_usd != null)
+  const totalSpendUSD = knownSpend.length ? knownSpend.reduce((sum, p) => sum + p.spent_usd, 0) : null
+  const s = summary.data
 
   return (
     <>
       <h1 className="page-title">Usage &amp; cost</h1>
 
+      {(summary.loading && !s) || (spend.loading && !spend.data) ? (
+        <Loading rows={2} />
+      ) : (summary.error && !s) && (spend.error && !spend.data) ? (
+        <ErrorState
+          message="Could not read the organisation summary."
+          onRetry={() => { summary.refresh(); spend.refresh() }}
+        />
+      ) : (
+        <div className="kpi-row">
+          <KpiCard
+            label="Total spend"
+            value={kpi(totalSpendUSD, formatUSD)}
+            context={projects.length ? `across ${projects.length} project${projects.length === 1 ? '' : 's'}` : undefined}
+            empty={projects.length ? 'Some projects’ spend could not be read' : 'No projects yet'}
+          />
+          <KpiCard
+            label="Requests"
+            value={kpi(s?.requests?.total, formatCount)}
+            context={`in the last ${range}`}
+            empty="No traffic in this window"
+          />
+          <KpiCard
+            label="Tokens"
+            value={kpi(s?.tokens?.total, formatCount)}
+            context={`in the last ${range}`}
+            empty="No traffic in this window"
+          />
+          <KpiCard
+            label="Cache hit rate"
+            value={s?.cache?.enabled ? kpi(s.cache.hit_rate, formatPercent) : null}
+            empty="Not yet enabled"
+          />
+          <KpiCard
+            label="Error rate"
+            value={kpi(s?.requests?.error_rate, formatPercent)}
+            context="5xx responses only"
+            empty="No traffic in this window"
+          />
+        </div>
+      )}
+
       {spend.loading && !spend.data ? (
         <Loading rows={2} />
       ) : spend.error && !spend.data ? (
-        <ErrorState message="Could not read team spend." onRetry={spend.refresh} />
+        <ErrorState message="Could not read project spend." onRetry={spend.refresh} />
+      ) : projects.length === 0 ? (
+        <EmptyState>
+          {projectId ? 'This project could not be found.' : 'This organisation has no projects yet.'}
+        </EmptyState>
       ) : (
         <>
           <div className="usage-cards">
-            {teams.map((t) => (
+            {projects.map((t) => (
               <SpendCard
                 key={t.id}
                 name={t.name}
@@ -325,7 +408,7 @@ export default function UsageCost() {
         title="Cost trend"
         action={
           <div className="usage-controls">
-            <Seg options={byOptions} value={by} onChange={setBy} label="Split by" />
+            <Seg options={byOptions} value={by} onChange={setBy} label="Split by" renderLabel={byLabel} />
             <Seg options={RANGES} value={range} onChange={setRange} label="Time range" />
           </div>
         }

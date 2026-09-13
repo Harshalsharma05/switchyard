@@ -1,4 +1,4 @@
-/* Team spend card (Step 6.1): a KPI card with a 4px budget bar beneath. */
+/* Project spend card (Step 6.1): a KPI card with a 4px budget bar beneath. */
 .spend {
   display: flex;
   flex-direction: column;

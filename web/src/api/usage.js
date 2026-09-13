@@ -12,14 +12,20 @@ export function fetchCosts({ range = '24h', by = 'provider', team, signal } = {}
 }
 
 // Admin-only: compares every team's live Redis budget counter against the sum
-// of its logged request costs for the current month.
-export function fetchReconciliation(signal) {
-  return request('/admin/reconciliation', { signal })
+// of its logged request costs for the current month. team narrows to one
+// project (Step 3.3).
+export function fetchReconciliation({ team, signal } = {}) {
+  const q = new URLSearchParams()
+  if (team) q.set('team', team)
+  const qs = q.toString()
+  return request(`/admin/reconciliation${qs ? `?${qs}` : ''}`, { signal })
 }
 
 // "What did resilience cost you": the fallback cost delta over `range`, split
 // into what fallbacks added and what they saved. Cache and routing savings are
-// null until Phases 7 and 8.
-export function fetchAttribution({ range = '24h', signal } = {}) {
-  return request(`/admin/attribution?range=${encodeURIComponent(range)}`, { signal })
+// null until Phases 7 and 8. team narrows to one project (Step 3.3).
+export function fetchAttribution({ range = '24h', team, signal } = {}) {
+  const q = new URLSearchParams({ range })
+  if (team) q.set('team', team)
+  return request(`/admin/attribution?${q}`, { signal })
 }

@@ -22,6 +22,19 @@
 .card-head > :not(.card-title) { margin-left: auto; }
 
 /* --- KPI --- */
+
+/* Five equal cards across the full width — shared by any screen that shows a
+   KpiCard row (Overview, Usage & Cost). */
+.kpi-row {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: var(--space-3);
+  margin-bottom: var(--space-6);
+}
+@media (max-width: 1100px) {
+  .kpi-row { grid-template-columns: repeat(2, 1fr); }
+}
+
 .kpi {
   display: flex;
   flex-direction: column;

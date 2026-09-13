@@ -268,7 +268,7 @@ Layout only. Data and behaviour are in `PART2_PLAN.md`.
 
 **Request Logs** — filter bar pinned above the table: selects and a time range, with an active-filter count and a clear-all. Table fills the rest. Row click opens the right drawer at `480px` with the full record, the routing decision, the fallback chain if any, and the Jaeger link as a labelled `↗` action.
 
-**Usage & Cost** — team spend cards at the top, each a KPI card with a thin progress bar beneath the value (`4px`, `--border` track, status colour fill by threshold). Cost trend chart below at full width. Attribution panels — cache savings, routing savings, fallback cost — as a three-up row beneath. Team management, admin only, as a table at the bottom with inline edit.
+**Usage & Cost** — the org roll-up (Multi-user, Step 3.2) at the top: a five-card KPI row — total spend, requests, tokens, cache hit rate, error rate — aggregated across every project in the signed-in organisation, using the same `KpiCard` and `.kpi-row` grid as Overview. Below it, one project spend card per project, each a KPI card with a thin progress bar beneath the value (`4px`, `--border` track, status colour fill by threshold); an organisation with no projects yet shows a one-line empty state instead of an empty grid. Cost trend chart below at full width, splittable by provider, model, or project. Attribution panels — cache savings, routing savings, fallback cost — as a three-up row beneath. Project management lives in Settings, not on this screen.
 
 ---
 
