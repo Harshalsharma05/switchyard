@@ -338,14 +338,37 @@ Automate the highest-value cases as integration tests so a future change can't s
 Out loud, from memory.
 
 1. You have two authentication systems. Why, and what stops one being used for the other?
+   **A:** Team API keys authenticate machines on `:8080`; session cookies authenticate humans on `:9090`. Neither middleware reads the other's credential — `RequireSession` never looks at `Authorization`, and the gateway's key auth never looks at cookies — so it's not a rule rejecting the wrong one, there's nothing for it to trigger at all.
+
 2. Your JWT is in an httpOnly cookie. What attack does that prevent, and what does it introduce?
+   **A:** Prevents XSS from reading the token via `document.cookie`. Introduces CSRF (the cookie auto-attaches to cross-site requests) and means the frontend can't read the token's expiry itself, so session state comes from a `GET /auth/me` call instead of decoding it client-side.
+
 3. How do you prevent CSRF, and why isn't `SameSite=Lax` enough on its own?
+   **A:** Signed double-submit — an `sy_csrf` cookie (JS-readable) plus an `X-CSRF-Token` header the frontend echoes back, HMAC'd so an attacker can set the cookie but can't forge a matching signature. `SameSite=Lax` still allows cookies on top-level cross-site navigations and isn't reliably enforced everywhere (e.g. across the dev/prod reverse proxies here), so it narrows the attack surface but isn't a substitute for a token an attacker genuinely cannot produce.
+
 4. Where does the org scope on a query come from, and why not from the request?
+   **A:** The verified JWT claim (`Caller.OrgID`), attached to the request context after signature verification. Never from a query param, path, or body — those are fully client-controlled, so org A could simply claim to be org B.
+
 5. Before this work, could one user receive another user's cached response? Why, and what did you change?
+   **A:** No — the cache was already keyed per **team**, tighter than org, so no cross-tenant hit was ever reachable even before this phase. What actually changed was a deliberate widening from team-scope to org-scope, so one person's several projects in the same org stop paying twice for the same answer, with a per-team `cache_isolated` opt-out preserved for a project that wants its own bucket.
+
 6. Why is the cache scoped by org rather than by team?
+   **A:** Within one org, sharing across a person's own projects is useful and safe — still one tenant. Across orgs it's a real leak, so org, not team, is the boundary that actually matters for isolation.
+
 7. Your cache hit rate dropped after scoping. Why is that the right trade?
+   **A:** Correction: it didn't drop, it **rose** — the cache was already team-scoped (narrower) going in, so widening to org-scope means more requests share a bucket, not fewer. The plan assumed the cache started unscoped; it didn't, so this premise doesn't hold for what was actually built.
+
 8. Cross-org access returns 404, not 403. Why does that distinction matter?
+   **A:** A 403 confirms the resource exists, which is itself a disclosure about another tenant. 404 is indistinguishable from "doesn't exist" — costs a worse debugging experience on a fat-fingered ID, in exchange for never confirming existence to a prober.
+
 9. Someone signs up with Google, then tries email+password with the same address. What happens?
+   **A:** Doesn't apply — email+password sign-in was cut entirely. Two credential types on one email created an account-linking attack surface with no safe automatic resolution, and closing it properly needed email delivery this project doesn't have. Google's `sub` (not email) is the only identity key; `password_hash` stays nullable in the schema in case this is revisited.
+
 10. A user's JWT is stolen. How long is it useful, and what can they do with it?
+    **A:** Up to 15 minutes — the access token's lifetime — since revocation isn't instant (`sid` isn't checked against the database per request). In that window it's a fully valid session: whatever that user could do through the dashboard, the thief can do, until it expires or a refresh attempt trips reuse detection and revokes everything.
+
 11. `is_admin` used to mean admin of everything. What does it mean now, and how did you avoid missing one check?
+    **A:** It grants nothing now — team-level `is_admin` was already dead by the time sessions replaced team keys on the admin port; the field only survives because the console's create form still sends it. Real authorization is `Caller.IsSuperadmin` from the JWT versus ordinary org membership. Avoided missing a check by centralizing org-ownership in one chokepoint (`teamInScope`) every `{id}` route resolves through, then testing each route individually against a foreign team rather than assuming the pattern held everywhere.
+
 12. Which single endpoint would you expect to have leaked, and how did you confirm it doesn't?
+    **A:** `DELETE /admin/cache` — it's the one mutating endpoint that splits authorization inside the handler instead of at the route (team-purge is org-admin, prefix/all is superadmin-only, one function decides both), and it's the one gap this phase's integration tests didn't close — only unit-tested. If anything slipped through, that's where I'd look first.

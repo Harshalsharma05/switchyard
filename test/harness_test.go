@@ -125,6 +125,22 @@ func harnessEnv(key, fallback string) string {
 
 func testPostgresHost() string { return harnessEnv("SWITCHYARD_POSTGRES_HOST", "localhost:5432") }
 
+// postgresDSN builds a connection string to db on the harness's Postgres
+// server, using the same SWITCHYARD_POSTGRES_* variables and defaults the
+// gateway and cmd/migrate read. Split out of createTestDatabase so a test
+// needing a direct connection to its own already-created database — Phase 4's
+// tenant-isolation fixture, seeding rows no HTTP endpoint can produce — builds
+// the same DSN rather than reimplementing it.
+func postgresDSN(db string) string {
+	return (&url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(harnessEnv("SWITCHYARD_POSTGRES_USER", "switchyard"), os.Getenv("POSTGRES_PASSWORD")),
+		Host:     testPostgresHost(),
+		Path:     "/" + db,
+		RawQuery: "sslmode=" + harnessEnv("SWITCHYARD_POSTGRES_SSLMODE", "disable"),
+	}).String()
+}
+
 // createTestDatabase makes a throwaway database for one gateway and drops it
 // when the test ends. A whole database rather than a schema, because the
 // gateway connects to a database by name and has no search_path setting —
@@ -139,13 +155,7 @@ func createTestDatabase(t *testing.T) string {
 	if pw == "" {
 		t.Skip("set POSTGRES_PASSWORD (and run Postgres): the gateway stores teams there and will not start without it")
 	}
-	dsn := (&url.URL{
-		Scheme:   "postgres",
-		User:     url.UserPassword(harnessEnv("SWITCHYARD_POSTGRES_USER", "switchyard"), pw),
-		Host:     testPostgresHost(),
-		Path:     "/" + harnessEnv("SWITCHYARD_POSTGRES_DB", "switchyard"),
-		RawQuery: "sslmode=" + harnessEnv("SWITCHYARD_POSTGRES_SSLMODE", "disable"),
-	}).String()
+	dsn := postgresDSN(harnessEnv("SWITCHYARD_POSTGRES_DB", "switchyard"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -462,8 +472,19 @@ func apiKeyEnvVar(providerName string) string {
 const harnessJWTSecret = "integration-harness-signing-secret"
 
 // adminSession returns the Cookie and X-CSRF-Token values for a superadmin
-// request to the admin port.
+// request to the admin port. It is sessionFor's original single-org shape,
+// kept as a thin wrapper so every test written before Phase 4 needs no change.
 func adminSession(t *testing.T) (cookie, csrf string) {
+	t.Helper()
+	return sessionFor(t, "usr_harness", "personal", true)
+}
+
+// sessionFor mints the Cookie and X-CSRF-Token values for an arbitrary user,
+// organisation, and superadmin flag, signed with the same harnessJWTSecret the
+// gateway is started with. Phase 4 needs more than one identity live at
+// once — an org-A user, an org-B user, and the superadmin, all against the
+// same running gateway — which a single hardcoded session cannot express.
+func sessionFor(t *testing.T, userID, orgID string, superadmin bool) (cookie, csrf string) {
 	t.Helper()
 	enc := base64.RawURLEncoding.EncodeToString
 	sign := func(b string) string {
@@ -473,16 +494,16 @@ func adminSession(t *testing.T) (cookie, csrf string) {
 	}
 
 	payload, err := json.Marshal(map[string]any{
-		"sub": "usr_harness", "org": "personal", "sa": true, "sid": "ses_harness",
+		"sub": userID, "org": orgID, "sa": superadmin, "sid": "ses_" + userID,
 		"iat": time.Now().Unix(), "exp": time.Now().Add(time.Hour).Unix(),
 	})
 	if err != nil {
-		t.Fatalf("marshalling harness claims: %v", err)
+		t.Fatalf("marshalling session claims: %v", err)
 	}
 	body := enc([]byte(`{"alg":"HS256","typ":"JWT"}`)) + "." + enc(payload)
 	token := body + "." + sign(body)
 
-	nonce := "harness"
+	nonce := "harness-" + userID
 	csrf = nonce + "." + sign(nonce)
 	return "sy_session=" + token + "; sy_csrf=" + csrf, csrf
 }
@@ -491,6 +512,12 @@ type gatewayInstance struct {
 	BaseURL  string
 	AdminURL string
 	Client   *http.Client
+
+	// DB is the throwaway database this gateway is running against, for a test
+	// that needs to write rows over a direct Postgres connection — fixture data
+	// no HTTP endpoint can produce, such as Phase 4's backdated request and
+	// audit history. Pair it with postgresDSN to connect.
+	DB string
 
 	providersPath string
 }
@@ -597,6 +624,7 @@ func startGateway(t *testing.T, cfg harnessConfig, upstreams ...*mockUpstream) *
 		BaseURL:       baseURL,
 		AdminURL:      adminURL,
 		Client:        &http.Client{},
+		DB:            db,
 		providersPath: providersPath,
 	}
 }
